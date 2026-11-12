@@ -170,7 +170,7 @@ function cmdBuild(args) {
   const voiceDir = path.join(rtDir, 'voice');
 
   const { sandbox } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: false, lang });
-  const { timingsRel, audioRel } = resolveLangMediaPaths(sandbox.V.config, lang);
+  const { timingsRel, audioRel, bgmRel } = resolveLangMediaPaths(sandbox.V.config, lang);
   const langArgs = lang ? ['--lang', lang] : [];
 
   fs.rmSync(rtDir, { recursive: true, force: true });
@@ -181,9 +181,11 @@ function cmdBuild(args) {
   run(py, [path.join(TOOLS_DIR, 'voice.py'), linesJson, voiceDir, path.join(videoDir, timingsRel)],
     `[2/4] Synthesizing TTS voice, word boundaries & 30Hz envelopes...`, ttsEnv);
   run(process.execPath, [path.join(TOOLS_DIR, 'export.mjs'), videoId, linesJson, cuesJson, ...langArgs],
-    `[3/4] Computing timeline cues, subtitles & mixing soundtrack...`, ttsEnv);
+    `[3/4] Computing timeline cues, subtitles & mixing soundtrack + BGM stems...`, ttsEnv);
   if (audioRel) {
-    run(py, [path.join(TOOLS_DIR, 'mix.py'), cuesJson, voiceDir, path.join(videoDir, audioRel)], null, ttsEnv);
+    const mixArgs = [path.join(TOOLS_DIR, 'mix.py'), cuesJson, voiceDir, path.join(videoDir, audioRel)];
+    if (bgmRel) mixArgs.push(path.join(videoDir, bgmRel));
+    run(py, mixArgs, null, ttsEnv);
   }
   fs.rmSync(rtDir, { recursive: true, force: true });
 
@@ -198,7 +200,7 @@ function cmdBuild(args) {
 
 function printHelp() {
   console.log([
-    'html-video CLI (v2.3)',
+    'html-video CLI (v2.4)',
     '  html-video init <id> [--title "..."] [--aspect 16:9|9:16|1:1] [--skill]',
     '  html-video skill [--out .agents/skills/html-video]',
     '  html-video serve [port] [host] [--no-watch]',
@@ -206,7 +208,7 @@ function printHelp() {
     '  html-video verify [video-id ...] [--stamp-baked] [--visual] [--strict] [--lang en]',
     '  html-video audit [video-id ...] [--strict] [--screenshots <dir>] [--lang en]',
     '  html-video storyboard [video-id] [out.html] [--per-cue] [--pdf] [--lang en]',
-    '  html-video render [video-id] [output.mp4] [--workers N] [--scene K] [--range t0:t1] [--fps N] [--lang en] [--no-cache] [--no-frame-reuse]',
+    '  html-video render [video-id] [output.mp4] [--workers N] [--scene K] [--range t0:t1] [--fps N] [--lang en] [--no-bgm] [--no-cache] [--no-frame-reuse]',
     '  html-video bundle [video-id ... | --single | --all] [--out dist]',
     '  html-video manifest',
   ].join('\n'));

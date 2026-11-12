@@ -65,7 +65,7 @@ function computeSceneSubCuesGrid(scenes) {
 }
 
 export function stampBakedLayout(videoId, lang = '') {
-  const { sandbox, videoDir, timingsPath } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: true, lang });
+  const { sandbox, videoDir, timingsPath, bgmRel } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: true, lang });
   const V = sandbox.V;
   const bakedLayout = {
     duration: round3(V.duration),
@@ -80,6 +80,9 @@ export function stampBakedLayout(videoId, lang = '') {
     const fromLegacy = resolveVoiceSubCuesGrid(V.voice);
     V.voice.subCues = fromLegacy.length ? fromLegacy : computeSceneSubCuesGrid(V.scenes);
   }
+  const candBgm = V.voice.bgmSrc || bgmRel;
+  if (candBgm && fs.existsSync(path.join(videoDir, candBgm))) V.voice.bgmSrc = candBgm;
+  else delete V.voice.bgmSrc;
   V.voice.bakedLayout = bakedLayout;
 
   const out = [
@@ -211,6 +214,22 @@ function verifyDecodedWaveform(V, cfg, samples, sr, videoId, totalLines, errors)
   console.log(`[${videoId}] Audio verified: V.duration=${V.duration.toFixed(3)}s, m4a=${actualDur.toFixed(3)}s (diff=${durDiff.toFixed(4)}s), scenes=${V.scenes.length}, lines=${totalLines}`);
 }
 
+function verifyBgmStem(videoDir, V, voice, ffmpegBin, errors) {
+  if (!voice.bgmSrc) return;
+  const bgmPath = path.join(videoDir, voice.bgmSrc);
+  if (!fs.existsSync(bgmPath)) { errors.push(`Missing physical BGM stem: ${bgmPath}`); return; }
+  const sr = 8000;
+  const dec = spawnSync(ffmpegBin, ['-v', 'error', '-i', bgmPath, '-f', 'f32le', '-ac', '1', '-ar', String(sr), '-'], { maxBuffer: 60 * 1024 * 1024 });
+  if (dec.status !== 0 || !dec.stdout || !dec.stdout.byteLength) {
+    errors.push(`Failed to decode BGM stem ${bgmPath} via ffmpeg`);
+    return;
+  }
+  const bgmDur = Math.floor(dec.stdout.byteLength / 4) / sr;
+  if (Math.abs(bgmDur - V.duration) > 0.12) {
+    errors.push(`Physical BGM duration (${bgmDur.toFixed(3)}s) differs from V.duration (${V.duration.toFixed(3)}s)`);
+  }
+}
+
 function verifyPhysicalAudio(videoId, videoDir, V, cfg, voice, audioRelFallback, ffmpegBin, totalLines, errors) {
   if (cfg.audioSrc === false || voice.src === false) return;
   const audioPath = path.join(videoDir, voice.src || audioRelFallback || 'assets/soundtrack.m4a');
@@ -223,6 +242,7 @@ function verifyPhysicalAudio(videoId, videoDir, V, cfg, voice, audioRelFallback,
   }
   const samples = new Float32Array(dec.stdout.buffer, dec.stdout.byteOffset, Math.floor(dec.stdout.byteLength / 4));
   verifyDecodedWaveform(V, cfg, samples, sr, videoId, totalLines, errors);
+  verifyBgmStem(videoDir, V, voice, ffmpegBin, errors);
 }
 
 export function verifyVideo(videoId, ffmpegBin, lang = '') {

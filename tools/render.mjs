@@ -19,24 +19,37 @@ const OPT_HANDLERS = {
   '--lang': (o, v) => { o.lang = v; },
 };
 
+const BOOLEAN_FLAGS = {
+  '--no-cache': 'noCache',
+  '--no-frame-reuse': 'noFrameReuse',
+  '--no-bgm': 'noBgm',
+};
+
 function parseRenderArgs(argv) {
-  const opts = { workers: null, scene: null, range: null, fps: null, lang: '', noCache: false, noFrameReuse: false };
+  const opts = { workers: null, scene: null, range: null, fps: null, lang: '', noCache: false, noFrameReuse: false, noBgm: false };
   const pos = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--no-cache') { opts.noCache = true; continue; }
-    if (a === '--no-frame-reuse') { opts.noFrameReuse = true; continue; }
+    if (BOOLEAN_FLAGS[a]) { opts[BOOLEAN_FLAGS[a]] = true; continue; }
     if (OPT_HANDLERS[a] && i + 1 < argv.length) { OPT_HANDLERS[a](opts, argv[++i]); continue; }
     if (!a.startsWith('--')) pos.push(a);
   }
   return { opts, pos };
 }
 
-function resolveAudioFile(videoDir, sandbox, cfg, audioRelDefault) {
-  if (cfg.audioSrc === false) return { audioPath: null, hasAudio: false };
-  const audioRel = (sandbox.V.voice && sandbox.V.voice.src) || audioRelDefault || 'assets/soundtrack.m4a';
+function resolveAudioFile(videoDir, sandbox, cfg, audioRelDefault, bgmRelDefault, noBgm) {
+  if (cfg.audioSrc === false) return { audioPath: null, hasAudio: false, bgmPath: null, hasBgm: false };
+  const voice = sandbox.V.voice || {};
+  const audioRel = voice.src || audioRelDefault || 'assets/soundtrack.m4a';
   const audioPath = path.join(videoDir, audioRel);
-  return { audioPath, hasAudio: fs.existsSync(audioPath) };
+  const bgmRel = !noBgm && (voice.bgmSrc || cfg.bgmSrc || bgmRelDefault || '');
+  const bgmPath = bgmRel ? path.join(videoDir, bgmRel) : null;
+  return {
+    audioPath,
+    hasAudio: fs.existsSync(audioPath),
+    bgmPath,
+    hasBgm: Boolean(bgmPath && fs.existsSync(bgmPath)),
+  };
 }
 
 function buildRenderSuffix(opts) {
@@ -46,14 +59,14 @@ function buildRenderSuffix(opts) {
   return suffix;
 }
 
-function resolveOutAndAudio(videoId, videoDir, sandbox, cfg, opts, pos, audioRelDefault) {
-  const { audioPath, hasAudio } = resolveAudioFile(videoDir, sandbox, cfg, audioRelDefault);
+function resolveOutAndAudio(videoId, videoDir, sandbox, cfg, opts, pos, audioRelDefault, bgmRelDefault) {
+  const audioInfo = resolveAudioFile(videoDir, sandbox, cfg, audioRelDefault, bgmRelDefault, opts.noBgm);
   const firstIsMp4 = Boolean(pos[0] && pos[0].endsWith('.mp4'));
   const suffix = buildRenderSuffix(opts);
   const baseName = cfg.outputName || `${videoId}.mp4`;
   const defaultOutName = suffix ? baseName.replace(/\.mp4$/i, `${suffix}.mp4`) : baseName;
   const outPath = firstIsMp4 ? path.resolve(pos[0]) : path.resolve(pos[1] || path.join(ROOT, defaultOutName));
-  return { outPath, audioPath, hasAudio };
+  return { outPath, ...audioInfo };
 }
 
 function resolveTimeWindow(scenes, fullDur, hasAudio, opts) {
@@ -290,7 +303,12 @@ async function renderMissingSegments({ misses, workerCount, videoId, W, H, fps, 
   }
 }
 
-async function stitchSegmentsAndAudio({ segments, tmpDir, ffmpegBin, hasAudio, audioPath, audioBitrate, isSlice, startSec, renderDur, outPath }) {
+function pushSlicedAudioInput(muxArgs, filePath, isSlice, startSec, renderDur) {
+  if (isSlice) muxArgs.push('-ss', startSec.toFixed(3), '-t', renderDur.toFixed(3));
+  muxArgs.push('-i', filePath);
+}
+
+async function stitchSegmentsAndAudio({ segments, tmpDir, ffmpegBin, hasAudio, audioPath, hasBgm, bgmPath, audioBitrate, isSlice, startSec, renderDur, outPath }) {
   fs.mkdirSync(tmpDir, { recursive: true });
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   const listFile = path.join(tmpDir, 'concat.txt');
@@ -298,9 +316,17 @@ async function stitchSegmentsAndAudio({ segments, tmpDir, ffmpegBin, hasAudio, a
   fs.writeFileSync(listFile, listBody, 'utf8');
 
   const muxArgs = ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listFile];
-  if (hasAudio) {
-    if (isSlice) muxArgs.push('-ss', startSec.toFixed(3), '-t', renderDur.toFixed(3));
-    muxArgs.push('-i', audioPath, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy');
+  if (hasAudio && hasBgm) {
+    pushSlicedAudioInput(muxArgs, audioPath, isSlice, startSec, renderDur);
+    pushSlicedAudioInput(muxArgs, bgmPath, isSlice, startSec, renderDur);
+    muxArgs.push(
+      '-filter_complex', '[1:a][2:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]',
+      '-map', '0:v:0', '-map', '[aout]', '-c:v', 'copy',
+      '-c:a', 'aac', '-b:a', audioBitrate || '128k', '-shortest'
+    );
+  } else if (hasAudio) {
+    pushSlicedAudioInput(muxArgs, audioPath, isSlice, startSec, renderDur);
+    muxArgs.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy');
     muxArgs.push(...(isSlice ? ['-c:a', 'aac', '-b:a', audioBitrate || '128k', '-shortest'] : ['-c:a', 'copy', '-shortest']));
   } else {
     muxArgs.push('-c:v', 'copy');
@@ -314,13 +340,13 @@ const firstIsMp4 = Boolean(pos[0] && pos[0].endsWith('.mp4'));
 const defaultVideo = listVideoIds()[0] || 'starter';
 const VIDEO_ID = firstIsMp4 ? defaultVideo : (pos[0] || defaultVideo);
 
-const { sandbox, videoDir, audioRel } = loadVideoSandbox(ROOT, VIDEO_ID, { ignoreBaked: false, requireTimings: false, lang: opts.lang });
+const { sandbox, videoDir, audioRel, bgmRel } = loadVideoSandbox(ROOT, VIDEO_ID, { ignoreBaked: false, requireTimings: false, lang: opts.lang });
 const cfg = Object.assign({}, sandbox.V.themeDefaults || {}, sandbox.V.config || {});
 const W = cfg.width || 1920;
 const H = cfg.height || 1080;
 const FPS = Number(opts.fps || process.env.FPS || cfg.fps || 30);
 
-const { outPath, audioPath, hasAudio } = resolveOutAndAudio(VIDEO_ID, videoDir, sandbox, cfg, opts, pos, audioRel);
+const { outPath, audioPath, hasAudio, bgmPath, hasBgm } = resolveOutAndAudio(VIDEO_ID, videoDir, sandbox, cfg, opts, pos, audioRel, bgmRel);
 const scenes = sandbox.V.scenes || [];
 const fullDur = sandbox.V.totalDuration || sandbox.V.duration || 1;
 const { startSec, endSec, isSlice } = resolveTimeWindow(scenes, fullDur, hasAudio, opts);
@@ -344,9 +370,10 @@ try {
   const hitCount = segments.length - misses.length;
   const cacheInfo = useSceneCache ? ` [cache ${hitCount}/${segments.length} scenes hit]` : '';
 
+  const audioDesc = hasAudio ? (hasBgm ? ' + audio+bgm' : ' + audio') : ' (silent)';
   console.log(
     `Rendering [${VIDEO_ID}] ${W}x${H} @ ${FPS}fps · ${totalFrames} frames ` +
-    `(${startSec.toFixed(2)}s..${endSec.toFixed(2)}s)${cacheInfo}${hasAudio ? ' + audio' : ' (silent)'} -> ${outPath}`
+    `(${startSec.toFixed(2)}s..${endSec.toFixed(2)}s)${cacheInfo}${audioDesc} -> ${outPath}`
   );
 
   await renderMissingSegments({
@@ -369,6 +396,8 @@ try {
     ffmpegBin,
     hasAudio,
     audioPath,
+    hasBgm,
+    bgmPath,
     audioBitrate: cfg.audioBitrate || '128k',
     isSlice,
     startSec,

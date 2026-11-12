@@ -69,7 +69,7 @@ if (!videoId) {
   process.exit(1);
 }
 
-const { sandbox, videoDir, audioRel } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: false, lang });
+const { sandbox, videoDir, audioRel, bgmRel } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: false, lang });
 const V = sandbox.V;
 const cfg = Object.assign({}, V.themeDefaults || {}, V.config || {});
 
@@ -90,6 +90,7 @@ const linesPayload = {
   lang,
   videoDir,
   audioSrc: audioRel === null ? false : audioRel,
+  bgmSrc: bgmRel === null ? false : bgmRel,
   tts: ttsCfg,
   scenes: V.scenes.map(sc => sc.cues.map(serializeLineCue)),
 };
@@ -99,19 +100,22 @@ if (Array.isArray(V.glKeys)) {
   for (const k of V.glKeys) if (k.shape === 'burst') impacts.push(k.t);
 }
 
+const sceneEnergies = Array.isArray(cfg.sceneEnergy) ? cfg.sceneEnergy : [];
 const cuesPayload = {
   videoId,
   lang,
   videoDir,
   duration: V.duration,
   audioBitrate: process.env.AUDIO_BITRATE || cfg.audioBitrate || '128k',
+  bgmBitrate: cfg.bgmBitrate || '96k',
+  bgmSrc: bgmRel === null ? false : bgmRel,
   bgm: cfg.bgm === undefined ? { preset: 'ambient', volume: 0.16, duck: 0.55 } : cfg.bgm,
   sfx: cfg.sfx === undefined ? { preset: 'soft', volume: 0.18 } : cfg.sfx,
   scenes: V.scenes.map((sc, si) => ({
     title: sc.title,
     start: sc.start,
     duration: sc.duration,
-    energy: sc.energy,
+    energy: sc.energy !== undefined ? sc.energy : sceneEnergies[si],
     cues: sc.cues,
     sfx: resolveSceneSfx(V, sc, si),
   })),

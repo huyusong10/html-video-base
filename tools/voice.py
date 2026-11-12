@@ -356,9 +356,10 @@ def _parse_cli_tts_config(raw_payload, argv):
         scenes = raw_payload.get('scenes', [])
         tts_cfg = dict(raw_payload.get('tts') or {})
         audio_src = raw_payload.get('audioSrc', 'assets/soundtrack.m4a')
+        bgm_src = raw_payload.get('bgmSrc', False)
         video_dir = raw_payload.get('videoDir')
     else:
-        scenes, tts_cfg, audio_src, video_dir = raw_payload, {}, 'assets/soundtrack.m4a', None
+        scenes, tts_cfg, audio_src, bgm_src, video_dir = raw_payload, {}, 'assets/soundtrack.m4a', False, None
 
     if len(argv) > 4 and argv[4]:
         tts_cfg['voice'] = argv[4]
@@ -366,7 +367,7 @@ def _parse_cli_tts_config(raw_payload, argv):
         tts_cfg['speed'] = float(argv[5])
     if len(argv) > 6 and argv[6]:
         tts_cfg['provider'] = argv[6]
-    return scenes, tts_cfg, audio_src, video_dir
+    return scenes, tts_cfg, audio_src, bgm_src, video_dir
 
 
 def _finalize_tts_defaults(tts_cfg: dict) -> str:
@@ -382,7 +383,7 @@ def _finalize_tts_defaults(tts_cfg: dict) -> str:
 def main():
     lines_path, out_dir, timings_path = sys.argv[1:4]
     with open(lines_path, encoding='utf-8') as f:
-        scenes, tts_cfg, audio_src, video_dir = _parse_cli_tts_config(json.load(f), sys.argv)
+        scenes, tts_cfg, audio_src, bgm_src, video_dir = _parse_cli_tts_config(json.load(f), sys.argv)
     provider = _finalize_tts_defaults(tts_cfg)
     rules = build_rules(tts_cfg.get('pronunciation', {}), enable_common=bool(tts_cfg.get('polyphoneFix', True)))
 
@@ -402,6 +403,8 @@ def main():
         f.write('/* 配音时长（秒）、逐词时间轴与 30Hz 语音包络，由构建管线生成。 */\n')
         f.write('window.V = window.V || {};\n')
         meta = {'src': audio_src, 'voice': voice_label, 'durations': durs, 'words': all_words, 'envelopes': all_envs}
+        if bgm_src:
+            meta['bgmSrc'] = bgm_src
         f.write('V.voice = ' + json.dumps(meta, ensure_ascii=False) + ';\n')
     print('total voice', round(sum(map(sum, durs)), 1), 's')
 

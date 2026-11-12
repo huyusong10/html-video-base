@@ -16,11 +16,12 @@
   const DEV = params.has('dev') && !RECORD;
   V._isRecord = RECORD;
 
-  let audio = null, stage = null, subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
+  let audio = null, bgmAudio = null, stage = null, subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
   let current = null, now = 0, prevRenderNow = 0, playing = false, lastTs = 0, pauseBaseTs = 0, ended = false;
   let showSubs = !params.has('nosubs'), playbackRate = 1, loopScene = false, muted = false;
+  let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm');
   let scrubbing = false, targetSeekTime = null, lastSeekTarget = -1, lastSeekAt = 0;
-  let audioBlocked = false, playPending = false, activeCueIdx = -1;
+  let audioBlocked = false, playPending = false, bgmPlayPending = false, activeCueIdx = -1;
   let webFull = false, savedFrameStyle = null;
   let wipeState = { name: '', handler: null, dom: null };
   const sandboxState = { active: false, entering: false, returnTime: null, el: null, txtEl: null, backEl: null };
@@ -46,6 +47,7 @@
       chapterMarks: u.chapterMarks !== false && (!cfg || cfg.chapterMarks !== false),
       hud: u.hud !== undefined ? Boolean(u.hud) : (!cfg || cfg.hud !== false),
       rate: u.rate !== false,
+      bgmDefault: u.bgmDefault !== false,
       webFull: resolveWebFull(u),
       rates: Array.isArray(u.rates) && u.rates.length ? u.rates : DEFAULT_RATES,
       icons: Object.assign({}, CTRL_ICONS, u.icons || {}),
@@ -97,7 +99,8 @@
       ...renderCustomControls('right'),
       rateWrap,
       h('button', { class: 'ctrl-rbtn', 'data-act': 'subs', title: '字幕开关' }, '字幕'),
-      h('button', { class: 'ctrl-rbtn', 'data-act': 'mute', title: '声音开关' }, '声音'),
+      h('button', { class: 'ctrl-rbtn', 'data-act': 'mute', title: '声音设置（M 静音 / B 开关配乐）' }, '声音'),
+      h('div', { class: 'sound-menu' }),
       webFullBtn,
       h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'full', title: '全屏（F）', 'aria-label': '全屏' }, makeCtrlIcon(uiCfg.icons.fullEnter)));
   }
@@ -403,6 +406,77 @@
     }
   }
 
+  function safePlayBgm() {
+    if (!bgmAudio || !playing || bgmAudio.muted || !bgmAudio.paused || bgmPlayPending) return;
+    bgmPlayPending = true;
+    bgmAudio.playbackRate = playbackRate;
+    const p = bgmAudio.play();
+    if (p && typeof p.then === 'function') {
+      p.then(() => { bgmPlayPending = false; }).catch(() => { bgmPlayPending = false; });
+    } else {
+      bgmPlayPending = false;
+    }
+  }
+
+  function isAllMuted() {
+    return muted || (!voiceOn && (!bgmAudio || !bgmOn));
+  }
+
+  function syncBgmPlaybackNow() {
+    if (!bgmAudio) return;
+    bgmAudio.muted = isAllMuted() || !bgmOn;
+    bgmAudio.playbackRate = playbackRate;
+    if (!playing || bgmAudio.muted) { bgmAudio.pause(); return; }
+    const refT = audio && audio.readyState >= 1 ? audio.currentTime : now;
+    if (bgmAudio.readyState >= 1 && Math.abs(bgmAudio.currentTime - refT) > 0.18) {
+      try { bgmAudio.currentTime = refT; } catch {}
+    }
+    safePlayBgm();
+  }
+
+  function keepBgmInSync(masterTime) {
+    if (!bgmAudio || isAllMuted() || !bgmOn || bgmAudio.seeking) return;
+    if (bgmAudio.paused) { safePlayBgm(); return; }
+    if (bgmAudio.readyState >= 2 && Math.abs(bgmAudio.currentTime - masterTime) > 0.22) {
+      try { bgmAudio.currentTime = masterTime; } catch {}
+    }
+  }
+
+  function syncSoundMenuUI() {
+    const allOff = isAllMuted();
+    const hasActiveSound = Boolean(audio) && !allOff;
+    if (ui.mute) ui.mute.classList.toggle('on', hasActiveSound);
+    if (ui.soundVoice) toggle(ui.soundVoice, 'on', !allOff && voiceOn);
+    if (ui.soundBgm) toggle(ui.soundBgm, 'on', !allOff && bgmOn);
+    if (ui.soundAllMute) toggle(ui.soundAllMute, 'on', allOff);
+  }
+
+  function applySoundState() {
+    const allOff = isAllMuted();
+    if (audio) audio.muted = allOff || !voiceOn;
+    syncBgmPlaybackNow();
+    syncSoundMenuUI();
+    V.emit('onSoundChange', { muted: allOff, voiceOn: !allOff && voiceOn, bgmOn: Boolean(bgmAudio) && !allOff && bgmOn });
+  }
+
+  function setBgm(on) {
+    bgmOn = Boolean(on);
+    if (bgmOn && muted) muted = false;
+    applySoundState();
+  }
+
+  function setVoice(on) {
+    voiceOn = Boolean(on);
+    if (voiceOn && muted) muted = false;
+    applySoundState();
+  }
+
+  function setMuted(nextMuted) {
+    muted = Boolean(nextMuted);
+    if (!muted && !voiceOn && (!bgmAudio || !bgmOn)) voiceOn = true;
+    applySoundState();
+  }
+
   function checkSceneLoop(nextT) {
     if (!loopScene || !current) return false;
     const scEnd = current.start + current.duration - 0.03;
@@ -420,6 +494,7 @@
   function advanceAudioClock(ts) {
     lastTs = ts;
     if (targetSeekTime == null && !audio.paused && !audio.seeking && audio.readyState >= 2) {
+      keepBgmInSync(audio.currentTime);
       if (checkSceneLoop(audio.currentTime)) return;
       if (audio.ended || audio.currentTime >= V.duration - 0.01) finishPlayback();
       else render(audio.currentTime, 0);
@@ -469,13 +544,26 @@
     safePlayAudio();
   }
 
+  function positionSoundMenu(bar) {
+    if (!ui.soundMenu || !ui.mute || !bar) return;
+    const barRect = bar.getBoundingClientRect();
+    const btnRect = ui.mute.getBoundingClientRect();
+    if (!barRect.width || !btnRect.width) return;
+    const menuW = ui.soundMenu.offsetWidth || 148;
+    const center = btnRect.left - barRect.left + btnRect.width / 2;
+    const left = clamp(center - menuW / 2, 8, Math.max(8, barRect.width - menuW - 8));
+    ui.soundMenu.style.left = Math.round(left) + 'px';
+  }
+
   function setOpenMenu(bar, which) {
     if (!bar) return;
     const mode = which || '';
+    if (mode === 'sound') positionSoundMenu(bar);
     bar.dataset.menu = mode;
     bar.classList.toggle('menu-open', Boolean(mode));
     bar.classList.toggle('chap-open', mode === 'chap');
     bar.classList.toggle('rate-open', mode === 'rate');
+    bar.classList.toggle('sound-open', mode === 'sound');
     document.body.classList.toggle('menu-open', Boolean(mode));
   }
 
@@ -488,12 +576,14 @@
     setOpenMenu(document.getElementById('controls'), '');
     playing = true;
     if (audio && audio.error) audio = null;
+    if (bgmAudio && bgmAudio.error) bgmAudio = null;
     audioBlocked = false;
     lastTs = performance.now();
     if (audio) {
       if (audio.readyState >= 1) syncAudioBeforePlay();
       else audio.addEventListener('loadedmetadata', syncAudioBeforePlay, { once: true });
     }
+    syncBgmPlaybackNow();
     document.body.classList.add('playing');
     if (!RECORD) updateUI();
   }
@@ -505,6 +595,7 @@
     document.body.classList.remove('playing');
     document.body.classList.toggle('is-ended', ended);
     if (audio) audio.pause();
+    if (bgmAudio) bgmAudio.pause();
     for (const clip of V._videoClips) if (clip.pause) clip.pause();
     if (!RECORD) updateUI();
   }
@@ -520,6 +611,7 @@
     playbackRate = clamp(Number(rate) || 1, 0.25, 4);
     V._playbackRate = playbackRate;
     if (audio) audio.playbackRate = playbackRate;
+    if (bgmAudio) bgmAudio.playbackRate = playbackRate;
     if (ui.rate) {
       ui.rate.textContent = fmtRate(playbackRate);
       ui.rate.classList.toggle('on', Math.abs(playbackRate - 1) > 0.01);
@@ -539,6 +631,9 @@
     lastSeekAt = ts;
     render(target, 0);
     V.emit('onSeek', target);
+    if (bgmAudio && bgmAudio.readyState >= 1) {
+      try { bgmAudio.currentTime = now; } catch {}
+    }
     if (!audio) return;
     if (audio.readyState >= 1) {
       try { audio.currentTime = now; targetSeekTime = null; } catch { targetSeekTime = now; }
@@ -617,13 +712,37 @@
     };
   }
 
+  function buildSoundMenu(bar) {
+    const menu = bar.querySelector('.sound-menu');
+    ui.soundMenu = menu;
+    if (!menu) return;
+    menu.innerHTML = '';
+    ui.soundVoice = h('div', { class: 'sound-item', 'data-sound': 'voice' }, h('span', null, '解说声音'), h('i', null, '✓'));
+    ui.soundBgm = h('div', { class: 'sound-item', 'data-sound': 'bgm' }, h('span', null, '背景音乐'), h('i', null, '✓'));
+    ui.soundAllMute = h('div', { class: 'sound-item', 'data-sound': 'mute' }, h('span', null, '全部静音'), h('i', null, '✓'));
+    ui.soundVoice.onclick = e => {
+      e.stopPropagation();
+      if (isAllMuted()) { muted = false; voiceOn = true; bgmOn = false; applySoundState(); }
+      else setVoice(!voiceOn);
+    };
+    ui.soundBgm.onclick = e => {
+      e.stopPropagation();
+      if (isAllMuted()) { muted = false; voiceOn = false; bgmOn = true; applySoundState(); }
+      else setBgm(!bgmOn);
+    };
+    ui.soundAllMute.onclick = e => { e.stopPropagation(); setMuted(!isAllMuted()); };
+    menu.append(ui.soundVoice, ui.soundBgm, h('div', { class: 'sound-sep' }), ui.soundAllMute);
+    syncSoundMenuUI();
+  }
+
   function bindMenuAutoClose(bar) {
     const chapWrap = bar.querySelector('.chap-wrap');
     const rateWrap = bar.querySelector('.rate-wrap');
     addEventListener('pointerdown', e => {
       const inChap = chapWrap && chapWrap.contains(e.target);
       const inRate = rateWrap && rateWrap.contains(e.target);
-      if (!inChap && !inRate) setOpenMenu(bar, '');
+      const inSound = (ui.mute && ui.mute.contains(e.target)) || (ui.soundMenu && ui.soundMenu.contains(e.target));
+      if (!inChap && !inRate && !inSound) setOpenMenu(bar, '');
     });
   }
 
@@ -748,6 +867,10 @@
       W: () => fallbackWebFull(true),
       f: toggleOsFull,
       F: toggleOsFull,
+      m: () => setMuted(!isAllMuted()),
+      M: () => setMuted(!isAllMuted()),
+      b: () => { if (bgmAudio) setBgm(!(!isAllMuted() && bgmOn)); },
+      B: () => { if (bgmAudio) setBgm(!(!isAllMuted() && bgmOn)); },
       ArrowRight: e => seek(now + (e.shiftKey ? 1 : 5)),
       ArrowLeft: e => seek(now - (e.shiftKey ? 1 : 5)),
     };
@@ -800,6 +923,7 @@
     if (hudEl && !hudEl.classList.contains('is-off')) bindScrubber(hudEl);
     buildChapters(bar);
     buildRateMenu(bar, uiCfg);
+    buildSoundMenu(bar);
     bindMenuAutoClose(bar);
 
     const subsBtn = bar.querySelector('[data-act=subs]');
@@ -810,11 +934,11 @@
       e.currentTarget.classList.toggle('on', showSubs);
       render(now);
     };
-    ui.mute.classList.toggle('on', Boolean(audio) && !muted);
+    syncSoundMenuUI();
     ui.mute.onclick = e => {
-      muted = !muted;
-      if (audio) audio.muted = muted;
-      e.currentTarget.classList.toggle('on', !muted);
+      e.stopPropagation();
+      if (bgmAudio) setOpenMenu(bar, bar.dataset.menu === 'sound' ? '' : 'sound');
+      else setMuted(!isAllMuted());
     };
     if (ui.webfull) ui.webfull.onclick = () => setWebFull(!webFull);
     ui.full.onclick = toggleOsFull;
@@ -921,9 +1045,36 @@
     return 0;
   }
 
+  function initBgmAudio(src) {
+    const el = new Audio();
+    el.preload = 'auto';
+    el.muted = isAllMuted() || !bgmOn;
+    el.addEventListener('loadedmetadata', () => {
+      el.playbackRate = playbackRate;
+      const refT = audio && audio.readyState >= 1 ? audio.currentTime : now;
+      if (refT > 0.05) { try { el.currentTime = refT; } catch {} }
+      if (playing && !el.muted && el.paused) safePlayBgm();
+    });
+    el.addEventListener('error', () => {
+      if (bgmAudio !== el) return;
+      bgmAudio = null;
+      const bar = document.getElementById('controls');
+      if (bar && bar.dataset.menu === 'sound') setOpenMenu(bar, '');
+      syncSoundMenuUI();
+    });
+    el.src = src;
+    el.load();
+    return el;
+  }
+
   function resolveAudioSource(cfg) {
     if (cfg.audioSrc === false || RECORD) return null;
     return (V.voice && V.voice.src) || cfg.audioSrc || null;
+  }
+
+  function resolveBgmSource(cfg) {
+    if (cfg.audioSrc === false || cfg.bgm === false || cfg.bgmSrc === false || RECORD) return null;
+    return (V.voice && V.voice.bgmSrc) || cfg.bgmSrc || null;
   }
 
   function exposeBridge(cfg) {
@@ -936,6 +1087,9 @@
       seekVisual: t => render(t, 0),
       seekAsync: V.seekToAsync,
       setRate,
+      setBgm,
+      setVoice,
+      setMuted,
       play,
       pause,
       replay,
@@ -953,6 +1107,10 @@
         sandbox: sandboxState.active,
         playing,
         playbackRate,
+        muted: isAllMuted(),
+        hasBgm: Boolean(bgmAudio),
+        bgmEnabled: Boolean(bgmAudio) && !isAllMuted() && bgmOn,
+        voiceEnabled: Boolean(audio) && !isAllMuted() && voiceOn,
         audioTime: audio ? audio.currentTime : null,
         drift: audio && !audio.paused && targetSeekTime == null ? Math.abs(audio.currentTime - now) : 0,
         seeking: audio ? audio.seeking : false,
@@ -968,6 +1126,7 @@
     V.mountStage();
     const cfg = V.getCfg();
     const uiCfg = getUiCfg(cfg);
+    if (uiCfg.bgmDefault === false && !params.has('bgm')) bgmOn = false;
     if (cfg.title) document.title = cfg.title;
     stage = document.getElementById('stage');
     subs = document.getElementById('subs');
@@ -981,16 +1140,25 @@
     V._layersRuntime.mountLayers(stage, subs);
 
     const audioSrc = resolveAudioSource(cfg);
-    if (audioSrc) audio = initAudio(audioSrc);
+    if (audioSrc) {
+      audio = initAudio(audioSrc);
+      audio.muted = isAllMuted() || !voiceOn;
+    }
+    const bgmSrc = resolveBgmSource(cfg);
+    if (bgmSrc) bgmAudio = initBgmAudio(bgmSrc);
 
     V.seekTo = t => render(t, 0);
     V.seekToAsync = async t => { render(t, 0); await waitStageAssets(); };
+    V.setBgm = setBgm;
+    V.setVoice = setVoice;
+    V.setMuted = setMuted;
     V.enterSandbox = enterSandbox;
     V.exitSandbox = exitSandbox;
     V.tryEgg = tryEgg;
     V.replay = replay;
     V._playerCtl = {
-      play, pause, replay, seek, setRate, enterSandbox, exitSandbox, tryEgg,
+      play, pause, replay, seek, setRate, setBgm, setVoice, setMuted,
+      enterSandbox, exitSandbox, tryEgg,
       fmtTime, updateUI,
       setOpenMenu: m => setOpenMenu(document.getElementById('controls'), m),
       getRate: () => playbackRate,

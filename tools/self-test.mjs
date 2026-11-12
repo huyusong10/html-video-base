@@ -259,7 +259,32 @@ async function verifyPlayerBarContracts(page, port) {
   assert.equal(postEnd.exitedEgg, true, 'Clicking .v-sandbox-back must exit egg mode and return to finale');
 
   await verifySearchAndDeepLinkContract(page);
+  await verifyDualStemBgmContract(page);
   await verifyIframeWebFullContract(page, port);
+}
+
+async function verifyDualStemBgmContract(page) {
+  await page.locator('[data-act="mute"]').click();
+  const opened = await page.evaluate(() => ({
+    soundOpen: document.getElementById('controls').classList.contains('sound-open'),
+    hasBgm: window.__video.getSyncState().hasBgm,
+    bgmEnabled: window.__video.getSyncState().bgmEnabled,
+    voiceEnabled: window.__video.getSyncState().voiceEnabled,
+  }));
+  assert.equal(opened.soundOpen, true, 'Clicking mute button on dual-stem video must open .sound-menu');
+  assert.equal(opened.hasBgm, true, 'Dual-stem video must report hasBgm: true');
+  assert.equal(opened.bgmEnabled, true, 'BGM must start enabled by default');
+  assert.equal(opened.voiceEnabled, true, 'Voice must start enabled by default');
+
+  await page.locator('.sound-menu [data-sound="bgm"]').click();
+  const afterBgmOff = await page.evaluate(() => window.__video.getSyncState());
+  assert.equal(afterBgmOff.bgmEnabled, false, 'Clicking BGM row in .sound-menu must turn off BGM');
+  assert.equal(afterBgmOff.voiceEnabled, true, 'Turning off BGM must keep narration voice active');
+
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('b');
+  const afterBKey = await page.evaluate(() => window.__video.getSyncState());
+  assert.equal(afterBKey.bgmEnabled, true, 'Pressing B shortcut must toggle BGM back on');
 }
 
 async function verifySearchAndDeepLinkContract(page) {
@@ -342,8 +367,8 @@ async function verifyBrowserCapabilities(videoDir) {
     srv.close();
   }
 
-  for (const sub of ['assets/subtitles.vtt', 'assets/subtitles.srt', 'assets/subtitles.en.vtt', 'assets/subtitles.en.srt']) {
-    assert.ok(fs.existsSync(path.join(videoDir, sub)), `Expected subtitle file ${sub}`);
+  for (const sub of ['assets/bgm.m4a', 'assets/bgm.en.m4a', 'assets/subtitles.vtt', 'assets/subtitles.srt', 'assets/subtitles.en.vtt', 'assets/subtitles.en.srt']) {
+    assert.ok(fs.existsSync(path.join(videoDir, sub)), `Expected generated media/subtitle file ${sub}`);
   }
 }
 
@@ -377,6 +402,10 @@ async function main() {
     assert.ok(out1.includes('% reused)'), `First render should report static frame reuse stats, got:\n${out1}`);
     const out2 = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
     assert.ok(out2.includes('2/2 scenes hit'), `Second render must hit 2/2 scene cache, got:\n${out2}`);
+    assert.ok(out2.includes('+ audio+bgm'), `Default render must mix audio+bgm, got:\n${out2}`);
+    const outNoBgm = path.join(TEST_ROOT, 'demo-nobgm.mp4');
+    const out3 = runCliCmd(['render', 'demo', outNoBgm, '--fps', '10', '--no-bgm']);
+    assert.ok(fs.existsSync(outNoBgm) && out3.includes('+ audio ->'), `--no-bgm render must mux voice-only stem, got:\n${out3}`);
 
     console.log('[SelfTest 5/5] Verifying standalone static bundler...');
     const distDir = path.join(TEST_ROOT, 'dist');

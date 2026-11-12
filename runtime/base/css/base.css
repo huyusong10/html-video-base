@@ -75,6 +75,7 @@
   --ctrl-time-w: 106px;
   --ctrl-chap-w: 280px;
   --ctrl-rate-menu-w: 108px;
+  --ctrl-sound-menu-w: 148px;
 
   --ctrl-track-h: 6px;
   --ctrl-track-radius: 999px;
@@ -514,7 +515,8 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 }
 #controls :where(button.on),
 #controls.chap-open :where(.chap-trigger),
-#controls.rate-open :where(.rate-trigger) {
+#controls.rate-open :where(.rate-trigger),
+#controls.sound-open :where([data-act="mute"]) {
   background: var(--ctrl-btn-active-bg);
   border-color: var(--ctrl-btn-active-border);
   color: var(--ctrl-btn-active-fg);
@@ -618,7 +620,8 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 }
 
 .chap-menu,
-.rate-menu {
+.rate-menu,
+.sound-menu {
   position: absolute;
   bottom: calc(100% + 12px);
   display: flex; flex-direction: column;
@@ -641,7 +644,14 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   padding: 5px; gap: 2px;
   transform: translate(-50%, 6px);
 }
-#controls.chap-open .chap-menu {
+.sound-menu {
+  left: 0;
+  width: var(--ctrl-sound-menu-w);
+  padding: 5px; gap: 2px;
+  transform: translateY(6px);
+}
+#controls.chap-open .chap-menu,
+#controls.sound-open .sound-menu {
   opacity: 1; visibility: visible; transform: translateY(0);
   transition: opacity 0.15s, transform 0.15s, visibility 0s;
 }
@@ -716,14 +726,21 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 .chap-item .chap-it-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chap-item small { font-size: 0.85em; color: var(--ctrl-muted); font-variant-numeric: tabular-nums; }
 
-.rate-item {
-  display: flex; align-items: center; justify-content: space-between;
+.rate-item,
+.sound-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 7px 11px; border-radius: var(--ctrl-radius);
   cursor: pointer; color: var(--ctrl-fg);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.rate-item i { font-style: normal; font-size: 0.85em; opacity: 0; }
-.rate-item.on i { opacity: 1; }
+.rate-item i,
+.sound-item i { font-style: normal; font-size: 0.85em; opacity: 0; }
+.rate-item.on i,
+.sound-item.on i { opacity: 1; }
+.sound-item:not(.on) { opacity: 0.62; }
+.sound-item:hover { background: rgba(255, 255, 255, 0.12); opacity: 1; }
+.sound-sep { height: 1px; margin: 2px 4px; background: var(--ctrl-border); pointer-events: none; }
 
 @media (max-width: 960px) {
   :root {

@@ -451,8 +451,27 @@ def write_master_output(mix, out, bitrate='128k'):
     os.remove(tmp_wav)
 
 
+def _soft_clip(sig):
+    return np.tanh(sig * 1.1) / np.tanh(1.1)
+
+
+def _write_dual_stems(fg, m, out, bgm_out, dur, bitrate, bgm_bitrate):
+    fg_s, m_s = _soft_clip(fg), _soft_clip(m)
+    ref_peak = float(np.abs(fg_s + m_s).max())
+    scale = (0.95 / ref_peak) if ref_peak > 1e-6 else 1.0
+    write_master_output(fg_s * scale, out, bitrate)
+    if float(np.abs(m).max()) > 1e-5:
+        write_master_output(m_s * scale, bgm_out, bgm_bitrate or '96k')
+        print('written', out, '+', bgm_out, round(dur, 1), 's')
+    else:
+        if os.path.exists(bgm_out):
+            os.remove(bgm_out)
+        print('written', out, '(no bgm)', round(dur, 1), 's')
+
+
 def main():
     cues_path, vdir, out = sys.argv[1:4]
+    bgm_out = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else None
     with open(cues_path, encoding='utf-8') as f:
         data = json.load(f)
 
@@ -466,9 +485,13 @@ def main():
     m = build_bgm_track(parse_bgm_cfg(data.get('bgm')), video_dir, dur, n, secs, active, has_voice)
     f = mix_sfx_bus(data, parse_sfx_cfg(data.get('sfx')), video_dir, n)
     vc = mix_video_clip_tracks(data, video_dir, n)
+    fg = np.stack([voice, voice], 1) + f + vc
 
-    mix = m + np.stack([voice, voice], 1) + f + vc
-    mix = np.tanh(mix * 1.1) / np.tanh(1.1)
+    if bgm_out:
+        _write_dual_stems(fg, m, out, bgm_out, dur, data.get('audioBitrate'), data.get('bgmBitrate'))
+        return
+
+    mix = _soft_clip(m + fg)
     peak = np.abs(mix).max()
     if peak > 1e-6:
         mix = mix / peak * 0.95

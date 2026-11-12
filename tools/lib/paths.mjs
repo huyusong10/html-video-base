@@ -193,13 +193,32 @@ export function createMockElement(tag = 'div') {
   };
 }
 
+function isBgmDisabledCfg(cfg) {
+  if (!cfg || cfg.audioSrc === false) return Boolean(cfg && cfg.audioSrc === false);
+  const b = cfg.bgm;
+  if (b === false || b === 'none' || cfg.bgmSrc === false) return true;
+  if (b && typeof b === 'object') {
+    if (b.preset === false || b.preset === 'none') return true;
+    if (b.volume !== undefined && Number(b.volume) <= 0) return true;
+  }
+  return false;
+}
+
+function localizeMediaRel(rel, lang) {
+  if (!rel || !lang) return rel;
+  return rel.replace(/(\.[a-z0-9]+)$/i, `.${lang}$1`);
+}
+
 export function resolveLangMediaPaths(cfg, lang = '') {
   const baseTimings = (cfg && cfg.timingsScript) || 'assets/voice/timings.js';
   const baseAudio = cfg && cfg.audioSrc === false ? null : ((cfg && cfg.audioSrc) || 'assets/soundtrack.m4a');
-  if (!lang) return { timingsRel: baseTimings, audioRel: baseAudio };
-  const timingsRel = baseTimings.replace(/\.js$/i, `.${lang}.js`);
-  const audioRel = baseAudio ? baseAudio.replace(/(\.[a-z0-9]+)$/i, `.${lang}$1`) : null;
-  return { timingsRel, audioRel };
+  const baseBgm = isBgmDisabledCfg(cfg) ? null : ((cfg && cfg.bgmSrc) || 'assets/bgm.m4a');
+  if (!lang) return { timingsRel: baseTimings, audioRel: baseAudio, bgmRel: baseBgm };
+  return {
+    timingsRel: baseTimings.replace(/\.js$/i, `.${lang}.js`),
+    audioRel: localizeMediaRel(baseAudio, lang),
+    bgmRel: localizeMediaRel(baseBgm, lang),
+  };
 }
 
 function createSandboxContext(ignoreBaked, lang) {
@@ -294,7 +313,7 @@ export function loadVideoSandbox(root, videoId, { ignoreBaked = false, requireTi
   }
   loadLocaleScriptIfPresent(videoDir, sandbox, lang);
 
-  const { timingsRel, audioRel } = resolveLangMediaPaths(sandbox.V.config, lang);
+  const { timingsRel, audioRel, bgmRel } = resolveLangMediaPaths(sandbox.V.config, lang);
   const timingsPath = path.join(videoDir, timingsRel);
   loadOptionalTimings(sandbox, timingsPath, timingsRel, videoId, requireTimings);
 
@@ -304,7 +323,7 @@ export function loadVideoSandbox(root, videoId, { ignoreBaked = false, requireTi
   }
 
   sandbox.V.layout();
-  return { sandbox, videoDir, timingsPath, timingsRel, audioRel };
+  return { sandbox, videoDir, timingsPath, timingsRel, audioRel, bgmRel };
 }
 
 function safeCall(fn, thisArg, ...args) {

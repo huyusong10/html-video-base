@@ -19,7 +19,8 @@ project-root/
         ├── video.config.js       # 标题、节奏、TTS、控制栏与字幕插槽配置
         ├── style.css             # 主题 CSS 变量覆盖与分镜样式
         ├── assets/
-        │   ├── soundtrack.m4a    # build 自动生成的混音音轨（faststart AAC）
+        │   ├── soundtrack.m4a    # build 自动生成的解说与动作音效主轨
+        │   ├── bgm.m4a           # build 自动生成的独立带闪避背景音乐轨（可独立开关）
         │   └── voice/timings.js  # build 自动生成的词级时间戳、30Hz 包络与固化布局
         └── js/
             └── scenes.js         # V.scene(...) 分镜定义
@@ -31,10 +32,10 @@ project-root/
 | :--- | :--- |
 | `npx html-video init <id> [--title "..."] [--skill]` | 初始化标准视频目录（`--skill` 同步导出本规范至 `.agents/skills/html-video/`） |
 | `npx html-video serve [port]` | 启动带 `206 Range` 与 SSE 保位热重载的本地预览服务 |
-| `npx html-video build <id> [--bitrate 128k]` | 合成 TTS（单句 SHA-256 缓存）、混音生成 `soundtrack.m4a` 并写入 `bakedLayout` |
-| `npx html-video verify [id] [--stamp-baked]` | 校验语义词锚、字幕分段与物理音轨时长零漂移 |
+| `npx html-video build <id> [--bitrate 128k]` | 合成 TTS（单句 SHA-256 缓存）、分离导出 `soundtrack.m4a`（解说+SFX）与 `bgm.m4a`（配乐）并写入 `bakedLayout` |
+| `npx html-video verify [id] [--stamp-baked]` | 校验语义词锚、字幕分段与物理双音轨时长零漂移 |
 | `npx html-video audit [id] [--screenshots .runtime/audit]` | 无头浏览器巡检破损图、越界、字幕遮挡、兄弟卡片压盖、小字号与 `f(t)` 幂等性 |
-| `npx html-video render <id> [out.mp4] [--scene K]` | 按幕增量缓存 + 静止帧复用导出 1080p MP4 |
+| `npx html-video render <id> [out.mp4] [--scene K] [--no-bgm]` | 按幕增量缓存 + 静止帧复用导出 1080p MP4（`--no-bgm` 可导出纯解说无配乐版） |
 | `npx html-video bundle <id> --single --out dist` | 打包免依赖静态目录（`--all` 可带多视频索引门户一起打包） |
 
 ## 3. 纯函数分镜与时间轴契约
@@ -67,7 +68,7 @@ V.scene({
 - **控制栏与配置项（`V.config.ui`）**：
   - `controlsMode: 'docked' | 'overlay'`（常驻底栏 / 空闲自动隐退并联动字幕上移避让）
   - `chapterMarks: true`、`hud: true`、`rate: true`、`webFull: true`、`icons: { webEnter, webExit, fullEnter, fullExit }`
-- **内置检索与深链**：观看时按 `/` 或 `Ctrl+K`（或展开章节菜单）可全文检索台词与章节并一键跳转；点击控制栏时间码直接复制当前 `?t=` 深链。
+- **内置检索、深链与双音轨独立控制**：按 `/` 或 `Ctrl+K` 全文检索台词与章节跳转；点击时间码复制当前 `?t=` 深链；点击「声音」上拉菜单或按 `B` 键可独立开关 BGM（`V.setBgm(on)` / `V.setVoice(on)`，按 `M` 全部静音）。
 
 ## 5. 核心 CSS 主题变量表
 
