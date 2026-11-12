@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
-  ROOT, TOOLS_DIR, VIDEOS_DIR, TEMPLATES_DIR,
+  ROOT, PKG_ROOT, TOOLS_DIR, VIDEOS_DIR, TEMPLATES_DIR,
   listVideoIds, resolvePython, loadVideoSandbox, resolveLangMediaPaths,
 } from './lib/paths.mjs';
 
@@ -91,11 +91,24 @@ function resolveAspectDims(aspect) {
   return [1920, 1080];
 }
 
+function exportSkillDoc(outDir) {
+  const src = path.join(PKG_ROOT, 'skills/html-video/SKILL.md');
+  const targetDir = outDir ? path.resolve(ROOT, outDir) : path.join(ROOT, '.agents/skills/html-video');
+  fs.mkdirSync(targetDir, { recursive: true });
+  const dest = path.join(targetDir, 'SKILL.md');
+  fs.copyFileSync(src, dest);
+  console.log(`✅ Exported Agent Skill -> ${dest}`);
+}
+
+function cmdSkill(args) {
+  exportSkillDoc(parseFlag(args, '--out', null));
+}
+
 function cmdInit(args) {
   const pos = stripFlags(args, ['--title', '--aspect']);
   const videoId = pos[0];
   if (!videoId || !/^[a-zA-Z0-9_-]+$/.test(videoId)) {
-    console.error('Usage: html-video init <video-id> [--title "标题"] [--aspect 16:9|9:16|1:1]');
+    console.error('Usage: html-video init <video-id> [--title "标题"] [--aspect 16:9|9:16|1:1] [--skill]');
     process.exit(1);
   }
   const targetDir = path.join(VIDEOS_DIR, videoId);
@@ -114,6 +127,7 @@ function cmdInit(args) {
     '__STAGE_WIDTH__': String(width),
     '__STAGE_HEIGHT__': String(height),
   });
+  if (args.includes('--skill')) exportSkillDoc(null);
   syncManifest();
   console.log(`✅ Created new video at videos/${videoId} (${width}x${height})`);
   console.log(`  Preview draft: npx html-video serve -> http://localhost:8765/${videoId}/?dev=1`);
@@ -123,7 +137,13 @@ function cmdInit(args) {
 
 function collectBuildTtsEnv(args) {
   const env = {};
-  const map = [['--provider', 'TTS_PROVIDER'], ['--voice', 'TTS_VOICE'], ['--model', 'TTS_MODEL'], ['--speed', 'TTS_SPEED']];
+  const map = [
+    ['--provider', 'TTS_PROVIDER'],
+    ['--voice', 'TTS_VOICE'],
+    ['--model', 'TTS_MODEL'],
+    ['--speed', 'TTS_SPEED'],
+    ['--bitrate', 'AUDIO_BITRATE'],
+  ];
   for (const [flag, key] of map) {
     const val = parseFlag(args, flag);
     if (val) env[key] = val;
@@ -132,7 +152,7 @@ function collectBuildTtsEnv(args) {
 }
 
 function cmdBuild(args) {
-  const pos = stripFlags(args, ['--provider', '--voice', '--model', '--speed', '--lang']);
+  const pos = stripFlags(args, ['--provider', '--voice', '--model', '--speed', '--bitrate', '--lang']);
   const videoId = pos[0] || listVideoIds()[0];
   const lang = parseFlag(args, '--lang', '');
   const videoDir = videoId ? path.join(VIDEOS_DIR, videoId) : '';
@@ -178,15 +198,16 @@ function cmdBuild(args) {
 
 function printHelp() {
   console.log([
-    'html-video CLI (v2.0)',
-    '  html-video init <id> [--title "..."] [--aspect 16:9|9:16|1:1]',
+    'html-video CLI (v2.3)',
+    '  html-video init <id> [--title "..."] [--aspect 16:9|9:16|1:1] [--skill]',
+    '  html-video skill [--out .agents/skills/html-video]',
     '  html-video serve [port] [host] [--no-watch]',
-    '  html-video build [video-id] [--lang en] [--provider edge|openai|elevenlabs|azure|http|command] [--voice ...] [--speed ...] [--visual]',
+    '  html-video build [video-id] [--lang en] [--provider edge|openai|elevenlabs|azure|http|command] [--voice ...] [--speed ...] [--bitrate 128k] [--visual]',
     '  html-video verify [video-id ...] [--stamp-baked] [--visual] [--strict] [--lang en]',
-    '  html-video audit [video-id ...] [--strict] [--lang en]',
+    '  html-video audit [video-id ...] [--strict] [--screenshots <dir>] [--lang en]',
     '  html-video storyboard [video-id] [out.html] [--per-cue] [--pdf] [--lang en]',
-    '  html-video render [video-id] [output.mp4] [--workers N] [--scene K] [--range t0:t1] [--fps N] [--lang en] [--no-cache]',
-    '  html-video bundle [video-id ... | --all] [--out dist]',
+    '  html-video render [video-id] [output.mp4] [--workers N] [--scene K] [--range t0:t1] [--fps N] [--lang en] [--no-cache] [--no-frame-reuse]',
+    '  html-video bundle [video-id ... | --single | --all] [--out dist]',
     '  html-video manifest',
   ].join('\n'));
 }
@@ -194,6 +215,7 @@ function printHelp() {
 const COMMANDS = {
   init: cmdInit,
   new: cmdInit,
+  skill: cmdSkill,
   build: cmdBuild,
   serve: r => run(process.execPath, [path.join(TOOLS_DIR, 'serve.mjs'), ...r]),
   verify: r => run(process.execPath, [path.join(TOOLS_DIR, 'verify-sync.mjs'), ...r]),

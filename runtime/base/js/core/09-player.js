@@ -748,17 +748,14 @@
       W: () => fallbackWebFull(true),
       f: toggleOsFull,
       F: toggleOsFull,
-      Escape: e => handleEscapeKey(bar, e),
+      ArrowRight: e => seek(now + (e.shiftKey ? 1 : 5)),
+      ArrowLeft: e => seek(now - (e.shiftKey ? 1 : 5)),
     };
     document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { handleEscapeKey(bar, e); return; }
       if (e.ctrlKey || e.metaKey || e.altKey || isEditableTarget(e.target)) return;
       if (e.code === 'Space') {
         if (!isNativeSpaceTarget(e.target)) { e.preventDefault(); playing ? pause() : play(); }
-        return;
-      }
-      if (e.code === 'ArrowRight' || e.code === 'ArrowLeft') {
-        const dir = e.code === 'ArrowRight' ? 1 : -1;
-        seek(now + dir * (e.shiftKey ? 1 : 5));
         return;
       }
       if (keyMap[e.key]) keyMap[e.key](e);
@@ -835,7 +832,7 @@
     const pct = clamp(now / V.duration) * 100 + '%';
     ui.fill.style.width = pct;
     if (ui.thumb) ui.thumb.style.left = pct;
-    ui.time.textContent = fmtTime(now) + ' / ' + fmtTime(V.duration);
+    if (!ui.time.dataset.copied) ui.time.textContent = fmtTime(now) + ' / ' + fmtTime(V.duration);
     const idx = V.scenes.indexOf(current);
     if (ui.chapLabel && current) ui.chapLabel.textContent = `${String(idx + 1).padStart(2, '0')} · ${current.title}`;
     ui.play.textContent = playing ? '❚❚' : '▶';
@@ -945,6 +942,9 @@
       tryEgg,
       enterSandbox,
       exitSandbox,
+      search: q => (V.search ? V.search(q) : []),
+      openSearch: q => (V.openSearch ? V.openSearch(q) : undefined),
+      getDeepLink: t => (V.getDeepLink ? V.getDeepLink(t) : ''),
       resume: V.resume,
       getSyncState: () => ({
         now,
@@ -989,7 +989,15 @@
     V.exitSandbox = exitSandbox;
     V.tryEgg = tryEgg;
     V.replay = replay;
-    V._playerCtl = { play, pause, replay, seek, setRate, enterSandbox, exitSandbox, tryEgg, getRate: () => playbackRate, toggleLoopScene: () => (loopScene = !loopScene), isDev: DEV, isRecord: RECORD };
+    V._playerCtl = {
+      play, pause, replay, seek, setRate, enterSandbox, exitSandbox, tryEgg,
+      fmtTime, updateUI,
+      setOpenMenu: m => setOpenMenu(document.getElementById('controls'), m),
+      getRate: () => playbackRate,
+      toggleLoopScene: () => (loopScene = !loopScene),
+      isDev: DEV,
+      isRecord: RECORD,
+    };
 
     if (RECORD) document.body.classList.add('record');
     else buildUI(uiCfg);

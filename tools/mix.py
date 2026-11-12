@@ -430,7 +430,14 @@ def mix_video_clip_tracks(data, video_dir, n):
     return clips_st
 
 
-def write_master_output(mix, out):
+def normalize_audio_bitrate(raw) -> str:
+    val = str(raw or '128k').strip().lower()
+    if len(val) >= 3 and val.endswith('k') and val[:-1].isdigit():
+        return val
+    return '128k'
+
+
+def write_master_output(mix, out, bitrate='128k'):
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     if not out.endswith('.m4a'):
         sf.write(out, mix.astype(np.float32), SR)
@@ -439,7 +446,7 @@ def write_master_output(mix, out):
     sf.write(tmp_wav, mix.astype(np.float32), SR)
     subprocess.run([
         FFMPEG, '-y', '-loglevel', 'error', '-i', tmp_wav,
-        '-c:a', 'aac', '-b:a', '192k', '-ac', '2', '-ar', '48000', '-movflags', '+faststart', out,
+        '-c:a', 'aac', '-b:a', normalize_audio_bitrate(bitrate), '-ac', '2', '-ar', '48000', '-movflags', '+faststart', out,
     ], check=True)
     os.remove(tmp_wav)
 
@@ -466,7 +473,7 @@ def main():
     if peak > 1e-6:
         mix = mix / peak * 0.95
 
-    write_master_output(mix, out)
+    write_master_output(mix, out, data.get('audioBitrate'))
     print('written', out, round(dur, 1), 's')
 
 

@@ -104,6 +104,7 @@ const cuesPayload = {
   lang,
   videoDir,
   duration: V.duration,
+  audioBitrate: process.env.AUDIO_BITRATE || cfg.audioBitrate || '128k',
   bgm: cfg.bgm === undefined ? { preset: 'ambient', volume: 0.16, duck: 0.55 } : cfg.bgm,
   sfx: cfg.sfx === undefined ? { preset: 'soft', volume: 0.18 } : cfg.sfx,
   scenes: V.scenes.map((sc, si) => ({

@@ -1,5 +1,8 @@
-// 无头浏览器画面与 f(t) 纯函数规范自动巡检工具（404/破损图/无限 @keyframes/拖拽幂等/舞台溢出/字幕遮挡/字数密度）
-// 用法：node tools/audit-visual.mjs [video-id ...] [--strict] [--lang en]
+// 无头浏览器画面与 f(t) 纯函数规范自动巡检工具
+// 覆盖：404/破损图/无限 @keyframes/拖拽幂等/舞台溢出/字幕遮挡/兄弟卡片压盖/最小字号下限/问题帧自动截图
+// 用法：node tools/audit-visual.mjs [video-id ...] [--strict] [--lang en] [--screenshots .runtime/audit]
+import fs from 'node:fs';
+import path from 'node:path';
 import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
 
@@ -55,11 +58,20 @@ const IN_PAGE_SCRUB_CHECK = async ({ sampleT, altT }) => {
 };
 
 function installPageAuditHelpers() {
-  const isVisible = (el, minAlpha) => {
-    const cs = getComputedStyle(el);
-    if (cs.visibility === 'hidden' || cs.display === 'none') return false;
-    return parseFloat(cs.opacity || '1') >= minAlpha;
+  const effectiveAlpha = el => {
+    let cur = el;
+    let alpha = 1;
+    const stage = document.getElementById('stage');
+    while (cur && cur.nodeType === 1) {
+      const cs = getComputedStyle(cur);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return 0;
+      alpha *= parseFloat(cs.opacity || '1');
+      if (alpha < 0.02 || cur === stage) break;
+      cur = cur.parentElement;
+    }
+    return alpha;
   };
+  const isVisible = (el, minAlpha) => effectiveAlpha(el) >= minAlpha;
   const rectAreaOverlap = (a, b) => {
     const ix = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
     const iy = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
@@ -69,7 +81,11 @@ function installPageAuditHelpers() {
     if (r.left < sRect.left - tol || r.right > sRect.right + tol) return true;
     return r.top < sRect.top - tol || r.bottom > sRect.bottom + tol;
   };
-  window.__auditH = { isVisible, rectAreaOverlap, isOutOfRect };
+  const labelOf = el => {
+    const cls = typeof el.className === 'string' ? el.className.trim().split(/\s+/).slice(0, 2).join('.') : '';
+    return cls ? `.${cls}` : el.tagName.toLowerCase();
+  };
+  window.__auditH = { effectiveAlpha, isVisible, rectAreaOverlap, isOutOfRect, labelOf };
 }
 
 const IN_PAGE_BROKEN_IMGS = () => {
@@ -87,7 +103,7 @@ const IN_PAGE_CHAR_COUNT = () => {
   const walker = document.createTreeWalker(sc, NodeFilter.SHOW_TEXT);
   let node;
   while ((node = walker.nextNode())) {
-    if (node.parentElement && window.__auditH.isVisible(node.parentElement, 0.1)) {
+    if (node.parentElement && window.__auditH.isVisible(node.parentElement, 0.15)) {
       charCount += (node.nodeValue || '').replace(/\s+/g, '').length;
     }
   }
@@ -105,7 +121,7 @@ const IN_PAGE_OVERFLOWS = () => {
     if (!window.__auditH.isVisible(el, 0.15)) continue;
     const r = el.getBoundingClientRect();
     if (r.width >= 2 && r.height >= 2 && window.__auditH.isOutOfRect(r, sRect, tol)) {
-      overflows.push(el.className || el.tagName);
+      overflows.push(window.__auditH.labelOf(el));
     }
   }
   return overflows;
@@ -124,38 +140,125 @@ const IN_PAGE_SUB_OVERLAPS = () => {
     if (!window.__auditH.isVisible(el, 0.15) || getComputedStyle(el).position === 'static') continue;
     const r = el.getBoundingClientRect();
     if (r.height < sRect.height * 0.85 && el.textContent.trim().length > 8 && window.__auditH.rectAreaOverlap(r, subRect) > minArea) {
-      overlaps.push(el.className || el.tagName);
+      overlaps.push(window.__auditH.labelOf(el));
     }
   }
   return overlaps;
 };
 
-async function inspectSamplePoint(page, pt, duration, vErrors, vWarnings) {
+const IN_PAGE_SIBLING_COLLISIONS = () => {
+  const stage = document.getElementById('stage');
+  const sc = stage ? stage.querySelector('.scene') : null;
+  if (!stage || !sc) return [];
+  const H = window.__auditH;
+  const sRect = stage.getBoundingClientRect();
+  const stageArea = Math.max(1, sRect.width * sRect.height);
+
+  const isCandidateBox = (el, r) => {
+    if (el.hasAttribute('data-allow-overlap') || !H.isVisible(el, 0.35)) return false;
+    if (r.width < 90 || r.height < 38 || r.width * r.height > stageArea * 0.68) return false;
+    return (el.textContent || '').trim().length >= 2;
+  };
+
+  const checkContainer = parent => {
+    const boxes = [];
+    for (const el of Array.from(parent.children)) {
+      const r = el.getBoundingClientRect();
+      if (isCandidateBox(el, r)) boxes.push({ el, r, area: r.width * r.height });
+    }
+    const hits = [];
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const inter = H.rectAreaOverlap(boxes[i].r, boxes[j].r);
+        const ratio = inter / Math.min(boxes[i].area, boxes[j].area);
+        if (ratio > 0.18) hits.push(`${H.labelOf(boxes[i].el)} ↔ ${H.labelOf(boxes[j].el)} (${Math.round(ratio * 100)}%)`);
+      }
+    }
+    return hits;
+  };
+
+  const containers = [sc, ...Array.from(sc.children).filter(c => H.isVisible(c, 0.35))];
+  const collisions = [];
+  for (const c of containers) collisions.push(...checkContainer(c));
+  return collisions.slice(0, 4);
+};
+
+const IN_PAGE_SMALL_FONTS = minFontPx => {
+  if (!minFontPx || minFontPx <= 0) return [];
+  const sc = document.querySelector('#stage .scene');
+  if (!sc) return [];
+  const H = window.__auditH;
+  const seen = new Set();
+  const issues = [];
+  const checkNode = node => {
+    const txt = (node.nodeValue || '').trim();
+    const el = node.parentElement;
+    if (!txt || !el || el.closest('[data-allow-small-font], pre, code') || !H.isVisible(el, 0.25)) return;
+    const px = parseFloat(getComputedStyle(el).fontSize || '18');
+    if (px >= minFontPx - 0.5) return;
+    const key = `${H.labelOf(el)}:${Math.round(px)}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      issues.push(`${H.labelOf(el)} (${Math.round(px)}px < ${minFontPx}px: "${txt.slice(0, 14)}")`);
+    }
+  };
+  const walker = document.createTreeWalker(sc, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode()) && issues.length < 3) checkNode(node);
+  return issues;
+};
+
+async function maybeCaptureIssueShot(page, screenshotDir, id, label, savedShots) {
+  if (!screenshotDir) return;
+  fs.mkdirSync(screenshotDir, { recursive: true });
+  const out = path.join(screenshotDir, `${id}-${label}.png`);
+  await page.screenshot({ path: out });
+  savedShots.push(out);
+}
+
+async function inspectSamplePoint(page, ctx, pt) {
+  const { id, duration, minFontPx, screenshotDir, vErrors, vWarnings, savedShots } = ctx;
+  const errBefore = vErrors.length;
+  const warnBefore = vWarnings.length;
+
   await page.evaluate(s => window.V.seekToAsync(s), pt.t);
-  const [brokenImgs, charCount, overflows, subOverlaps] = await Promise.all([
+  const [brokenImgs, charCount, overflows, subOverlaps, collisions, smallFonts] = await Promise.all([
     page.evaluate(IN_PAGE_BROKEN_IMGS),
     page.evaluate(IN_PAGE_CHAR_COUNT),
     page.evaluate(IN_PAGE_OVERFLOWS),
     page.evaluate(IN_PAGE_SUB_OVERLAPS),
+    page.evaluate(IN_PAGE_SIBLING_COLLISIONS),
+    page.evaluate(IN_PAGE_SMALL_FONTS, minFontPx),
   ]);
+
   for (const src of brokenImgs) vErrors.push(`${pt.label}: Broken <img> "${src}"`);
   for (const cls of overflows) vWarnings.push(`${pt.label}: Element "${cls}" overflows stage bounds`);
   for (const cls of subOverlaps) vWarnings.push(`${pt.label}: Element "${cls}" overlaps #subs safe zone`);
+  for (const pair of collisions) vWarnings.push(`${pt.label}: Sibling layout overlap ${pair}`);
+  for (const sf of smallFonts) vWarnings.push(`${pt.label}: Small font ${sf}`);
   if (charCount > 240) vWarnings.push(`${pt.label}: High on-screen text density (${charCount} chars > 240)`);
+
   if (pt.isMid) {
     const altT = Math.min(duration - 0.05, Math.max(0, pt.t + 1.3));
     const ok = await page.evaluate(IN_PAGE_SCRUB_CHECK, { sampleT: pt.t, altT });
     if (!ok) vErrors.push(`${pt.label}: Non-idempotent f(t) DOM state after scrubbing`);
   }
+  if (vErrors.length > errBefore || vWarnings.length > warnBefore) {
+    await maybeCaptureIssueShot(page, screenshotDir, id, pt.label, savedShots);
+  }
 }
 
-async function auditSingleVideo(browser, port, id, lang) {
+async function auditSingleVideo(browser, port, id, opts) {
+  const { lang = '', screenshotDir = '' } = opts;
   const { sandbox } = loadVideoSandbox(ROOT, id, { ignoreBaked: false, requireTimings: false, lang });
   const V = sandbox.V;
   const cfg = Object.assign({}, V.themeDefaults || {}, V.config || {});
+  const auditCfg = cfg.audit || {};
+  const minFontPx = auditCfg.minFontSize === undefined ? 18 : Number(auditCfg.minFontSize);
+
   const page = await browser.newPage({ viewport: { width: cfg.width || 1920, height: cfg.height || 1080 }, deviceScaleFactor: 1 });
   await page.addInitScript(installPageAuditHelpers);
-  const vErrors = [], vWarnings = [];
+  const vErrors = [], vWarnings = [], savedShots = [];
 
   page.on('pageerror', err => vErrors.push(`Runtime error: ${err.message}`));
   page.on('response', resp => {
@@ -171,16 +274,17 @@ async function auditSingleVideo(browser, port, id, lang) {
   for (const sel of await page.evaluate(IN_PAGE_CSS_AUDIT)) {
     vErrors.push(`Forbidden infinite CSS animation on "${sel}"`);
   }
+  const ptCtx = { id, duration: V.duration, minFontPx, screenshotDir, vErrors, vWarnings, savedShots };
   for (const pt of buildSamplePoints(V)) {
-    await inspectSamplePoint(page, pt, V.duration, vErrors, vWarnings);
+    await inspectSamplePoint(page, ptCtx, pt);
   }
   await page.close();
-  return { vErrors: [...new Set(vErrors)], vWarnings: [...new Set(vWarnings)], sceneCount: V.scenes.length };
+  return { vErrors: [...new Set(vErrors)], vWarnings: [...new Set(vWarnings)], savedShots, sceneCount: V.scenes.length };
 }
 
-function reportAuditResult(id, vErrors, vWarnings, sceneCount, strict) {
-  const promoted = strict ? vWarnings : [];
-  const finalErrs = [...vErrors, ...promoted];
+function reportAuditResult(id, res, strict) {
+  const { vErrors, vWarnings, savedShots, sceneCount } = res;
+  const finalErrs = strict ? [...vErrors, ...vWarnings] : vErrors;
   if (finalErrs.length) {
     console.error(`\n❌ [${id}] VISUAL & SPEC AUDIT FAILED (${finalErrs.length} issue(s)):`);
     for (const e of finalErrs) console.error(`  - ${e}`);
@@ -190,12 +294,15 @@ function reportAuditResult(id, vErrors, vWarnings, sceneCount, strict) {
   } else {
     console.log(`✅ [${id}] Visual & f(t) determinism audit PASSED (${sceneCount} scenes).`);
   }
-  return { errCount: finalErrs.length, warnCount: vWarnings.length };
+  if (savedShots.length) {
+    console.log(`  📸 Saved ${savedShots.length} diagnostic frame(s) -> ${path.dirname(savedShots[0])}`);
+  }
+  return { errCount: finalErrs.length, warnCount: vWarnings.length, screenshots: savedShots };
 }
 
-export async function auditVideos(videoIds, { strict = false, lang = '' } = {}) {
+export async function auditVideos(videoIds, { strict = false, lang = '', screenshotDir = '' } = {}) {
   const targets = videoIds && videoIds.length ? videoIds : listVideoIds();
-  if (!targets.length) return { errors: 0, warnings: 0 };
+  if (!targets.length) return { errors: 0, warnings: 0, screenshots: [] };
 
   const { srv, port } = await startEphemeralVideoServer();
   const chromium = await loadChromium(ROOT);
@@ -206,26 +313,37 @@ export async function auditVideos(videoIds, { strict = false, lang = '' } = {}) 
   });
 
   let totalErrors = 0, totalWarnings = 0;
+  const allShots = [];
   try {
     for (const id of targets) {
-      const { vErrors, vWarnings, sceneCount } = await auditSingleVideo(browser, port, id, lang);
-      const { errCount, warnCount } = reportAuditResult(id, vErrors, vWarnings, sceneCount, strict);
+      const res = await auditSingleVideo(browser, port, id, { lang, screenshotDir });
+      const { errCount, warnCount, screenshots } = reportAuditResult(id, res, strict);
       totalErrors += errCount;
       totalWarnings += warnCount;
+      allShots.push(...screenshots);
     }
   } finally {
     await browser.close();
     srv.close();
   }
-  return { errors: totalErrors, warnings: totalWarnings };
+  return { errors: totalErrors, warnings: totalWarnings, screenshots: allShots };
+}
+
+function parseAuditCliArgs(raw) {
+  let lang = '', screenshotDir = '';
+  const ids = [];
+  for (let i = 0; i < raw.length; i++) {
+    const a = raw[i];
+    if (a === '--lang' && raw[i + 1]) { lang = raw[++i]; continue; }
+    if (a === '--screenshots' && raw[i + 1]) { screenshotDir = path.resolve(raw[++i]); continue; }
+    if (!a.startsWith('--')) ids.push(a);
+  }
+  return { ids, lang, screenshotDir, strict: raw.includes('--strict') };
 }
 
 const isDirectRun = process.argv[1] && process.argv[1].endsWith('audit-visual.mjs');
 if (isDirectRun) {
-  const raw = process.argv.slice(2);
-  const langIdx = raw.indexOf('--lang');
-  const lang = langIdx >= 0 && raw[langIdx + 1] ? raw[langIdx + 1] : '';
-  const ids = raw.filter((a, i) => !a.startsWith('--') && (langIdx < 0 || i !== langIdx + 1));
-  const { errors } = await auditVideos(ids, { strict: raw.includes('--strict'), lang });
+  const parsed = parseAuditCliArgs(process.argv.slice(2));
+  const { errors } = await auditVideos(parsed.ids, parsed);
   if (errors > 0) process.exit(1);
 }

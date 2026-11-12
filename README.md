@@ -34,14 +34,15 @@ python -m venv .runtime/venv
 
 | 命令 | 用途 |
 | :--- | :--- |
-| `html-video init <id> [--title "..."] [--aspect 16:9\|9:16\|1:1]` | 初始化新视频骨架 |
+| `html-video init <id> [--title "..."] [--aspect 16:9\|9:16\|1:1] [--skill]` | 初始化新视频骨架（`--skill` 同步导出 Agent 规范至 `.agents/skills/html-video/`） |
+| `html-video skill [--out .agents/skills/html-video]` | 单独导出内置 `SKILL.md` 创作与主题规范 |
 | `html-video serve [port] [host] [--no-watch]` | 启动虚拟 `/base/*` 路由 + 206 Range 寻道 + SSE 帧保位热更新服务 |
-| `html-video build [id] [--lang en] [--provider ...] [--voice ...] [--visual]` | 合成 TTS 语音、30Hz 包络、声学词对齐、混音、`.vtt`/`.srt` 字幕并固化时间轴 |
+| `html-video build [id] [--lang en] [--provider ...] [--bitrate 128k] [--visual]` | 合成 TTS 语音、30Hz 包络、声学词对齐、混音、`.vtt`/`.srt` 字幕并固化时间轴 |
 | `html-video verify [id ...] [--stamp-baked] [--visual] [--strict]` | 语义词锚门禁 + 五维音画同步校验 |
-| `html-video audit [id ...] [--strict]` | 无头 Chromium 巡检 404/破损图/禁用无限动画/`f(t)` 拖拽幂等/溢出遮挡 |
+| `html-video audit [id ...] [--strict] [--screenshots <dir>]` | 无头 Chromium 巡检破损图、越界、字幕遮挡、兄弟卡片压盖、最小字号、`f(t)` 幂等并自动落盘告警截图 |
 | `html-video storyboard [id] [out.html] [--per-cue] [--pdf]` | 导出单文件图文分镜审阅单（可选 PDF） |
-| `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--no-cache]` | 按幕 SHA-256 增量缓存 + 多进程并行导出高清 MP4 |
-| `html-video bundle [id ... \| --all] [--out dist]` | 将虚拟 `/base/*` 与视频资源打包为免 `node_modules` 的纯静态站点 |
+| `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--no-cache]` | 按幕 SHA-256 增量缓存 + 静止帧自动复用 + 多进程并行导出高清 MP4 |
+| `html-video bundle [id ... \| --single \| --all] [--out dist]` | 将虚拟 `/base/*` 与视频资源打包为免 `node_modules` 的纯静态站点（`--single` 生成单视频根目录） |
 
 ## 微内核开放扩展 API
 
@@ -56,6 +57,8 @@ python -m venv .runtime/venv
 | `V.locale(lang, { title, scenes: { [id]: { title, lines, anchors } } })` | 注册多语种台词与 `x.at()` 语义词锚映射（`?lang=en` / `--lang en`） |
 | `V.u.videoClip(src, opts)` + `V.u.syncVideoClip(el, t)` | 受控内嵌 `<video>` 录屏：Web 播放同步、`seekToAsync` 精确锁帧、`mix.py` 原声混音 |
 | `scene.checkpoints` | Web 交互驻点暂停与分支问答（`?record=1` 导出模式自动直通） |
+| `V.tryEgg(targetSec, hint)` / `V.enterSandbox` / `V.exitSandbox` | 终章彩蛋与沙盒试玩跳转及悬浮返回条 |
+| `V.search(query)` / `V.openSearch()` / `V.getDeepLink(t)` | 内置全文台词与章节检索跳转（快捷键 `/` 或 `Ctrl+K`）及时间码点击复制 `?t=` 深链 |
 | `V.config.ui` / `V.themeDefaults.ui` | 定制播放器模式（`controlsMode: 'docked' \| 'overlay'`）、章节分段刻度（`chapterMarks`）、倍速档位（`rates`）与全屏图标（`icons`） |
 
 ## 主题与控制栏 CSS 变量槽位

@@ -20,11 +20,12 @@ const OPT_HANDLERS = {
 };
 
 function parseRenderArgs(argv) {
-  const opts = { workers: null, scene: null, range: null, fps: null, lang: '', noCache: false };
+  const opts = { workers: null, scene: null, range: null, fps: null, lang: '', noCache: false, noFrameReuse: false };
   const pos = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--no-cache') { opts.noCache = true; continue; }
+    if (a === '--no-frame-reuse') { opts.noFrameReuse = true; continue; }
     if (OPT_HANDLERS[a] && i + 1 < argv.length) { OPT_HANDLERS[a](opts, argv[++i]); continue; }
     if (!a.startsWith('--')) pos.push(a);
   }
@@ -175,15 +176,51 @@ function runFfmpeg(bin, args) {
   });
 }
 
+function installFrameReuseProbe() {
+  let usesTgVar = null;
+  const checkUsesTg = () => {
+    if (usesTgVar !== null) return usesTgVar;
+    usesTgVar = false;
+    for (const s of Array.from(document.styleSheets)) {
+      let rules;
+      try { rules = s.cssRules; } catch { continue; }
+      for (const r of Array.from(rules || [])) {
+        if (r.cssText && r.cssText.includes('--tg')) { usesTgVar = true; return true; }
+      }
+    }
+    return false;
+  };
+  const canDedupeStage = stage => {
+    if (!stage) return false;
+    const V = window.V;
+    const glEl = document.getElementById('gl');
+    if (V.gl && V.gl.ready && glEl && !glEl.classList.contains('is-off')) return false;
+    if (V._videoClips && V._videoClips.size > 0) return false;
+    if (stage.querySelector('.scene canvas')) return false;
+    if (stage.getAnimations && stage.getAnimations({ subtree: true }).length > 0) return false;
+    return !checkUsesTg();
+  };
+  window.__seekAndDedupe = async sec => {
+    await window.V.seekToAsync(sec);
+    const stage = document.getElementById('stage');
+    if (!canDedupeStage(stage)) { window.__prevStageSig = null; return false; }
+    const sig = `${document.documentElement.dataset.theme || ''}|${document.body.className}|${stage.innerHTML}`;
+    if (sig === window.__prevStageSig) return true;
+    window.__prevStageSig = sig;
+    return false;
+  };
+}
+
 async function openRenderPage(browser, port, videoId, W, H, lang) {
   const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
+  await page.addInitScript(installFrameReuseProbe);
   const q = lang ? `?record=1&lang=${encodeURIComponent(lang)}` : '?record=1';
   await page.goto(`http://127.0.0.1:${port}/${videoId}/${q}`, { waitUntil: 'networkidle' });
   await page.evaluate(() => (document.fonts ? document.fonts.ready : Promise.resolve()));
   return page;
 }
 
-async function renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, onFrame) {
+async function renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, reuseFrames, onFrame) {
   const tmpOut = `${seg.partPath}.${process.pid}.tmp.mp4`;
   const ffArgs = [
     '-y', '-loglevel', 'error',
@@ -192,24 +229,31 @@ async function renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, onFrame) 
     tmpOut,
   ];
   const ff = spawn(ffmpegBin, ffArgs, { stdio: ['pipe', 'inherit', 'inherit'] });
+  await page.evaluate(() => { window.__prevStageSig = null; });
+  let prevBuf = null;
   for (let f = seg.f0; f < seg.f1; f++) {
     const sec = startSec + f / fps;
-    await page.evaluate(s => window.V.seekToAsync(s), sec);
-    const buf = await page.screenshot({ type: 'jpeg', quality: 92 });
+    const same = reuseFrames
+      ? await page.evaluate(s => window.__seekAndDedupe(s), sec)
+      : (await page.evaluate(s => window.V.seekToAsync(s), sec), false);
+    const reused = Boolean(same && prevBuf);
+    const buf = reused ? prevBuf : await page.screenshot({ type: 'jpeg', quality: 92 });
+    prevBuf = buf;
     if (!ff.stdin.write(buf)) await new Promise(r => ff.stdin.once('drain', r));
-    onFrame();
+    onFrame(reused);
   }
   ff.stdin.end();
   await new Promise((res, rej) => ff.on('close', code => (code === 0 ? res() : rej(new Error(`ffmpeg seg ${seg.idx} exit ${code}`)))));
   fs.renameSync(tmpOut, seg.partPath);
 }
 
-async function renderMissingSegments({ misses, workerCount, videoId, W, H, fps, lang, startSec, ffmpegBin, tStartWall }) {
+async function renderMissingSegments({ misses, workerCount, videoId, W, H, fps, lang, startSec, ffmpegBin, tStartWall, reuseFrames }) {
   if (!misses.length) return;
   const totalMissFrames = misses.reduce((a, s) => a + (s.f1 - s.f0), 0);
   const poolSize = Math.min(misses.length, workerCount);
   const queue = misses.slice();
   let doneFrames = 0;
+  let reusedFrames = 0;
 
   const { srv, port } = await startEphemeralVideoServer();
   const chromium = await loadChromium(ROOT);
@@ -219,12 +263,14 @@ async function renderMissingSegments({ misses, workerCount, videoId, W, H, fps, 
     args: ['--use-gl=angle', '--enable-webgl', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required'],
   });
 
-  const onFrame = () => {
+  const onFrame = reused => {
     doneFrames++;
+    if (reused) reusedFrames++;
     if (doneFrames % Math.max(1, fps * 2) === 0 || doneFrames === totalMissFrames) {
       const elapsed = Math.max(0.1, (Date.now() - tStartWall) / 1000);
       const pct = ((doneFrames / totalMissFrames) * 100).toFixed(1);
-      process.stdout.write(`\r  frame ${doneFrames}/${totalMissFrames} (${pct}% · ${(doneFrames / elapsed).toFixed(1)} fps)`);
+      const reusePct = Math.round((reusedFrames / doneFrames) * 100);
+      process.stdout.write(`\r  frame ${doneFrames}/${totalMissFrames} (${pct}% · ${(doneFrames / elapsed).toFixed(1)} fps · ${reusePct}% reused)`);
     }
   };
 
@@ -233,7 +279,7 @@ async function renderMissingSegments({ misses, workerCount, videoId, W, H, fps, 
       const page = await openRenderPage(browser, port, videoId, W, H, lang);
       while (queue.length > 0) {
         const seg = queue.shift();
-        if (seg) await renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, onFrame);
+        if (seg) await renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, reuseFrames, onFrame);
       }
       await page.close();
     }));
@@ -244,7 +290,7 @@ async function renderMissingSegments({ misses, workerCount, videoId, W, H, fps, 
   }
 }
 
-async function stitchSegmentsAndAudio({ segments, tmpDir, ffmpegBin, hasAudio, audioPath, isSlice, startSec, renderDur, outPath }) {
+async function stitchSegmentsAndAudio({ segments, tmpDir, ffmpegBin, hasAudio, audioPath, audioBitrate, isSlice, startSec, renderDur, outPath }) {
   fs.mkdirSync(tmpDir, { recursive: true });
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   const listFile = path.join(tmpDir, 'concat.txt');
@@ -255,7 +301,7 @@ async function stitchSegmentsAndAudio({ segments, tmpDir, ffmpegBin, hasAudio, a
   if (hasAudio) {
     if (isSlice) muxArgs.push('-ss', startSec.toFixed(3), '-t', renderDur.toFixed(3));
     muxArgs.push('-i', audioPath, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy');
-    muxArgs.push(...(isSlice ? ['-c:a', 'aac', '-b:a', '192k', '-shortest'] : ['-c:a', 'copy', '-shortest']));
+    muxArgs.push(...(isSlice ? ['-c:a', 'aac', '-b:a', audioBitrate || '128k', '-shortest'] : ['-c:a', 'copy', '-shortest']));
   } else {
     muxArgs.push('-c:v', 'copy');
   }
@@ -314,6 +360,7 @@ try {
     startSec,
     ffmpegBin,
     tStartWall,
+    reuseFrames: !opts.noFrameReuse,
   });
 
   await stitchSegmentsAndAudio({
@@ -322,6 +369,7 @@ try {
     ffmpegBin,
     hasAudio,
     audioPath,
+    audioBitrate: cfg.audioBitrate || '128k',
     isSlice,
     startSec,
     renderDur,

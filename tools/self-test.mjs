@@ -258,7 +258,38 @@ async function verifyPlayerBarContracts(page, port) {
   assert.ok(Math.abs(postEnd.eggNow - 0.4) < 0.05, 'tryEgg() must jump to targetTime');
   assert.equal(postEnd.exitedEgg, true, 'Clicking .v-sandbox-back must exit egg mode and return to finale');
 
+  await verifySearchAndDeepLinkContract(page);
   await verifyIframeWebFullContract(page, port);
+}
+
+async function verifySearchAndDeepLinkContract(page) {
+  const res = await page.evaluate(async () => {
+    window.__video.seek(0.1);
+    const hits = window.__video.search('唯一决定');
+    window.__video.openSearch('唯一决定');
+    const menuOpen = document.getElementById('controls').classList.contains('chap-open');
+    const hitRow = document.querySelector('.chap-search-results .chap-item');
+    if (hitRow) hitRow.click();
+    const afterJump = window.__video.getSyncState().now;
+    const link5 = window.__video.getDeepLink(5);
+    const timeEl = document.querySelector('#controls .time');
+    timeEl.click();
+    await new Promise(r => setTimeout(r, 30));
+    return {
+      hitCount: hits.length,
+      hitScene: hits[0] ? hits[0].sceneIndex : -1,
+      menuOpen,
+      jumpedToS2: afterJump >= window.V.scenes[1].start,
+      hasTParam: link5.includes('t=5'),
+      copiedState: timeEl.dataset.copied === '1' && timeEl.textContent.includes('已复制'),
+    };
+  });
+  assert.equal(res.hitCount, 1, 'V.search() must find matching transcript line');
+  assert.equal(res.hitScene, 1, 'V.search() must identify Scene 2');
+  assert.equal(res.menuOpen, true, 'V.openSearch() must open chapter/search menu');
+  assert.equal(res.jumpedToS2, true, 'Clicking search hit must jump to target cue timestamp');
+  assert.equal(res.hasTParam, true, 'V.getDeepLink(5) must encode ?t=5');
+  assert.equal(res.copiedState, true, 'Clicking .time must copy deep link and show confirmation');
 }
 
 async function verifyBrowserCapabilities(videoDir) {
@@ -317,24 +348,28 @@ async function main() {
 
   try {
     console.log('[SelfTest 1/5] Scaffolding isolated video project (zero local videos/base)...');
-    runCliCmd(['init', 'demo', '--title', '微内核自检演示']);
+    runCliCmd(['init', 'demo', '--title', '微内核自检演示', '--skill']);
     assert.equal(fs.existsSync(path.join(TEST_ROOT, 'videos/base')), false, 'videos/base must NOT exist locally');
+    assert.equal(fs.existsSync(path.join(TEST_ROOT, '.agents/skills/html-video/SKILL.md')), true, '--skill must export SKILL.md');
 
     const videoDir = path.join(TEST_ROOT, 'videos/demo');
     createSampleMp4(resolveFfmpeg(PKG_ROOT), path.join(videoDir, 'assets/clip.mp4'));
     writeTestProjectFiles(videoDir);
 
     console.log('[SelfTest 2/5] Building default & localized (en) tracks + visual determinism audit...');
-    runCliCmd(['build', 'demo', '--visual']);
+    runCliCmd(['build', 'demo', '--bitrate', '96k', '--visual']);
     runCliCmd(['build', 'demo', '--lang', 'en']);
+    const shotDir = path.join(TEST_ROOT, 'audit-shots');
+    runCliCmd(['audit', 'demo', '--screenshots', shotDir]);
 
     console.log('[SelfTest 3/5] Verifying microkernel registries, 30Hz lip-sync energy, SSE HMR & i18n in Chromium...');
     await verifyBrowserCapabilities(videoDir);
 
-    console.log('[SelfTest 4/5] Verifying per-scene SHA-256 render cache...');
+    console.log('[SelfTest 4/5] Verifying per-scene SHA-256 render cache & static frame reuse...');
     const outMp4 = path.join(TEST_ROOT, 'demo.mp4');
-    runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
+    const out1 = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
     assert.ok(fs.existsSync(outMp4), 'Rendered MP4 should exist');
+    assert.ok(out1.includes('% reused)'), `First render should report static frame reuse stats, got:\n${out1}`);
     const out2 = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
     assert.ok(out2.includes('2/2 scenes hit'), `Second render must hit 2/2 scene cache, got:\n${out2}`);
 
