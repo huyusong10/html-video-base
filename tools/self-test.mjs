@@ -134,6 +134,32 @@ function writeTestProjectFiles(videoDir) {
   ].join('\n'), 'utf8');
 }
 
+async function verifyIframeWebFullContract(page, port) {
+  await page.setContent(`<iframe id="vid" src="http://127.0.0.1:${port}/demo/" style="width:640px;height:360px;border:0"></iframe>`);
+  const frame = page.frameLocator('#vid');
+  await frame.locator('[data-act="webfull"]').waitFor({ state: 'visible' });
+  const dodge = await page.evaluate(async () => {
+    const f = document.getElementById('vid');
+    const win = f.contentWindow;
+    const doc = f.contentDocument;
+    await win.V.seekToAsync(0.8);
+    doc.querySelector('[data-act="webfull"]').click();
+    doc.getElementById('subs').style.transition = 'none';
+    const fr = f.getBoundingClientRect();
+    const s = doc.getElementById('subs').getBoundingClientRect();
+    const c = doc.getElementById('controls').getBoundingClientRect();
+    return {
+      rbtnCount: doc.querySelectorAll('#controls .ctrl-rbtn').length,
+      expanded: Math.round(fr.width) === window.innerWidth && Math.round(fr.height) === window.innerHeight,
+      subBottom: s.bottom,
+      ctrlTop: c.top,
+    };
+  });
+  assert.equal(dodge.rbtnCount, 5, 'Single-layer same-origin iframe must auto-render [data-act="webfull"] (5 right buttons)');
+  assert.equal(dodge.expanded, true, 'Clicking webfull inside single-layer iframe must expand iframe to viewport');
+  assert.ok(dodge.subBottom <= dodge.ctrlTop, `Fullscreen #subs (${dodge.subBottom}) must dodge above #controls (${dodge.ctrlTop})`);
+}
+
 async function verifyPlayerBarContracts(page, port) {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto(`http://127.0.0.1:${port}/demo/`, { waitUntil: 'networkidle' });
@@ -160,7 +186,8 @@ async function verifyPlayerBarContracts(page, port) {
       rateOpen,
       rateVal: window.__video.getSyncState().playbackRate,
       rbtns,
-      iconOnly: wf.textContent.trim() === '' && ff.textContent.trim() === '' && Boolean(wf.querySelector('svg')) && Boolean(ff.querySelector('svg')),
+      noStandaloneWebFull: wf === null,
+      iconOnly: ff.textContent.trim() === '' && Boolean(ff.querySelector('svg')),
     };
   });
   assert.equal(barInfo.hudTicks, 1, 'Expected 1 .hud-tick for 2 scenes');
@@ -168,11 +195,12 @@ async function verifyPlayerBarContracts(page, port) {
   assert.equal(barInfo.w0, barInfo.w1, 'Progress bar width must stay invariant across chapter changes');
   assert.equal(barInfo.rateOpen, true, 'Clicking rate button must open upward .rate-menu');
   assert.equal(barInfo.rateVal, 1.5, 'Selecting 1.5x from rate menu must update playbackRate');
-  assert.equal(barInfo.iconOnly, true, 'Both fullscreen buttons must be icon-only');
-  assert.equal(barInfo.rbtns.length, 5, 'Expected 5 right-side control buttons');
+  assert.equal(barInfo.noStandaloneWebFull, true, 'Standalone top-level page must omit redundant webfull button by default');
+  assert.equal(barInfo.iconOnly, true, 'Fullscreen button must be icon-only');
+  assert.equal(barInfo.rbtns.length, 4, 'Expected 4 right-side control buttons on standalone page');
   for (const b of barInfo.rbtns) {
-    assert.equal(b.w, barInfo.rbtns[0].w, 'All 5 right-side buttons must share identical width');
-    assert.equal(b.h, barInfo.rbtns[0].h, 'All 5 right-side buttons must share identical height');
+    assert.equal(b.w, barInfo.rbtns[0].w, 'All right-side buttons must share identical width');
+    assert.equal(b.h, barInfo.rbtns[0].h, 'All right-side buttons must share identical height');
   }
 
   await page.evaluate(() => window.V.setSubLayout('mascotLeft'));
@@ -190,18 +218,6 @@ async function verifyPlayerBarContracts(page, port) {
   assert.equal(subExt.pos, 'left', 'V.setSubLayout(mode) must switch data-sub-pos');
   assert.equal(subExt.leftVar, '180px', 'V.setSubLayout(mode) must apply custom --sub-left coordinate');
   await page.evaluate(() => window.V.setSubLayout('center'));
-
-  await page.evaluate(async () => {
-    await window.V.seekToAsync(0.8);
-    document.querySelector('[data-act="webfull"]').click();
-    document.getElementById('subs').style.transition = 'none';
-  });
-  const dodge = await page.evaluate(() => {
-    const s = document.getElementById('subs').getBoundingClientRect();
-    const c = document.getElementById('controls').getBoundingClientRect();
-    return { subBottom: s.bottom, ctrlTop: c.top };
-  });
-  assert.ok(dodge.subBottom <= dodge.ctrlTop, `Fullscreen #subs (${dodge.subBottom}) must dodge above #controls (${dodge.ctrlTop})`);
 
   const postEnd = await page.evaluate(async () => {
     window.__video.seek(window.__video.duration);
@@ -231,6 +247,8 @@ async function verifyPlayerBarContracts(page, port) {
   assert.equal(postEnd.inEgg, true, 'tryEgg() must activate .v-sandbox-bar and body.egg-mode');
   assert.ok(Math.abs(postEnd.eggNow - 0.4) < 0.05, 'tryEgg() must jump to targetTime');
   assert.equal(postEnd.exitedEgg, true, 'Clicking .v-sandbox-back must exit egg mode and return to finale');
+
+  await verifyIframeWebFullContract(page, port);
 }
 
 async function verifyBrowserCapabilities(videoDir) {

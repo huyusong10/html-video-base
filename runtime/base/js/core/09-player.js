@@ -26,6 +26,19 @@
   const sandboxState = { active: false, entering: false, returnTime: null, el: null, txtEl: null, backEl: null };
   const ui = {};
 
+  function canExpandParentFrame() {
+    try {
+      return Boolean(window.frameElement && window.parent === window.top);
+    } catch {
+      return false;
+    }
+  }
+
+  function resolveWebFull(u) {
+    if (typeof u.webFull === 'boolean') return u.webFull;
+    return canExpandParentFrame();
+  }
+
   function getUiCfg(cfg) {
     const u = (cfg && cfg.ui) || {};
     return {
@@ -33,7 +46,7 @@
       chapterMarks: u.chapterMarks !== false && (!cfg || cfg.chapterMarks !== false),
       hud: u.hud !== undefined ? Boolean(u.hud) : (!cfg || cfg.hud !== false),
       rate: u.rate !== false,
-      webFull: u.webFull !== false,
+      webFull: resolveWebFull(u),
       rates: Array.isArray(u.rates) && u.rates.length ? u.rates : DEFAULT_RATES,
       icons: Object.assign({}, CTRL_ICONS, u.icons || {}),
     };
@@ -687,15 +700,19 @@
     try { window.parent.postMessage({ type: 'video:webfull', active: webFull }, '*'); } catch {}
   }
 
+  function fallbackWebFull(toggle) {
+    if (ui.webfull) setWebFull(toggle ? !webFull : true);
+  }
+
   function toggleOsFull() {
     if (isOsFull()) {
       (document.exitFullscreen || document.webkitExitFullscreen || (() => {})).call(document);
       return;
     }
     const req = document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen;
-    if (!req) { setWebFull(!webFull); return; }
+    if (!req) { fallbackWebFull(true); return; }
     const p = req.call(document.documentElement);
-    if (p && p.catch) p.catch(() => setWebFull(true));
+    if (p && p.catch) p.catch(() => fallbackWebFull(false));
   }
 
   function jumpChapterDelta(delta) {
@@ -727,8 +744,8 @@
       PageDown: () => jumpChapterDelta(1),
       '[': () => jumpChapterDelta(-1),
       PageUp: () => jumpChapterDelta(-1),
-      w: () => setWebFull(!webFull),
-      W: () => setWebFull(!webFull),
+      w: () => fallbackWebFull(true),
+      W: () => fallbackWebFull(true),
       f: toggleOsFull,
       F: toggleOsFull,
       Escape: e => handleEscapeKey(bar, e),
