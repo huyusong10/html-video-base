@@ -366,6 +366,7 @@
     if (V.gl && V.gl.ready) V.gl.render(now, clock);
     updateHud();
     stage.style.setProperty('--tg', ((clock % 6) / 6) * 150);
+    stage.style.setProperty('--anim-t', (-clock).toFixed(3) + 's');
     document.body.classList.toggle('started', now > 0.05);
     sc.update(shouldContinueSceneAtEnd(sc, idle) ? lt + idle : lt, sc.ctx);
     syncSceneVideoClips(lt);
@@ -708,10 +709,14 @@
     return /^(INPUT|TEXTAREA|SELECT)$/.test(tag);
   }
 
-  function handleEscapeKey(bar) {
-    if (bar && bar.classList.contains('menu-open')) setOpenMenu(bar, '');
-    else if (sandboxState.active) exitSandbox(true);
-    else if (!isOsFull() && webFull) setWebFull(false);
+  function isNativeSpaceTarget(target) {
+    return Boolean(target && target.closest && target.closest('button, a'));
+  }
+
+  function handleEscapeKey(bar, e) {
+    if (bar && bar.classList.contains('menu-open')) { setOpenMenu(bar, ''); e.preventDefault(); }
+    else if (sandboxState.active) { exitSandbox(true); e.preventDefault(); }
+    else if (!isOsFull() && webFull) { setWebFull(false); e.preventDefault(); }
   }
 
   function bindKeyboard(bar) {
@@ -726,17 +731,20 @@
       W: () => setWebFull(!webFull),
       f: toggleOsFull,
       F: toggleOsFull,
-      Escape: () => handleEscapeKey(bar),
+      Escape: e => handleEscapeKey(bar, e),
     };
-    addEventListener('keydown', e => {
+    document.addEventListener('keydown', e => {
       if (e.ctrlKey || e.metaKey || e.altKey || isEditableTarget(e.target)) return;
-      if (e.code === 'Space') { e.preventDefault(); playing ? pause() : play(); return; }
+      if (e.code === 'Space') {
+        if (!isNativeSpaceTarget(e.target)) { e.preventDefault(); playing ? pause() : play(); }
+        return;
+      }
       if (e.code === 'ArrowRight' || e.code === 'ArrowLeft') {
         const dir = e.code === 'ArrowRight' ? 1 : -1;
         seek(now + dir * (e.shiftKey ? 1 : 5));
         return;
       }
-      if (keyMap[e.key]) keyMap[e.key]();
+      if (keyMap[e.key]) keyMap[e.key](e);
     });
   }
 
@@ -749,6 +757,8 @@
     };
     addEventListener('pointermove', wakeUi);
     addEventListener('pointerdown', wakeUi);
+    addEventListener('focusin', wakeUi);
+    wakeUi();
     document.getElementById('viewport').addEventListener('click', e => {
       if (e.target.closest('[data-interactive]')) return;
       if (!playing && isInteractiveHold()) return;

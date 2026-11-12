@@ -18,6 +18,14 @@ function buildSamplePoints(V) {
 }
 
 const IN_PAGE_CSS_AUDIT = () => {
+  const stage = document.getElementById('stage');
+  if (stage && document.body.classList.contains('record')) {
+    const probe = document.createElement('i');
+    stage.appendChild(probe);
+    const locked = getComputedStyle(probe).animationPlayState === 'paused';
+    probe.remove();
+    if (locked) return [];
+  }
   const inf = [];
   for (const sheet of Array.from(document.styleSheets)) {
     let rules;

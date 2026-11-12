@@ -457,15 +457,14 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 :is(body.ctrl-overlay, body.web-full, body.os-full) #controls {
   backdrop-filter: blur(10px);
   opacity: 0;
-  pointer-events: none;
   transition: opacity 0.22s;
 }
 :is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing), .ui-active, .scrubbing, .menu-open) #controls,
-:is(body.ctrl-overlay, body.web-full, body.os-full) #controls:hover {
+:is(body.ctrl-overlay, body.web-full, body.os-full) #controls:is(:hover, :focus-within) {
   opacity: 1;
-  pointer-events: auto;
 }
-:is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing), .ui-active, .scrubbing, .menu-open) #stage {
+:is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing), .ui-active, .scrubbing, .menu-open) #stage,
+:is(body.ctrl-overlay, body.web-full, body.os-full):has(#controls:is(:hover, :focus-within)) #stage {
   --ctrl-dodge: var(--ctrl-overlap, 64px);
 }
 
@@ -702,4 +701,9 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 #dev-hud button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
 
 body.record, body.record * { cursor: none !important; }
+body.record *, body.record *::before, body.record *::after {
+  transition: none !important;
+  animation-play-state: paused !important;
+  animation-delay: var(--anim-t, 0s) !important;
+}
 body.record #controls, body.record #dev-hud, body.record #safe-guide { display: none !important; }
