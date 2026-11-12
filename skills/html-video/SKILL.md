@@ -62,13 +62,17 @@ V.scene({
 });
 ```
 
-## 4. 字幕、控制栏与内置交互能力
+## 4. 字幕、控制栏与图标定制契约
 
 - **字幕伴随插槽与避让**：通过 `V.subtitle({ lead: (h, V) => el, tail, position, modes, onUpdate(cue, info, dom) })` 挂载前置吉祥物或角标；单幕可设 `subLayout: 'left' | { pos: 'center', offsetX: 56, maxWidth: 1520 }` 动态避让角色。
-- **控制栏与配置项（`V.config.ui`）**：
-  - `controlsMode: 'docked' | 'overlay'`（常驻底栏 / 空闲自动隐退并联动字幕上移避让）
-  - `chapterMarks: true`、`hud: true`、`rate: true`、`webFull: true`、`icons: { webEnter, webExit, fullEnter, fullExit }`
-- **内置检索、深链与双音轨独立控制**：按 `/` 或 `Ctrl+K` 全文检索台词与章节跳转；点击时间码复制当前 `?t=` 深链；点击「声音」上拉菜单或按 `B` 键可独立开关 BGM（`V.setBgm(on)` / `V.setVoice(on)`，按 `M` 全部静音）。
+- **PotPlayer 式悬浮控制栏与配置项（`V.config.ui`）**：
+  - `controlsMode: 'overlay' | 'docked'`（默认为 `'overlay'`：画面铺满视口，播放时鼠标移入底部 `autoHideZone: 72` 热区立即浮出，移出底栏或窗口 `autoHideDelay: 300` 毫秒即刻收起；悬停底栏、展开菜单或暂停时保持可见，并自动推动字幕向上避让）
+  - `chapterMarks: true`、`hud: true`、`rate: true`、`webFull: true`、`iconPreset: 'default' | 'pixel'`
+- **全图标控制栏与业务图标覆盖规范**：
+  - 控制栏左右按钮默认统一使用 `32×30` 紧凑矢量图标（返回主界面 `home`、播放/暂停/重播 `play`/`pause`/`replay`、章节箭头 `chapCaret`、倍速 `rate` 在 `1.0x` 显示仪表图标并在非 `1.0x` 动态切换为紧凑数字、字幕 `subsOn`/`subsOff`、声音多态 `volumeOn`/`volumeVoice`/`volumeBgm`/`volumeMute`、全屏 `webEnter`/`webExit`/`fullEnter`/`fullExit`）。
+  - **业务新增按钮建议一律用图标**：调用 `V.control({ id: 'xray', position: 'right', title: 'X-Ray 透视', icon: ['M...'], onClick(e, V) {} })`，不要塞多字中文撑宽工具栏。
+  - **覆盖默认图标**：可通过 `V.icons({ play: '...', subsOn: '...' })` 或 `V.config.ui.icons` 按需覆盖任意内置键名；像素风主题可直接设 `ui: { iconPreset: 'pixel' }` 并加 `--ctrl-ico-render: crispEdges`。图标值支持 `16×16` `<path d>` 数组、内联 SVG 字符串、完整 `<svg>` 字符串或 `(h, V) => Node` 渲染函数。
+- **内置检索、深链与双音轨独立控制**：按 `/` 或 `Ctrl+K` 全文检索台词与章节跳转；点击时间码复制当前 `?t=` 深链；点击声音图标上拉菜单或按 `B` 键可独立开关 BGM（`V.setBgm(on)` / `V.setVoice(on)`，按 `M` 全部静音）。
 
 ## 5. 核心 CSS 主题变量表
 

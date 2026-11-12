@@ -2,7 +2,7 @@
 :root {
   --stage-w: 1920px;
   --stage-h: 1080px;
-  --ctrl-h: 52px;
+  --ctrl-h: 46px;
 
   --bg: #f8fafc;
   --viewport-bg: var(--bg);
@@ -61,20 +61,21 @@
   --ctrl-border-w: 1px;
   --ctrl-font-size: 13px;
   --ctrl-radius: 6px;
-  --ctrl-play-w: 44px;
-  --ctrl-btn-w: 52px;
-  --ctrl-icon-btn-w: 36px;
-  --ctrl-btn-h: 32px;
+  --ctrl-play-w: 36px;
+  --ctrl-btn-w: 44px;
+  --ctrl-icon-btn-w: 32px;
+  --ctrl-btn-h: 30px;
   --ctrl-btn-bg: rgba(255, 255, 255, 0.08);
-  --ctrl-btn-border: rgba(255, 255, 255, 0.28);
+  --ctrl-btn-border: rgba(255, 255, 255, 0.24);
   --ctrl-btn-border-w: 1.5px;
   --ctrl-btn-hover-bg: rgba(255, 255, 255, 0.18);
   --ctrl-btn-active-bg: var(--accent);
   --ctrl-btn-active-border: var(--accent);
   --ctrl-btn-active-fg: #ffffff;
-  --ctrl-time-w: 106px;
-  --ctrl-chap-w: 280px;
-  --ctrl-rate-menu-w: 108px;
+  --ctrl-ico-render: auto;
+  --ctrl-time-w: 94px;
+  --ctrl-chap-w: 210px;
+  --ctrl-rate-menu-w: 104px;
   --ctrl-sound-menu-w: 148px;
 
   --ctrl-track-h: 6px;
@@ -294,7 +295,7 @@ body.record #hud { pointer-events: none; }
   backdrop-filter: blur(8px);
   display: flex; align-items: center; gap: var(--sub-gap, 12px);
   opacity: 0; visibility: hidden;
-  transition: bottom 0.22s ease;
+  transition: bottom 0.16s ease;
 }
 #subs[data-sub-pos="left"] {
   --sub-left: var(--sub-edge, 120px);
@@ -443,12 +444,12 @@ body.record #checkpoint-overlay { display: none !important; }
 :is(body.ctrl-overlay, body.web-full, body.os-full) #start-hint { top: 50%; }
 body.playing #start-hint, body.started #start-hint, body.record #start-hint { opacity: 0; }
 
-/* 底部播放控制栏（常规常驻固化，全屏/overlay 模式空闲自动隐退并联动字幕避让） */
+/* 底部播放控制栏（默认 PotPlayer 式悬浮自动隐藏，底边热区唤醒并联动字幕避让） */
 #controls {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
   height: var(--ctrl-h);
-  display: flex; align-items: center; gap: 10px;
-  padding: 0 18px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 14px;
   background: var(--ctrl-bg); color: var(--ctrl-fg);
   border-top: var(--ctrl-border-w) solid var(--ctrl-border);
   font: var(--ctrl-font-size) var(--ctrl-font, var(--font-sans));
@@ -459,7 +460,7 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 :is(body.ctrl-overlay, body.web-full, body.os-full) #controls {
   backdrop-filter: blur(10px);
   opacity: 0;
-  transition: opacity 0.22s;
+  transition: opacity 0.15s ease;
 }
 :is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing), .ui-active, .scrubbing, .menu-open) #controls,
 :is(body.ctrl-overlay, body.web-full, body.os-full) #controls:is(:hover, :focus-within) {
@@ -467,15 +468,15 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 }
 :is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing), .ui-active, .scrubbing, .menu-open) #stage,
 :is(body.ctrl-overlay, body.web-full, body.os-full):has(#controls:is(:hover, :focus-within)) #stage {
-  --ctrl-dodge: var(--ctrl-overlap, 64px);
+  --ctrl-dodge: var(--ctrl-overlap, 52px);
 }
 
 #controls :where(button, .ctrl-home) {
   appearance: none;
   margin: 0;
   height: var(--ctrl-btn-h);
-  padding: 0 12px;
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 0 10px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
   flex: none;
   border: var(--ctrl-btn-border-w) solid var(--ctrl-btn-border);
   border-radius: var(--ctrl-radius);
@@ -486,7 +487,7 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   text-decoration: none;
   white-space: nowrap;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  transition: background 0.14s, border-color 0.14s, color 0.14s, opacity 0.14s;
 }
 #controls :where(button, .ctrl-home):hover {
   background: var(--ctrl-btn-hover-bg);
@@ -513,6 +514,19 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   height: var(--ctrl-btn-h);
   padding: 0;
 }
+#controls :where(.rate-trigger:not(.ctrl-icon-btn)) {
+  width: auto;
+  min-width: 40px;
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+#controls :where(button.is-off) {
+  opacity: 0.56;
+}
+#controls :where(button.is-sub-on) {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
 #controls :where(button.on),
 #controls.chap-open :where(.chap-trigger),
 #controls.rate-open :where(.rate-trigger),
@@ -521,7 +535,11 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   border-color: var(--ctrl-btn-active-border);
   color: var(--ctrl-btn-active-fg);
 }
-.ctrl-ico { width: 16px; height: 16px; flex-shrink: 0; display: block; }
+.ctrl-ico {
+  width: 16px; height: 16px; flex-shrink: 0; display: block;
+  pointer-events: none;
+  shape-rendering: var(--ctrl-ico-render, auto);
+}
 
 .time {
   width: var(--ctrl-time-w);
@@ -546,6 +564,7 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   flex: 1;
   min-width: 80px;
   height: 28px;
+  margin: 0 4px;
   cursor: pointer;
   touch-action: none;
 }
@@ -598,9 +617,9 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 }
 #controls :where(.chap-trigger) {
   width: 100%;
-  padding: 0 12px;
+  padding: 0 10px;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
 }
 .chap-cur-txt {
   flex: 1; min-width: 0;
@@ -608,9 +627,11 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   text-align: left;
 }
 .chap-caret {
-  font-style: normal; font-size: 10px; opacity: 0.78;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-style: normal; opacity: 0.78;
   transition: transform 0.16s;
 }
+.chap-caret .ctrl-ico { width: 13px; height: 13px; }
 #controls.chap-open .chap-caret { transform: rotate(180deg); }
 
 .rate-wrap {
@@ -744,10 +765,10 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 
 @media (max-width: 960px) {
   :root {
-    --ctrl-chap-w: 170px;
-    --ctrl-btn-w: 44px;
-    --ctrl-icon-btn-w: 34px;
-    --ctrl-time-w: 92px;
+    --ctrl-chap-w: 156px;
+    --ctrl-btn-w: 38px;
+    --ctrl-icon-btn-w: 30px;
+    --ctrl-time-w: 86px;
   }
 }
 

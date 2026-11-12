@@ -10,6 +10,7 @@
   V.presets = V.presets || {};
   V.locales = V.locales || {};
   V.subtitles = V.subtitles || {};
+  V.customIcons = V.customIcons || {};
   V.config = V.config || {};
   V.c = V.c || {};
   V.checkpointState = V.checkpointState || {};
@@ -62,6 +63,11 @@
 
   V.subtitle = function (def) {
     if (def) Object.assign(V.subtitles, def);
+    return V;
+  };
+
+  V.icons = function (dict) {
+    if (dict) Object.assign(V.customIcons, dict);
     return V;
   };
 
@@ -128,13 +134,26 @@
     return (V.config && V.config.lang) || '';
   };
 
+  function mergeUiDict(baseUi, nextUi) {
+    if (!nextUi) return Object.assign({}, baseUi || {});
+    const out = Object.assign({}, baseUi || {}, nextUi);
+    if ((baseUi && baseUi.icons) || nextUi.icons) {
+      out.icons = Object.assign({}, (baseUi && baseUi.icons) || {}, nextUi.icons || {});
+    }
+    return out;
+  }
+
   V.getCfg = function () {
     V.applyConfiguredPresets();
     const lang = V.getActiveLang();
     const loc = (lang && V.locales[lang]) || null;
     const locCfg = Object.assign({}, (loc && loc.config) || {});
     if (loc && loc.title && !locCfg.title) locCfg.title = loc.title;
-    return Object.assign({}, V.themeDefaults || {}, V.config || {}, locCfg);
+    const td = V.themeDefaults || {};
+    const vc = V.config || {};
+    const merged = Object.assign({}, td, vc, locCfg);
+    merged.ui = mergeUiDict(mergeUiDict(td.ui, vc.ui), locCfg.ui);
+    return merged;
   };
 })(globalThis.V = globalThis.V || {});
 
@@ -1232,11 +1251,45 @@
   const { clamp, prog, appear, h, svg, toggle, syncVideoClip } = V.u;
 
   const CTRL_ICONS = {
+    home: ['M2.25 7.2 8 2.5l5.75 4.7', 'M4 6.2v6.55a.75.75 0 0 0 .75.75h6.5a.75.75 0 0 0 .75-.75V6.2', 'M6.75 13.5V9.75h2.5v3.75'],
+    play: '<path d="M4.5 2.9a.8.8 0 0 1 1.22-.68l7.4 4.6a.8.8 0 0 1 0 1.36l-7.4 4.6a.8.8 0 0 1-1.22-.68V2.9z"/>',
+    pause: '<rect x="3.75" y="2.75" width="3" height="10.5" rx="0.9"/><rect x="9.25" y="2.75" width="3" height="10.5" rx="0.9"/>',
+    replay: ['M2.75 8a5.25 5.25 0 1 0 1.4-3.58', 'M2.6 2.6v2.7h2.7'],
+    chapCaret: ['M4.5 9.75 8 6.25l3.5 3.5'],
+    rate: ['M2.6 11.5a6 6 0 1 1 10.8 0', 'M8 8.5 10.8 5.4', 'M6 12.5h4'],
+    subsOn: ['M2.25 3.5h11.5a.75.75 0 0 1 .75.75v7.5a.75.75 0 0 1-.75.75H2.25a.75.75 0 0 1-.75-.75v-7.5a.75.75 0 0 1 .75-.75z', 'M4.25 8.25h3', 'M9 8.25h2.75', 'M4.25 10.6h5.25'],
+    subsOff: ['M2.25 3.5h11.5a.75.75 0 0 1 .75.75v7.5a.75.75 0 0 1-.75.75H2.25a.75.75 0 0 1-.75-.75v-7.5a.75.75 0 0 1 .75-.75z', 'M4.25 8.25h2', 'M2.25 2.25l11.5 11.5'],
+    volumeOn: ['M2.5 6.25h2.3L8.25 3.5v9L4.8 9.75H2.5a.5.5 0 0 1-.5-.5v-2.5a.5.5 0 0 1 .5-.5z', 'M10.6 5.6a3.4 3.4 0 0 1 0 4.8', 'M12.6 3.8a6 6 0 0 1 0 8.4'],
+    volumeVoice: ['M2.5 6.25h2.3L8.25 3.5v9L4.8 9.75H2.5a.5.5 0 0 1-.5-.5v-2.5a.5.5 0 0 1 .5-.5z', 'M10.8 5.6a3.4 3.4 0 0 1 0 4.8'],
+    volumeBgm: ['M6.5 11.5V4l6-1.25v7.5', 'M4.75 13a1.75 1.75 0 1 0 0-3.5 1.75 1.75 0 0 0 0 3.5z', 'M10.75 11.75a1.75 1.75 0 1 0 0-3.5 1.75 1.75 0 0 0 0 3.5z'],
+    volumeMute: ['M2.5 6.25h2.3L8.25 3.5v9L4.8 9.75H2.5a.5.5 0 0 1-.5-.5v-2.5a.5.5 0 0 1 .5-.5z', 'M10.75 6l3.25 4', 'M14 6l-3.25 4'],
     webEnter: ['M2 3h12a.75.75 0 0 1 .75.75v8.5A.75.75 0 0 1 14 13H2a.75.75 0 0 1-.75-.75v-8.5A.75.75 0 0 1 2 3z', 'M1.25 5.5h13.5', 'M4.5 8.5v-1.5H6', 'M11.5 9.5V11H10'],
     webExit: ['M2 3h12a.75.75 0 0 1 .75.75v8.5A.75.75 0 0 1 14 13H2a.75.75 0 0 1-.75-.75v-8.5A.75.75 0 0 1 2 3z', 'M1.25 5.5h13.5', 'M6 7v1.5H4.5', 'M10 11V9.5h1.5'],
     fullEnter: ['M2.5 6V2.5H6', 'M10 2.5h3.5V6', 'M13.5 10v3.5H10', 'M6 13.5H2.5V10'],
     fullExit: ['M6 2.5V6H2.5', 'M10 2.5V6h3.5', 'M13.5 10H10v3.5', 'M2.5 10H6v3.5'],
   };
+
+  const PIXEL_ICONS = {
+    home: '<path d="M7 2h2v1h2v1h2v2h1v2h-2v6H9v-4H7v4H4V8H2V6h1V4h2V3h2V2z"/>',
+    play: '<path d="M4 2h2v1h2v1h2v1h2v2h1v2h-1v2h-2v1H8v1H6v1H4V2z"/>',
+    pause: '<rect x="4" y="3" width="3" height="10"/><rect x="9" y="3" width="3" height="10"/>',
+    replay: '<rect x="5" y="2" width="7" height="2"/><rect x="12" y="4" width="2" height="8"/><rect x="4" y="12" width="8" height="2"/><rect x="2" y="9" width="2" height="3"/><path d="M2 2h2v3h3v2H2V2z"/>',
+    chapCaret: '<path d="M7 5h2v2h2v2h2v2h-2V9H9V7H7v2H5v2H3V9h2V7h2V5z"/>',
+    rate: '<rect x="4" y="2" width="8" height="2"/><rect x="2" y="4" width="2" height="7"/><rect x="12" y="4" width="2" height="7"/><rect x="3" y="11" width="2" height="2"/><rect x="11" y="11" width="2" height="2"/><rect x="7" y="8" width="2" height="3"/><rect x="9" y="6" width="2" height="2"/><rect x="6" y="13" width="4" height="1"/>',
+    subsOn: '<path d="M1 3h14v10H1V3zm2 2v6h10V5H3zm1 2h3v1H4V7zm5 0h3v1H9V7zm-5 2h6v1H4V9z"/>',
+    subsOff: '<path d="M1 3h14v10H1V3zm2 2v6h10V5H3z"/><rect x="2" y="2" width="2" height="2"/><rect x="4" y="4" width="2" height="2"/><rect x="6" y="6" width="2" height="2"/><rect x="8" y="8" width="2" height="2"/><rect x="10" y="10" width="2" height="2"/><rect x="12" y="12" width="2" height="2"/>',
+    volumeOn: '<path d="M2 6h3V5h1V4h1V3h2v10H7v-1H6v-1H5v-1H2V6z"/><rect x="11" y="5" width="1" height="6"/><rect x="10" y="4" width="1" height="1"/><rect x="10" y="11" width="1" height="1"/><rect x="13" y="3" width="1" height="10"/><rect x="12" y="2" width="1" height="1"/><rect x="12" y="13" width="1" height="1"/>',
+    volumeVoice: '<path d="M2 6h3V5h1V4h1V3h2v10H7v-1H6v-1H5v-1H2V6z"/><rect x="11" y="5" width="2" height="6"/><rect x="10" y="4" width="1" height="1"/><rect x="10" y="11" width="1" height="1"/>',
+    volumeBgm: '<path d="M5 3h9v3H7v6H4v-1H3V9h2V3zm7 3h2v5h-1v1h-3V9h2V6z"/>',
+    volumeMute: '<path d="M2 6h3V5h1V4h1V3h2v10H7v-1H6v-1H5v-1H2V6z"/><rect x="10" y="5" width="2" height="2"/><rect x="13" y="5" width="2" height="2"/><rect x="11" y="7" width="3" height="2"/><rect x="10" y="9" width="2" height="2"/><rect x="13" y="9" width="2" height="2"/>',
+    webEnter: '<rect x="1" y="2" width="14" height="3"/><rect x="1" y="5" width="2" height="9"/><rect x="13" y="5" width="2" height="9"/><rect x="1" y="12" width="14" height="2"/><rect x="4" y="6" width="3" height="1"/><rect x="4" y="7" width="1" height="2"/><rect x="9" y="10" width="3" height="1"/><rect x="11" y="8" width="1" height="2"/>',
+    webExit: '<rect x="1" y="2" width="14" height="3"/><rect x="1" y="5" width="2" height="9"/><rect x="13" y="5" width="2" height="9"/><rect x="1" y="12" width="14" height="2"/><rect x="4" y="8" width="3" height="1"/><rect x="6" y="6" width="1" height="2"/><rect x="9" y="7" width="3" height="1"/><rect x="9" y="8" width="1" height="2"/>',
+    fullEnter: '<rect x="2" y="2" width="4" height="2"/><rect x="2" y="4" width="2" height="2"/><rect x="10" y="2" width="4" height="2"/><rect x="12" y="4" width="2" height="2"/><rect x="2" y="10" width="2" height="2"/><rect x="2" y="12" width="4" height="2"/><rect x="12" y="10" width="2" height="2"/><rect x="10" y="12" width="4" height="2"/>',
+    fullExit: '<rect x="4" y="2" width="2" height="2"/><rect x="2" y="4" width="4" height="2"/><rect x="10" y="2" width="2" height="2"/><rect x="10" y="4" width="4" height="2"/><rect x="2" y="10" width="4" height="2"/><rect x="4" y="12" width="2" height="2"/><rect x="10" y="10" width="4" height="2"/><rect x="10" y="12" width="2" height="2"/>',
+  };
+
+  V.defaultIcons = CTRL_ICONS;
+  V.iconPresets = { default: CTRL_ICONS, linear: CTRL_ICONS, pixel: PIXEL_ICONS };
   const DEFAULT_RATES = [2, 1.5, 1.25, 1, 0.75];
 
   const params = new URLSearchParams(location.search);
@@ -1250,7 +1303,7 @@
   let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm');
   let scrubbing = false, targetSeekTime = null, lastSeekTarget = -1, lastSeekAt = 0;
   let audioBlocked = false, playPending = false, bgmPlayPending = false, activeCueIdx = -1;
-  let webFull = false, savedFrameStyle = null;
+  let webFull = false, savedFrameStyle = null, idleTimer = 0, inHotZone = false;
   let wipeState = { name: '', handler: null, dom: null };
   const sandboxState = { active: false, entering: false, returnTime: null, el: null, txtEl: null, backEl: null };
   const ui = {};
@@ -1268,35 +1321,87 @@
     return canExpandParentFrame();
   }
 
+  function resolveControlsMode(u, cfg) {
+    return u.controlsMode || (cfg && cfg.controlsMode) || 'overlay';
+  }
+
+  function resolveUiIcons(u) {
+    const preset = V.iconPresets[u.iconPreset] || CTRL_ICONS;
+    return Object.assign({}, CTRL_ICONS, preset, u.icons || {}, V.customIcons || {});
+  }
+
   function getUiCfg(cfg) {
     const u = (cfg && cfg.ui) || {};
     return {
-      controlsMode: u.controlsMode || (cfg && cfg.controlsMode) || 'docked',
+      controlsMode: resolveControlsMode(u, cfg),
+      autoHideZone: Number(u.autoHideZone) || 72,
+      autoHideDelay: Number(u.autoHideDelay) || 300,
+      actionWakeDelay: Number(u.actionWakeDelay) || 850,
       chapterMarks: u.chapterMarks !== false && (!cfg || cfg.chapterMarks !== false),
       hud: u.hud !== undefined ? Boolean(u.hud) : (!cfg || cfg.hud !== false),
       rate: u.rate !== false,
       bgmDefault: u.bgmDefault !== false,
       webFull: resolveWebFull(u),
       rates: Array.isArray(u.rates) && u.rates.length ? u.rates : DEFAULT_RATES,
-      icons: Object.assign({}, CTRL_ICONS, u.icons || {}),
+      icons: resolveUiIcons(u),
     };
   }
 
+  function parseFullSvg(markup) {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = markup.trim();
+    const node = tpl.content.firstElementChild;
+    if (!node) return svg('', 'class="ctrl-ico" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"');
+    node.classList.add('ctrl-ico');
+    node.setAttribute('aria-hidden', 'true');
+    return node;
+  }
+
   function makeCtrlIcon(spec) {
-    if (typeof spec === 'string') {
-      return svg(spec, 'class="ctrl-ico" width="16" height="16" viewBox="0 0 16 16" fill="currentColor" shape-rendering="crispEdges" aria-hidden="true"');
+    if (typeof spec === 'function') {
+      const res = spec(h, V);
+      return res && res.nodeType ? res : makeCtrlIcon(String(res || ''));
     }
+    if (typeof spec === 'string') {
+      return spec.trim().startsWith('<svg')
+        ? parseFullSvg(spec)
+        : svg(spec, 'class="ctrl-ico" width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"');
+    }
+    const paths = Array.isArray(spec) ? spec : [];
     return svg(
-      spec.map(d => `<path d="${d}"/>`).join(''),
+      paths.map(d => `<path d="${d}"/>`).join(''),
       'class="ctrl-ico" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
     );
   }
+  V.makeIcon = nameOrSpec => {
+    const icons = getUiCfg(V.getCfg()).icons;
+    return makeCtrlIcon(icons[nameOrSpec] || nameOrSpec);
+  };
 
-  function renderCustomControls(pos) {
+  function swapBtnIcon(btn, cacheKey, spec, label) {
+    if (!btn) return;
+    if (label) {
+      btn.title = label;
+      btn.setAttribute('aria-label', label);
+    }
+    if (btn._icoKey === cacheKey) return;
+    btn._icoKey = cacheKey;
+    btn.replaceChildren(makeCtrlIcon(spec));
+  }
+
+  function buildCustomControlBtn(c, pos, uiCfg) {
+    if (typeof c.render === 'function') return c.render(h, V);
+    const title = c.title || c.label || c.id || '';
+    if (c.icon) {
+      const cls = pos === 'right' ? 'ctrl-rbtn ctrl-icon-btn' : 'ctrl-icon-btn';
+      return h('button', { class: cls, 'data-custom-ctrl': c.id || '', title, 'aria-label': title }, makeCtrlIcon(uiCfg.icons[c.icon] || c.icon));
+    }
+    return h('button', { 'data-custom-ctrl': c.id || '', title }, c.label || c.id || '');
+  }
+
+  function renderCustomControls(pos, uiCfg) {
     return V.controls.filter(c => (c.position || 'right') === pos).map(c => {
-      const btn = typeof c.render === 'function'
-        ? c.render(h, V)
-        : h('button', { 'data-custom-ctrl': c.id || '', title: c.title || '' }, c.label || c.id || '');
+      const btn = buildCustomControlBtn(c, pos, uiCfg);
       if (typeof c.onClick === 'function') btn.addEventListener('click', e => c.onClick(e, V));
       c._el = btn;
       return btn;
@@ -1304,12 +1409,13 @@
   }
 
   function buildControlsBar(cfg, uiCfg) {
+    const homeTitle = cfg.homeLabel || '返回主界面';
     const homeLink = cfg.homeUrl === false
       ? null
-      : h('a', { class: 'ctrl-home', href: cfg.homeUrl || '../', title: '返回视频中心主界面' }, cfg.homeLabel || '⌂ 主界面');
+      : h('a', { class: 'ctrl-home ctrl-icon-btn', href: cfg.homeUrl || '../', title: homeTitle, 'aria-label': homeTitle }, makeCtrlIcon(uiCfg.icons.home));
     const rateWrap = uiCfg.rate
       ? h('div', { class: 'rate-wrap' },
-          h('button', { class: 'ctrl-rbtn rate-trigger', 'data-act': 'rate', title: '播放倍速' }, '1.0x'),
+          h('button', { class: 'ctrl-rbtn ctrl-icon-btn rate-trigger', 'data-act': 'rate', title: '播放倍速（1.0x）', 'aria-label': '播放倍速（1.0x）' }, makeCtrlIcon(uiCfg.icons.rate)),
           h('div', { class: 'rate-menu' }))
       : null;
     const webFullBtn = uiCfg.webFull
@@ -1317,17 +1423,17 @@
       : null;
     return h('div', { id: 'controls', 'data-interactive': '1' },
       homeLink,
-      h('button', { 'data-act': 'play', title: '播放 / 暂停（空格）' }, '▶'),
-      ...renderCustomControls('left'),
+      h('button', { class: 'ctrl-icon-btn', 'data-act': 'play', 'data-state': 'paused', 'aria-pressed': 'false', title: '播放（空格）', 'aria-label': '播放（空格）' }, makeCtrlIcon(uiCfg.icons.play)),
+      ...renderCustomControls('left', uiCfg),
       h('span', { class: 'time' }, '0:00'),
       h('div', { class: 'track' }, h('div', { class: 'fill' }), h('i', { class: 'thumb' })),
       h('div', { class: 'chap-wrap' },
-        h('button', { class: 'chap-trigger', 'data-act': 'chap', title: '切换章节' }, h('span', { class: 'chap-cur-txt' }), h('i', { class: 'chap-caret' }, '▲')),
+        h('button', { class: 'chap-trigger', 'data-act': 'chap', title: '切换章节 / 搜索台词（/）' }, h('span', { class: 'chap-cur-txt' }), h('i', { class: 'chap-caret' }, makeCtrlIcon(uiCfg.icons.chapCaret))),
         h('div', { class: 'chap-menu' }, h('div', { class: 'chap-menu-hd' }, '章节导航 · CHAPTERS'), h('div', { class: 'chap-list' }))),
-      ...renderCustomControls('right'),
+      ...renderCustomControls('right', uiCfg),
       rateWrap,
-      h('button', { class: 'ctrl-rbtn', 'data-act': 'subs', title: '字幕开关' }, '字幕'),
-      h('button', { class: 'ctrl-rbtn', 'data-act': 'mute', title: '声音设置（M 静音 / B 开关配乐）' }, '声音'),
+      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'subs', title: '关闭字幕', 'aria-label': '关闭字幕' }, makeCtrlIcon(uiCfg.icons.subsOn)),
+      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'mute', title: '声音设置（M 静音 / B 开关配乐）', 'aria-label': '声音设置' }, makeCtrlIcon(uiCfg.icons.volumeOn)),
       h('div', { class: 'sound-menu' }),
       webFullBtn,
       h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'full', title: '全屏（F）', 'aria-label': '全屏' }, makeCtrlIcon(uiCfg.icons.fullEnter)));
@@ -1670,10 +1776,40 @@
     }
   }
 
+  function showUiHold() {
+    inHotZone = true;
+    clearTimeout(idleTimer);
+    document.body.classList.add('ui-active');
+  }
+
+  function scheduleUiHide(ms) {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      if (!inHotZone) document.body.classList.remove('ui-active');
+    }, ms);
+  }
+
+  function flashUi(ms = 850) {
+    document.body.classList.add('ui-active');
+    if (!inHotZone) scheduleUiHide(ms);
+  }
+
+  function resolveSoundBtnSpec(allOff) {
+    if (allOff) return ['volumeMute', '取消静音（M）'];
+    if (bgmAudio && !voiceOn && bgmOn) return ['volumeBgm', '声音设置：仅背景音乐（M 静音 / B 开关配乐）'];
+    if (bgmAudio && voiceOn && !bgmOn) return ['volumeVoice', '声音设置：已关背景乐（M 静音 / B 恢复配乐）'];
+    return ['volumeOn', bgmAudio ? '声音设置（M 静音 / B 开关配乐）' : '静音（M）'];
+  }
+
   function syncSoundMenuUI() {
     const allOff = isAllMuted();
-    const hasActiveSound = Boolean(audio) && !allOff;
-    if (ui.mute) ui.mute.classList.toggle('on', hasActiveSound);
+    if (ui.mute) {
+      const icons = getUiCfg(V.getCfg()).icons;
+      const [key, label] = resolveSoundBtnSpec(allOff);
+      ui.mute.classList.toggle('is-off', allOff);
+      ui.mute.dataset.soundMode = key;
+      swapBtnIcon(ui.mute, key, icons[key], label);
+    }
     if (ui.soundVoice) toggle(ui.soundVoice, 'on', !allOff && voiceOn);
     if (ui.soundBgm) toggle(ui.soundBgm, 'on', !allOff && bgmOn);
     if (ui.soundAllMute) toggle(ui.soundAllMute, 'on', allOff);
@@ -1785,6 +1921,7 @@
 
   function setOpenMenu(bar, which) {
     if (!bar) return;
+    const prev = bar.dataset.menu || '';
     const mode = which || '';
     if (mode === 'sound') positionSoundMenu(bar);
     bar.dataset.menu = mode;
@@ -1793,6 +1930,7 @@
     bar.classList.toggle('rate-open', mode === 'rate');
     bar.classList.toggle('sound-open', mode === 'sound');
     document.body.classList.toggle('menu-open', Boolean(mode));
+    if (prev && !mode && !inHotZone) scheduleUiHide(300);
   }
 
   function play() {
@@ -1835,15 +1973,31 @@
     ui.rateItems.forEach(({ el, rate }) => toggle(el, 'on', Math.abs(rate - playbackRate) < 0.01));
   }
 
+  function syncRateBtnUI() {
+    if (!ui.rate) return;
+    const isNormal = Math.abs(playbackRate - 1) < 0.01;
+    const txt = fmtRate(playbackRate);
+    const label = `播放倍速（${txt}）`;
+    ui.rate.classList.toggle('on', !isNormal);
+    ui.rate.classList.toggle('ctrl-icon-btn', isNormal);
+    if (isNormal) {
+      swapBtnIcon(ui.rate, 'rate', getUiCfg(V.getCfg()).icons.rate, label);
+      return;
+    }
+    ui.rate.title = label;
+    ui.rate.setAttribute('aria-label', label);
+    if (ui.rate._icoKey !== txt) {
+      ui.rate._icoKey = txt;
+      ui.rate.textContent = txt;
+    }
+  }
+
   function setRate(rate) {
     playbackRate = clamp(Number(rate) || 1, 0.25, 4);
     V._playbackRate = playbackRate;
     if (audio) audio.playbackRate = playbackRate;
     if (bgmAudio) bgmAudio.playbackRate = playbackRate;
-    if (ui.rate) {
-      ui.rate.textContent = fmtRate(playbackRate);
-      ui.rate.classList.toggle('on', Math.abs(playbackRate - 1) > 0.01);
-    }
+    syncRateBtnUI();
     syncRateMenuSelection();
     V.emit('onRateChange', playbackRate);
   }
@@ -2021,13 +2175,10 @@
     } catch {}
   }
 
-  function setBtnIcon(btn, iconSpec, title, active) {
-    if (!btn) return;
+  function setBtnIcon(btn, cacheKey, iconSpec, title, active) {
+    if (!btn || !btn.classList.contains('ctrl-icon-btn')) return;
     btn.classList.toggle('on', active);
-    btn.title = title;
-    btn.setAttribute('aria-label', title);
-    const oldSvg = btn.querySelector('svg');
-    if (oldSvg) oldSvg.replaceWith(makeCtrlIcon(iconSpec));
+    swapBtnIcon(btn, cacheKey, iconSpec, title);
   }
 
   function syncFullUI() {
@@ -2035,8 +2186,8 @@
     const icons = getUiCfg(V.getCfg()).icons;
     document.body.classList.toggle('os-full', osOn);
     document.body.classList.toggle('web-full', webFull);
-    setBtnIcon(ui.webfull, webFull ? icons.webExit : icons.webEnter, webFull ? '退出窗口全屏（W / Esc）' : '窗口全屏（W）', webFull);
-    setBtnIcon(ui.full, osOn ? icons.fullExit : icons.fullEnter, osOn ? '退出全屏（F / Esc）' : '全屏（F）', osOn);
+    setBtnIcon(ui.webfull, webFull ? 'webExit' : 'webEnter', webFull ? icons.webExit : icons.webEnter, webFull ? '退出窗口全屏（W / Esc）' : '窗口全屏（W）', webFull);
+    setBtnIcon(ui.full, osOn ? 'fullExit' : 'fullEnter', osOn ? icons.fullExit : icons.fullEnter, osOn ? '退出全屏（F / Esc）' : '全屏（F）', osOn);
     fit();
   }
 
@@ -2087,20 +2238,20 @@
     const keyMap = {
       '.': () => { pause(); seek(now + 1 / 30); },
       ',': () => { pause(); seek(now - 1 / 30); },
-      ']': () => jumpChapterDelta(1),
-      PageDown: () => jumpChapterDelta(1),
-      '[': () => jumpChapterDelta(-1),
-      PageUp: () => jumpChapterDelta(-1),
+      ']': () => { jumpChapterDelta(1); flashUi(); },
+      PageDown: () => { jumpChapterDelta(1); flashUi(); },
+      '[': () => { jumpChapterDelta(-1); flashUi(); },
+      PageUp: () => { jumpChapterDelta(-1); flashUi(); },
       w: () => fallbackWebFull(true),
       W: () => fallbackWebFull(true),
       f: toggleOsFull,
       F: toggleOsFull,
-      m: () => setMuted(!isAllMuted()),
-      M: () => setMuted(!isAllMuted()),
-      b: () => { if (bgmAudio) setBgm(!(!isAllMuted() && bgmOn)); },
-      B: () => { if (bgmAudio) setBgm(!(!isAllMuted() && bgmOn)); },
-      ArrowRight: e => seek(now + (e.shiftKey ? 1 : 5)),
-      ArrowLeft: e => seek(now - (e.shiftKey ? 1 : 5)),
+      m: () => { setMuted(!isAllMuted()); flashUi(); },
+      M: () => { setMuted(!isAllMuted()); flashUi(); },
+      b: () => { if (bgmAudio) { setBgm(!(!isAllMuted() && bgmOn)); flashUi(); } },
+      B: () => { if (bgmAudio) { setBgm(!(!isAllMuted() && bgmOn)); flashUi(); } },
+      ArrowRight: e => { seek(now + (e.shiftKey ? 1 : 5)); flashUi(); },
+      ArrowLeft: e => { seek(now - (e.shiftKey ? 1 : 5)); flashUi(); },
     };
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') { handleEscapeKey(bar, e); return; }
@@ -2113,22 +2264,48 @@
     });
   }
 
-  function bindIdleWake() {
-    let idle;
-    const wakeUi = () => {
-      document.body.classList.add('ui-active');
-      clearTimeout(idle);
-      idle = setTimeout(() => document.body.classList.remove('ui-active'), 2500);
-    };
-    addEventListener('pointermove', wakeUi);
-    addEventListener('pointerdown', wakeUi);
-    addEventListener('focusin', wakeUi);
-    wakeUi();
+  function bindIdleWake(bar, uiCfg) {
+    const hotZone = uiCfg.autoHideZone;
+    const leaveDelay = uiCfg.autoHideDelay;
+    addEventListener('pointermove', e => {
+      const hot = e.clientY >= innerHeight - hotZone || Boolean(bar && bar.contains(e.target));
+      if (hot) showUiHold();
+      else if (inHotZone) { inHotZone = false; scheduleUiHide(leaveDelay); }
+    });
+    document.addEventListener('mouseleave', () => { inHotZone = false; scheduleUiHide(leaveDelay); });
+    addEventListener('blur', () => { inHotZone = false; scheduleUiHide(leaveDelay); });
+    addEventListener('pointerdown', e => {
+      if (e.pointerType === 'touch') flashUi(bar && bar.contains(e.target) ? 2000 : 1500);
+    });
+    addEventListener('focusin', e => {
+      if (bar && bar.contains(e.target)) flashUi(1200);
+    });
+    flashUi(uiCfg.actionWakeDelay);
     document.getElementById('viewport').addEventListener('click', e => {
       if (e.target.closest('[data-interactive]')) return;
       if (!playing && isInteractiveHold()) return;
       playing ? pause() : play();
     });
+  }
+
+  function syncPlayBtnUI() {
+    if (!ui.play) return;
+    const icons = getUiCfg(V.getCfg()).icons;
+    const state = playing ? 'playing' : (ended ? 'ended' : 'paused');
+    const key = playing ? 'pause' : (ended ? 'replay' : 'play');
+    const label = playing ? '暂停（空格）' : (ended ? '重播（空格）' : '播放（空格）');
+    ui.play.dataset.state = state;
+    ui.play.setAttribute('aria-pressed', String(playing));
+    swapBtnIcon(ui.play, key, icons[key], label);
+  }
+
+  function syncSubsBtnUI() {
+    if (!ui.subs) return;
+    const icons = getUiCfg(V.getCfg()).icons;
+    const key = showSubs ? 'subsOn' : 'subsOff';
+    ui.subs.classList.toggle('is-sub-on', showSubs);
+    ui.subs.classList.toggle('is-off', !showSubs);
+    swapBtnIcon(ui.subs, key, icons[key], showSubs ? '关闭字幕' : '开启字幕');
   }
 
   function buildUI(uiCfg) {
@@ -2140,6 +2317,7 @@
     ui.thumb = bar.querySelector('.thumb');
     ui.time = bar.querySelector('.time');
     ui.rate = bar.querySelector('[data-act=rate]');
+    ui.subs = bar.querySelector('[data-act=subs]');
     ui.mute = bar.querySelector('[data-act=mute]');
     ui.webfull = bar.querySelector('[data-act=webfull]');
     ui.full = bar.querySelector('[data-act=full]');
@@ -2154,12 +2332,12 @@
     buildSoundMenu(bar);
     bindMenuAutoClose(bar);
 
-    const subsBtn = bar.querySelector('[data-act=subs]');
-    subsBtn.classList.toggle('on', showSubs);
-    subsBtn.onclick = e => {
+    syncRateBtnUI();
+    syncSubsBtnUI();
+    ui.subs.onclick = () => {
       showSubs = !showSubs;
       document.body.classList.toggle('nosubs', !showSubs);
-      e.currentTarget.classList.toggle('on', showSubs);
+      syncSubsBtnUI();
       render(now);
     };
     syncSoundMenuUI();
@@ -2176,7 +2354,7 @@
     document.addEventListener('fullscreenchange', syncFullUI);
     document.addEventListener('webkitfullscreenchange', syncFullUI);
     bindKeyboard(bar);
-    bindIdleWake();
+    bindIdleWake(bar, uiCfg);
   }
 
   function updateUI() {
@@ -2187,19 +2365,21 @@
     if (!ui.time.dataset.copied) ui.time.textContent = fmtTime(now) + ' / ' + fmtTime(V.duration);
     const idx = V.scenes.indexOf(current);
     if (ui.chapLabel && current) ui.chapLabel.textContent = `${String(idx + 1).padStart(2, '0')} · ${current.title}`;
-    ui.play.textContent = playing ? '❚❚' : '▶';
+    syncPlayBtnUI();
     if (ui.chapItems) ui.chapItems.forEach((it, i) => toggle(it, 'on', i === idx));
     V.controls.forEach(c => { if (typeof c.sync === 'function') c.sync(c._el, V); });
   }
 
   function fit() {
     const vp = document.getElementById('viewport');
+    const bar = document.getElementById('controls');
     const W = V.stageWidth || 1920, H = V.stageHeight || 1080;
     const vpW = (vp && vp.clientWidth) || innerWidth;
     const vpH = (vp && vp.clientHeight) || innerHeight;
+    const ctrlH = (bar && bar.offsetHeight) || 46;
     const k = Math.min(vpW / W, vpH / H);
     const letterbox = Math.max(0, (vpH - H * k) / 2);
-    const overlap = Math.round(Math.max(0, (54 - letterbox) / Math.max(0.1, k)));
+    const overlap = Math.round(Math.max(0, (ctrlH + 6 - letterbox) / Math.max(0.1, k)));
     stage.style.transform = `translate(-50%,-50%) scale(${k})`;
     stage.style.setProperty('--ctrl-overlap', overlap + 'px');
     if (vp) vp.style.setProperty('--k', k);
@@ -2220,7 +2400,7 @@
     el.addEventListener('canplay', () => { if (playing && el.paused && !el.seeking) safePlayAudio(); });
     el.addEventListener('ended', () => { if (playing && targetSeekTime == null) finishPlayback(); });
     el.addEventListener('error', () => {
-      if (audio === el) { audio = null; if (!RECORD && ui.mute) ui.mute.classList.remove('on'); }
+      if (audio === el) { audio = null; if (!RECORD) syncSoundMenuUI(); }
       audioBlocked = true;
     });
     document.addEventListener('visibilitychange', () => {
@@ -2387,7 +2567,7 @@
     V._playerCtl = {
       play, pause, replay, seek, setRate, setBgm, setVoice, setMuted,
       enterSandbox, exitSandbox, tryEgg,
-      fmtTime, updateUI,
+      fmtTime, updateUI, flashUi,
       setOpenMenu: m => setOpenMenu(document.getElementById('controls'), m),
       getRate: () => playbackRate,
       toggleLoopScene: () => (loopScene = !loopScene),

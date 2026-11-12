@@ -76,7 +76,8 @@ function writeTestProjectFiles(videoDir) {
     '  const k = Math.abs(near) < dur ? 1 - Math.abs(near) / dur : 0;',
     '  if (curSc && curSc.root) curSc.root.style.opacity = (1 - k * 0.4).toFixed(3);',
     '});',
-    'V.control({ id: "test-btn", label: "TAG", title: "Custom Control", onClick() { window.__ctrlClicked = true; } });',
+    'V.icons({ pin: ["M8 2.5v7", "M5 6.5h6", "M8 10v3.5"] });',
+    'V.control({ id: "test-btn", icon: "pin", title: "Custom Control", onClick() { window.__ctrlClicked = true; } });',
     'V.subtitle({',
     '  modes: { mascotLeft: { pos: "left", left: "180px", maxWidth: "420px" } },',
     '  lead: (h) => h("span", { id: "test-sub-mascot" }, "MASCOT"),',
@@ -145,7 +146,7 @@ async function verifyIframeWebFullContract(page, port) {
     const injected = doc.createElement('button');
     injected.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16"></svg>';
     doc.querySelector('[data-act="webfull"]').before(injected);
-    const iconWidths = [injected, doc.querySelector('[data-act="webfull"]'), doc.querySelector('[data-act="full"]')]
+    const iconWidths = Array.from(doc.querySelectorAll('#controls .ctrl-rbtn, #controls .chap-wrap ~ button'))
       .map(b => Math.round(b.getBoundingClientRect().width));
     await win.V.seekToAsync(0.8);
     doc.querySelector('[data-act="webfull"]').click();
@@ -161,16 +162,61 @@ async function verifyIframeWebFullContract(page, port) {
       ctrlTop: c.top,
     };
   });
-  assert.equal(dodge.rbtnCount, 5, 'Single-layer same-origin iframe must auto-render [data-act="webfull"] (5 right buttons)');
+  assert.equal(dodge.rbtnCount, 6, 'Single-layer same-origin iframe must auto-render [data-act="webfull"] (6 right icon buttons)');
   for (const w of dodge.iconWidths) assert.equal(w, dodge.iconWidths[0], 'All right-side icon buttons (including injected SVG buttons) must share uniform width');
   assert.equal(dodge.expanded, true, 'Clicking webfull inside single-layer iframe must expand iframe to viewport');
   assert.ok(dodge.subBottom <= dodge.ctrlTop, `Fullscreen #subs (${dodge.subBottom}) must dodge above #controls (${dodge.ctrlTop})`);
+}
+
+async function verifyPotPlayerAutoHideContract(page) {
+  await page.mouse.move(200, 200);
+  await page.evaluate(() => window.__video.play());
+  await page.waitForTimeout(960);
+  const idleHidden = await page.evaluate(() => ({
+    uiActive: document.body.classList.contains('ui-active'),
+    opacity: Number(getComputedStyle(document.getElementById('controls')).opacity),
+  }));
+  assert.equal(idleHidden.uiActive, false, 'Playing with pointer outside bottom hot-zone must clear .ui-active');
+  assert.ok(idleHidden.opacity < 0.05, `Expected hidden #controls opacity ~0, got ${idleHidden.opacity}`);
+
+  await page.mouse.move(200, 706);
+  await page.waitForTimeout(190);
+  const hotWake = await page.evaluate(() => ({
+    uiActive: document.body.classList.contains('ui-active'),
+    opacity: Number(getComputedStyle(document.getElementById('controls')).opacity),
+  }));
+  assert.equal(hotWake.uiActive, true, 'Entering bottom hot-zone must immediately wake #controls');
+  assert.ok(hotWake.opacity > 0.95, `Expected awake #controls opacity ~1, got ${hotWake.opacity}`);
+
+  await page.mouse.move(200, 200);
+  await page.waitForTimeout(520);
+  const fastHide = await page.evaluate(() => ({
+    uiActive: document.body.classList.contains('ui-active'),
+    opacity: Number(getComputedStyle(document.getElementById('controls')).opacity),
+  }));
+  assert.equal(fastHide.uiActive, false, 'Leaving bottom hot-zone must clear .ui-active within ~300ms');
+  assert.ok(fastHide.opacity < 0.05, `Expected fast-hidden #controls opacity ~0, got ${fastHide.opacity}`);
+
+  await page.evaluate(() => { window.__video.pause(); window.__video.seek(0.2); });
+  await page.waitForTimeout(200);
+  const pausedHold = await page.evaluate(() => Number(getComputedStyle(document.getElementById('controls')).opacity));
+  assert.ok(pausedHold > 0.95, 'Paused state must keep #controls visible');
 }
 
 async function verifyPlayerBarContracts(page, port) {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto(`http://127.0.0.1:${port}/demo/`, { waitUntil: 'networkidle' });
   const barInfo = await page.evaluate(async () => {
+    const isIconNode = sel => {
+      const el = document.querySelector(sel);
+      return Boolean(el && el.textContent.trim() === '' && el.querySelector('svg.ctrl-ico'));
+    };
+    const allIconsAt1x = ['.ctrl-home', '[data-act="play"]', '[data-custom-ctrl="test-btn"]', '[data-act="rate"]', '[data-act="subs"]', '[data-act="mute"]', '[data-act="full"]', '.chap-caret']
+      .every(isIconNode);
+    const rbtnSizes = Array.from(document.querySelectorAll('#controls .ctrl-rbtn')).map(b => {
+      const r = b.getBoundingClientRect();
+      return { w: Math.round(r.width), h: Math.round(r.height) };
+    });
     const track = document.querySelector('#controls .track');
     const w0 = track.getBoundingClientRect().width;
     await window.V.seekToAsync(window.V.scenes[1].start + 0.6);
@@ -179,39 +225,42 @@ async function verifyPlayerBarContracts(page, port) {
     const rateOpen = document.getElementById('controls').classList.contains('rate-open');
     const item15 = Array.from(document.querySelectorAll('.rate-item')).find(el => el.textContent.includes('1.5x'));
     item15.click();
-    const textBtns = Array.from(document.querySelectorAll('#controls .ctrl-rbtn:not(.ctrl-icon-btn)')).map(b => {
-      const r = b.getBoundingClientRect();
-      return { w: Math.round(r.width), h: Math.round(r.height) };
-    });
-    const wf = document.querySelector('[data-act="webfull"]');
-    const ff = document.querySelector('[data-act="full"]');
-    const ffRect = ff.getBoundingClientRect();
+    const rateBtn = document.querySelector('[data-act="rate"]');
+    const rateBadge15 = rateBtn.textContent.trim();
+    const rateVal = window.__video.getSyncState().playbackRate;
+    window.__video.setRate(1);
+    const revertedIcon = isIconNode('[data-act="rate"]');
     return {
+      overlayDefault: document.body.classList.contains('ctrl-overlay'),
       hudTicks: document.querySelectorAll('#hud .hud-tick').length,
       trackMarks: document.querySelectorAll('#controls .track .mark').length,
       w0: Math.round(w0 * 100),
       w1: Math.round(w1 * 100),
+      allIconsAt1x,
+      rbtnSizes,
       rateOpen,
-      rateVal: window.__video.getSyncState().playbackRate,
-      textBtns,
-      fullSize: { w: Math.round(ffRect.width), h: Math.round(ffRect.height) },
-      noStandaloneWebFull: wf === null,
-      iconOnly: ff.textContent.trim() === '' && Boolean(ff.querySelector('svg')),
+      rateVal,
+      rateBadge15,
+      revertedIcon,
+      noStandaloneWebFull: document.querySelector('[data-act="webfull"]') === null,
     };
   });
+  assert.equal(barInfo.overlayDefault, true, 'Default controlsMode must be overlay (PotPlayer style)');
   assert.equal(barInfo.hudTicks, 1, 'Expected 1 .hud-tick for 2 scenes');
   assert.equal(barInfo.trackMarks, 1, 'Expected 1 .track .mark for 2 scenes');
   assert.equal(barInfo.w0, barInfo.w1, 'Progress bar width must stay invariant across chapter changes');
+  assert.equal(barInfo.allIconsAt1x, true, 'Home, play, custom control, 1.0x rate, subs, mute, fullscreen & chapter caret must all render SVG icons');
+  assert.equal(barInfo.rbtnSizes.length, 5, 'Expected 5 compact right-side icon buttons on standalone page');
+  for (const b of barInfo.rbtnSizes) {
+    assert.equal(b.w, 32, 'Compact right-side icon buttons must be 32px wide');
+    assert.equal(b.h, 30, 'Compact right-side icon buttons must be 30px tall');
+  }
   assert.equal(barInfo.rateOpen, true, 'Clicking rate button must open upward .rate-menu');
   assert.equal(barInfo.rateVal, 1.5, 'Selecting 1.5x from rate menu must update playbackRate');
+  assert.equal(barInfo.rateBadge15, '1.5x', 'Non-1.0x playbackRate must display compact numeric badge');
+  assert.equal(barInfo.revertedIcon, true, 'Resetting playbackRate to 1.0x must restore speedometer SVG icon');
   assert.equal(barInfo.noStandaloneWebFull, true, 'Standalone top-level page must omit redundant webfull button by default');
-  assert.equal(barInfo.iconOnly, true, 'Fullscreen button must be icon-only');
-  assert.equal(barInfo.textBtns.length, 3, 'Expected 3 right-side text buttons on standalone page');
-  assert.equal(barInfo.fullSize.h, barInfo.textBtns[0].h, 'Icon button height must match text button height');
-  for (const b of barInfo.textBtns) {
-    assert.equal(b.w, barInfo.textBtns[0].w, 'All right-side text buttons must share identical width');
-    assert.equal(b.h, barInfo.textBtns[0].h, 'All right-side text buttons must share identical height');
-  }
+  await verifyPotPlayerAutoHideContract(page);
 
   await page.evaluate(() => window.V.setSubLayout('mascotLeft'));
   const subExt = await page.evaluate(() => {

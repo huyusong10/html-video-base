@@ -8,6 +8,7 @@
   V.presets = V.presets || {};
   V.locales = V.locales || {};
   V.subtitles = V.subtitles || {};
+  V.customIcons = V.customIcons || {};
   V.config = V.config || {};
   V.c = V.c || {};
   V.checkpointState = V.checkpointState || {};
@@ -60,6 +61,11 @@
 
   V.subtitle = function (def) {
     if (def) Object.assign(V.subtitles, def);
+    return V;
+  };
+
+  V.icons = function (dict) {
+    if (dict) Object.assign(V.customIcons, dict);
     return V;
   };
 
@@ -126,12 +132,25 @@
     return (V.config && V.config.lang) || '';
   };
 
+  function mergeUiDict(baseUi, nextUi) {
+    if (!nextUi) return Object.assign({}, baseUi || {});
+    const out = Object.assign({}, baseUi || {}, nextUi);
+    if ((baseUi && baseUi.icons) || nextUi.icons) {
+      out.icons = Object.assign({}, (baseUi && baseUi.icons) || {}, nextUi.icons || {});
+    }
+    return out;
+  }
+
   V.getCfg = function () {
     V.applyConfiguredPresets();
     const lang = V.getActiveLang();
     const loc = (lang && V.locales[lang]) || null;
     const locCfg = Object.assign({}, (loc && loc.config) || {});
     if (loc && loc.title && !locCfg.title) locCfg.title = loc.title;
-    return Object.assign({}, V.themeDefaults || {}, V.config || {}, locCfg);
+    const td = V.themeDefaults || {};
+    const vc = V.config || {};
+    const merged = Object.assign({}, td, vc, locCfg);
+    merged.ui = mergeUiDict(mergeUiDict(td.ui, vc.ui), locCfg.ui);
+    return merged;
   };
 })(globalThis.V = globalThis.V || {});

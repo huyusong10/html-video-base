@@ -50,7 +50,8 @@ python -m venv .runtime/venv
 | :--- | :--- |
 | `V.use(plugin)` | 注册生命周期插件（`boot` / `layout` / `tick` / `seek` / `play` / `pause` / `sceneChange`） |
 | `V.transition(name, (prev, curr, k, sc) => {})` | 注册自定义跨幕转场（内置 `none` / `fade` / `slide` / `wipe` / `tiles`） |
-| `V.control({ id, label, title, onClick })` | 向底部控制栏扩展槽注入自定义交互按钮 |
+| `V.control({ id, icon, title, onClick, sync })` | 向底部控制栏扩展槽注入自定义图标按钮（推荐传 `16×16` SVG 路径数组、SVG 字符串或渲染函数） |
+| `V.icons(dict)` / `V.makeIcon(spec)` | 覆盖控制栏内置图标字典（`home` / `play` / `pause` / `replay` / `rate` / `subsOn` / `subsOff` / `volumeOn` / `volumeVoice` / `volumeBgm` / `volumeMute` / `webEnter` / `webExit` / `fullEnter` / `fullExit`）或生成同规格图标节点 |
 | `V.preset(name, factory)` | 注册可复用视觉原语（挂载于 `V.c[name]`） |
 | `V.layer({ id, prop, zIndex, defaultState, create, update })` | 注册跨幕持久角色/挂件层；`update(st, info)` 实时接收 30Hz 语音能量 `info.energy`（`0..1`）驱动真实口型 |
 | `V.subtitle({ position, modes, lead, tail, onUpdate })` + `V.setSubLayout(spec)` | 定制字幕位置（`center`/`left`/`right`/`top` 或任意坐标避让吉祥物）、挂载前置/后置吉祥物与角标插槽（`.sub-lead` / `.sub-tail`），并支持按幕 `scene.subLayout` 或逐帧 `f(t)` 动态联动 |
@@ -60,7 +61,7 @@ python -m venv .runtime/venv
 | `V.tryEgg(targetSec, hint)` / `V.enterSandbox` / `V.exitSandbox` | 终章彩蛋与沙盒试玩跳转及悬浮返回条 |
 | `V.search(query)` / `V.openSearch()` / `V.getDeepLink(t)` | 内置全文台词与章节检索跳转（快捷键 `/` 或 `Ctrl+K`）及时间码点击复制 `?t=` 深链 |
 | `V.setBgm(on)` / `V.setVoice(on)` / `V.setMuted(on)` | 解说主轨与 BGM 伴奏轨独立开关（控制栏「声音」上拉菜单 / 快捷键 `B` 开关配乐、`M` 全部静音） |
-| `V.config.ui` / `V.themeDefaults.ui` | 定制播放器模式（`controlsMode: 'docked' \| 'overlay'`）、章节分段刻度（`chapterMarks`）、倍速档位（`rates`）与全屏图标（`icons`） |
+| `V.config.ui` / `V.themeDefaults.ui` | 定制播放器模式（默认 `controlsMode: 'overlay'` PotPlayer 底边热区浮出 + 移开 `0.3s` 快速收起；可选 `'docked'`）、图标预设（`iconPreset: 'default' \| 'pixel'`）、自定义图标（`icons`）、章节分段刻度（`chapterMarks`）与倍速档位（`rates`） |
 
 ## 主题与控制栏 CSS 变量槽位
 
