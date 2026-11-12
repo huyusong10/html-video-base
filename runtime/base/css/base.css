@@ -271,29 +271,60 @@ body.record #hud { pointer-events: none; }
   will-change: transform;
 }
 
-/* 底部防抖胶囊字幕与角色铭牌（浮层控制栏唤起时自动上移 --ctrl-dodge 避让） */
+/* 可定位与可挂载前置/后置伴随物（吉祥物、声波、角标）的胶囊字幕系统 */
 #subs {
-  position: absolute; left: 50%;
-  bottom: calc(var(--sub-bottom) + var(--ctrl-dodge, 0px));
-  transform: translateX(-50%);
+  position: absolute;
+  left: var(--sub-left, 50%);
+  right: var(--sub-right, auto);
+  top: var(--sub-top, auto);
+  bottom: var(--sub-has-top, calc(var(--sub-bottom) + var(--sub-offset-y, 0px) + var(--ctrl-dodge, 0px)));
+  transform: var(--sub-transform, translateX(calc(-50% + var(--sub-offset-x, 0px))));
   z-index: var(--sub-z);
-  width: max-content;
-  max-width: calc(var(--stage-w) - 160px);
+  width: var(--sub-width, max-content);
+  max-width: var(--sub-max-w, calc(var(--stage-w) - 160px));
   pointer-events: none;
+  overflow: visible;
   padding: var(--sub-padding);
   border-radius: var(--sub-radius);
   background: var(--sub-bg);
   border: var(--sub-border-w) solid var(--sub-border);
   box-shadow: var(--sub-shadow);
   backdrop-filter: blur(8px);
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: var(--sub-gap, 12px);
   opacity: 0; visibility: hidden;
   transition: bottom 0.22s ease;
 }
+#subs[data-sub-pos="left"] {
+  --sub-left: var(--sub-edge, 120px);
+  --sub-right: auto;
+  --sub-transform: translateX(var(--sub-offset-x, 0px));
+  --sub-align: left;
+}
+#subs[data-sub-pos="right"] {
+  --sub-left: auto;
+  --sub-right: var(--sub-edge, 120px);
+  --sub-transform: translateX(var(--sub-offset-x, 0px));
+  --sub-align: right;
+}
+#subs[data-sub-pos="top"] {
+  --sub-top: var(--sub-top-edge, 72px);
+  --sub-has-top: auto;
+}
 body.record #subs {
-  bottom: var(--sub-bottom) !important;
+  --ctrl-dodge: 0px;
   transition: none !important;
 }
+.sub-lead,
+.sub-tail {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: visible;
+}
+.sub-lead:empty,
+.sub-tail:empty { display: none; }
 .sub-speaker {
   display: none;
   flex-shrink: 0;
@@ -315,7 +346,7 @@ body.record #subs {
   letter-spacing: 0.02em;
   color: var(--sub-color, var(--sub-fg));
   white-space: pre-wrap;
-  text-align: center;
+  text-align: var(--sub-align, center);
 }
 .sub-text > span { grid-area: 1 / 1; }
 .sub-text > .ghost { visibility: hidden; }

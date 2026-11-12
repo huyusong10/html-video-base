@@ -7,6 +7,7 @@
   V.controls = V.controls || [];
   V.presets = V.presets || {};
   V.locales = V.locales || {};
+  V.subtitles = V.subtitles || {};
   V.config = V.config || {};
   V.c = V.c || {};
   V.checkpointState = V.checkpointState || {};
@@ -57,6 +58,11 @@
     return V;
   };
 
+  V.subtitle = function (def) {
+    if (def) Object.assign(V.subtitles, def);
+    return V;
+  };
+
   V.preset = function (def, fn) {
     if (typeof def === 'string' && typeof fn === 'function') {
       V.c[def] = fn;
@@ -95,6 +101,7 @@
     if (Array.isArray(p.stylesheets)) p.stylesheets.forEach(injectStylesheet);
     if (p.transitions) Object.entries(p.transitions).forEach(([k, fn]) => V.transition(k, fn));
     if (Array.isArray(p.layers)) p.layers.forEach(l => V.layer(l));
+    if (p.subtitles) V.subtitle(p.subtitles);
     if (p.components) Object.assign(V.c, typeof p.components === 'function' ? p.components(V) : p.components);
     if (typeof p.setup === 'function') p.setup(V);
   };

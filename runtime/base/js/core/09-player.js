@@ -16,7 +16,7 @@
   const DEV = params.has('dev') && !RECORD;
   V._isRecord = RECORD;
 
-  let audio = null, stage = null, subs = null, subSpeaker = null, subText = null;
+  let audio = null, stage = null, subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
   let current = null, now = 0, prevRenderNow = 0, playing = false, lastTs = 0;
   let showSubs = !params.has('nosubs'), playbackRate = 1, loopScene = false, muted = false;
   let scrubbing = false, targetSeekTime = null, lastSeekTarget = -1, lastSeekAt = 0;
@@ -96,7 +96,11 @@
       h('div', { id: 'stage' },
         h('canvas', { id: 'gl', width: String(W), height: String(H), class: V.gl ? '' : 'is-off' }),
         h('div', { id: 'hud', 'data-interactive': '1', class: uiCfg.hud ? '' : 'is-off' }, h('div', { class: 'hud-track' }, h('i', { class: 'hud-bar' }))),
-        h('div', { id: 'subs' }, h('span', { class: 'sub-speaker' }), h('p', { class: 'sub-text' }, h('span', { class: 'ghost' }), h('span'))),
+        h('div', { id: 'subs', 'data-sub-pos': 'center' },
+          h('div', { class: 'sub-lead' }),
+          h('span', { class: 'sub-speaker' }),
+          h('p', { class: 'sub-text' }, h('span', { class: 'ghost' }), h('span')),
+          h('div', { class: 'sub-tail' })),
         h('div', { id: 'checkpoint-overlay' }),
         h('div', { id: 'wipe' }),
         h('div', { id: 'safe-guide' }, h('div', { class: 'safe-action' }), h('div', { class: 'safe-sub' }, 'SUBTITLE SAFE ZONE'))),
@@ -156,13 +160,77 @@
     }
   }
 
-  function updateSubs(sc, lt) {
+  const SUB_VAR_MAP = [
+    ['left', '--sub-left'], ['right', '--sub-right'], ['top', '--sub-top'], ['bottom', '--sub-bottom'],
+    ['offsetX', '--sub-offset-x'], ['offsetY', '--sub-offset-y'], ['align', '--sub-align'],
+    ['maxWidth', '--sub-max-w'], ['padding', '--sub-padding'], ['gap', '--sub-gap'], ['zIndex', '--sub-z'],
+  ];
+
+  function getSubCfg() {
+    const cfg = V.getCfg();
+    return Object.assign({}, cfg.subtitles || {}, V.subtitles || {});
+  }
+
+  function resolveSubLayoutObj(spec, subCfg) {
+    if (!spec) return { pos: 'center' };
+    if (typeof spec === 'string') {
+      const m = subCfg && subCfg.modes && subCfg.modes[spec];
+      return m ? Object.assign({ pos: 'center' }, m) : { pos: spec };
+    }
+    return Object.assign({ pos: spec.pos || 'center' }, spec);
+  }
+
+  function applySubLayout(spec) {
+    if (!subs) return;
+    const obj = resolveSubLayoutObj(spec, getSubCfg());
+    subs.dataset.subPos = obj.pos || 'center';
+    for (const [prop, cssVar] of SUB_VAR_MAP) {
+      const val = obj[prop];
+      if (val == null || val === '') subs.style.removeProperty(cssVar);
+      else subs.style.setProperty(cssVar, typeof val === 'number' && prop !== 'zIndex' ? `${val}px` : String(val));
+    }
+  }
+  V.setSubLayout = applySubLayout;
+
+  function mountSubSlot(slotEl, factory) {
+    if (!slotEl || !factory) return;
+    slotEl.innerHTML = '';
+    const res = typeof factory === 'function' ? factory(h, V) : factory;
+    if (!res) return;
+    if (res.nodeType) slotEl.appendChild(res);
+    else slotEl.innerHTML = String(res);
+  }
+
+  function mountSubSlots() {
+    const subCfg = getSubCfg();
+    mountSubSlot(subLead, subCfg.lead);
+    mountSubSlot(subTail, subCfg.tail);
+    if (subCfg.layout || subCfg.position) applySubLayout(subCfg.layout || subCfg.position);
+  }
+
+  function runSubHook(subCfg, cue, sc, idx, lt) {
+    const fn = subCfg.onUpdate || subCfg.update;
+    if (typeof fn !== 'function') return;
+    const info = { t: now, lt, scene: sc, sceneIndex: idx, speaking: Boolean(cue), energy: V.getSceneEnergy(sc, idx, lt) };
+    fn(cue, info, { subs, lead: subLead, tail: subTail, speaker: subSpeaker, text: subText });
+  }
+
+  function syncSceneSubLayout(sc, lt) {
+    const spec = sc.subLayout || sc.subtitles;
+    if (!spec) return;
+    applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
+  }
+
+  function updateSubs(sc, idx, lt) {
+    const subCfg = getSubCfg();
+    syncSceneSubLayout(sc, lt);
     const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
     let cue = null;
     activeCueIdx = -1;
     sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
     list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
     subs.style.visibility = cue && showSubs ? 'visible' : 'hidden';
+    runSubHook(subCfg, cue, sc, idx, lt);
     if (!cue) return;
     const a = Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
     subs.style.opacity = String(clamp(a));
@@ -202,7 +270,7 @@
     document.body.classList.toggle('started', now > 0.05);
     sc.update(lt, sc.ctx);
     syncSceneVideoClips(lt);
-    updateSubs(sc, lt);
+    updateSubs(sc, idx, lt);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
     V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: RECORD, playing, scrubbing, pause, play });
     V.emit('onRender', { now, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx, playing, scrubbing, hasAudio: Boolean(audio), isRecord: RECORD, muted });
@@ -748,8 +816,11 @@
     if (cfg.title) document.title = cfg.title;
     stage = document.getElementById('stage');
     subs = document.getElementById('subs');
+    subLead = subs.querySelector('.sub-lead');
+    subTail = subs.querySelector('.sub-tail');
     subSpeaker = subs.querySelector('.sub-speaker');
     subText = subs.querySelector('.sub-text');
+    mountSubSlots();
     V.layout();
     mountHudTicks(uiCfg);
     V._layersRuntime.mountLayers(stage, subs);

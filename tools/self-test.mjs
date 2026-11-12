@@ -77,6 +77,11 @@ function writeTestProjectFiles(videoDir) {
     '  if (curSc && curSc.root) curSc.root.style.opacity = (1 - k * 0.4).toFixed(3);',
     '});',
     'V.control({ id: "test-btn", label: "TAG", title: "Custom Control", onClick() { window.__ctrlClicked = true; } });',
+    'V.subtitle({',
+    '  modes: { mascotLeft: { pos: "left", left: "180px", maxWidth: "420px" } },',
+    '  lead: (h) => h("span", { id: "test-sub-mascot" }, "MASCOT"),',
+    '  onUpdate(_cue, info) { if (info.energy > 0) window.__subHookCalled = true; },',
+    '});',
     'V.preset("badge", (label) => V.u.h("div", { class: "test-preset-badge" }, label));',
     'V.layer({',
     '  id: "host", prop: "host", zIndex: 25,',
@@ -135,7 +140,7 @@ async function verifyPlayerBarContracts(page, port) {
   const barInfo = await page.evaluate(async () => {
     const track = document.querySelector('#controls .track');
     const w0 = track.getBoundingClientRect().width;
-    await window.V.seekToAsync(window.V.scenes[1].start + 0.1);
+    await window.V.seekToAsync(window.V.scenes[1].start + 0.6);
     const w1 = track.getBoundingClientRect().width;
     document.querySelector('[data-act="rate"]').click();
     const rateOpen = document.getElementById('controls').classList.contains('rate-open');
@@ -169,6 +174,22 @@ async function verifyPlayerBarContracts(page, port) {
     assert.equal(b.w, barInfo.rbtns[0].w, 'All 5 right-side buttons must share identical width');
     assert.equal(b.h, barInfo.rbtns[0].h, 'All 5 right-side buttons must share identical height');
   }
+
+  await page.evaluate(() => window.V.setSubLayout('mascotLeft'));
+  const subExt = await page.evaluate(() => {
+    const subs = document.getElementById('subs');
+    return {
+      hasMascotLead: Boolean(document.getElementById('test-sub-mascot')),
+      hookCalled: Boolean(window.__subHookCalled),
+      pos: subs.dataset.subPos,
+      leftVar: subs.style.getPropertyValue('--sub-left'),
+    };
+  });
+  assert.equal(subExt.hasMascotLead, true, 'V.subtitle({ lead }) must mount companion element inside #subs .sub-lead');
+  assert.equal(subExt.hookCalled, true, 'V.subtitle({ onUpdate }) must receive 30Hz energy updates');
+  assert.equal(subExt.pos, 'left', 'V.setSubLayout(mode) must switch data-sub-pos');
+  assert.equal(subExt.leftVar, '180px', 'V.setSubLayout(mode) must apply custom --sub-left coordinate');
+  await page.evaluate(() => window.V.setSubLayout('center'));
 
   await page.evaluate(async () => {
     await window.V.seekToAsync(0.8);

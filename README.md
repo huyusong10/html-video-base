@@ -52,6 +52,7 @@ python -m venv .runtime/venv
 | `V.control({ id, label, title, onClick })` | 向底部控制栏扩展槽注入自定义交互按钮 |
 | `V.preset(name, factory)` | 注册可复用视觉原语（挂载于 `V.c[name]`） |
 | `V.layer({ id, prop, zIndex, defaultState, create, update })` | 注册跨幕持久角色/挂件层；`update(st, info)` 实时接收 30Hz 语音能量 `info.energy`（`0..1`）驱动真实口型 |
+| `V.subtitle({ position, modes, lead, tail, onUpdate })` + `V.setSubLayout(spec)` | 定制字幕位置（`center`/`left`/`right`/`top` 或任意坐标避让吉祥物）、挂载前置/后置吉祥物与角标插槽（`.sub-lead` / `.sub-tail`），并支持按幕 `scene.subLayout` 或逐帧 `f(t)` 动态联动 |
 | `V.locale(lang, { title, scenes: { [id]: { title, lines, anchors } } })` | 注册多语种台词与 `x.at()` 语义词锚映射（`?lang=en` / `--lang en`） |
 | `V.u.videoClip(src, opts)` + `V.u.syncVideoClip(el, t)` | 受控内嵌 `<video>` 录屏：Web 播放同步、`seekToAsync` 精确锁帧、`mix.py` 原声混音 |
 | `scene.checkpoints` | Web 交互驻点暂停与分支问答（`?record=1` 导出模式自动直通） |
