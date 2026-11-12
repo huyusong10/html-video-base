@@ -1,0 +1,34 @@
+{
+  "name": "html-video-base",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "Minimal, universal, extensible pure-function timeline HTML video framework & multi-TTS rendering toolchain",
+  "license": "MIT",
+  "bin": {
+    "html-video": "./bin/html-video.mjs"
+  },
+  "exports": {
+    ".": "./runtime/base/js/index.mjs",
+    "./cli": "./tools/cli.mjs",
+    "./paths": "./tools/lib/paths.mjs",
+    "./runtime/engine": "./runtime/base/js/engine.js",
+    "./runtime/css": "./runtime/base/css/base.css"
+  },
+  "files": [
+    "bin",
+    "runtime",
+    "templates",
+    "tools",
+    "requirements.txt",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "assemble": "node tools/assemble-engine.mjs",
+    "lint:cc": "node tools/check-complexity.mjs",
+    "test": "node tools/check-complexity.mjs && node tools/self-test.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.51.0"
+  }
+}

@@ -1,0 +1,114 @@
+/* 本视频专属场景样式（底座不预置任何强风格卡片，由各视频自由定义视觉语言） */
+.tpl-frame {
+  inset: 96px 120px 140px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.tpl-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border-bottom: 2px solid var(--line);
+  padding-bottom: 20px;
+}
+
+.tpl-kicker {
+  font: 600 18px var(--font-mono);
+  color: var(--accent);
+  letter-spacing: 1px;
+}
+
+.tpl-title {
+  margin: 8px 0 0;
+  font-size: 52px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.tpl-kpi {
+  text-align: right;
+}
+.tpl-kpi strong {
+  display: block;
+  font: 700 54px/1 var(--font-mono);
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.tpl-kpi span {
+  font-size: 18px;
+  color: var(--muted);
+}
+
+.tpl-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 28px;
+  margin-top: 36px;
+  flex: 1;
+}
+
+.tpl-card {
+  padding: 36px;
+  background: var(--surface);
+  border: 2px solid var(--line);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+.tpl-card.is-focus {
+  border-color: var(--accent);
+  box-shadow: 0 12px 32px rgba(37, 99, 235, 0.12);
+}
+
+.tpl-step {
+  font: 600 18px var(--font-mono);
+  color: var(--accent);
+}
+.tpl-card h3 {
+  margin: 12px 0 8px;
+  font-size: 32px;
+}
+.tpl-card p {
+  margin: 0;
+  font-size: 22px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+
+.tpl-flow {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 40px;
+}
+.tpl-flow-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.tpl-node {
+  position: relative;
+  z-index: 1;
+  width: 360px;
+  padding: 32px;
+  background: var(--surface);
+  border: 2px solid var(--ink);
+  border-radius: 12px;
+  text-align: center;
+}
+.tpl-node b {
+  display: block;
+  font-size: 30px;
+  margin-bottom: 8px;
+}
+.tpl-node span {
+  font-size: 20px;
+  color: var(--muted);
+}

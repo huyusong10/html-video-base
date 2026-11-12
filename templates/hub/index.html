@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HTML 视频工作台</title>
+  <style>
+    :root {
+      --bg: #F8FAFC;
+      --surface: #FFFFFF;
+      --ink: #0F172A;
+      --muted: #64748B;
+      --line: #E2E8F0;
+      --accent: #2563EB;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 48px 24px;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    .wrap { max-width: 960px; margin: 0 auto; }
+    header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 24px;
+    }
+    h1 { margin: 0; font-size: 22px; font-weight: 600; }
+    .meta { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+    .list { display: flex; flex-direction: column; gap: 10px; }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 20px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+    }
+    .row-main { min-width: 0; }
+    .row-head { display: flex; align-items: center; gap: 10px; }
+    .row-id {
+      font: 12px ui-monospace, Consolas, monospace;
+      padding: 2px 7px;
+      background: #F1F5F9;
+      border-radius: 4px;
+      color: #334155;
+    }
+    .row-title { font-size: 16px; font-weight: 600; }
+    .row-sub { margin-top: 4px; color: var(--muted); font-size: 13px; }
+    .row-tags { display: flex; align-items: center; gap: 8px; flex: none; }
+    .tag {
+      font-size: 12px;
+      color: var(--muted);
+      padding: 3px 8px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      height: 32px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      color: var(--ink);
+      text-decoration: none;
+      font-size: 13px;
+    }
+    .btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .empty {
+      padding: 36px 24px;
+      background: var(--surface);
+      border: 1px dashed var(--line);
+      border-radius: 6px;
+      text-align: center;
+      color: var(--muted);
+    }
+    code {
+      padding: 3px 8px;
+      background: #F1F5F9;
+      border-radius: 4px;
+      color: var(--ink);
+      font: 13px ui-monospace, Consolas, monospace;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>HTML 视频工作台</h1>
+      <span class="meta" id="count">0 支视频</span>
+    </header>
+    <section class="list" id="list"></section>
+  </main>
+
+  <script src="manifest.js"></script>
+  <script>
+    const items = Array.isArray(window.VIDEO_MANIFEST) ? window.VIDEO_MANIFEST : [];
+    const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    document.getElementById('count').textContent = `${items.length} 支视频`;
+    const list = document.getElementById('list');
+
+    if (!items.length) {
+      list.innerHTML = '<div class="empty">暂无视频 · 运行 <code>npm run init -- demo</code> 创建第一支视频</div>';
+    } else {
+      for (const it of items) {
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.innerHTML = `
+          <div class="row-main">
+            <div class="row-head">
+              <span class="row-id">${it.id}</span>
+              <span class="row-title">${it.title || it.id}</span>
+            </div>
+            ${it.subtitle ? `<div class="row-sub">${it.subtitle}</div>` : ''}
+          </div>
+          <div class="row-tags">
+            <span class="tag">${it.width || 1920}×${it.height || 1080}</span>
+            <span class="tag">${it.scenes || 0} 幕 · ${fmt(it.duration || 0)}</span>
+            <a class="btn" href="${it.id}/?dev=1">调试</a>
+            <a class="btn primary" href="${it.id}/">▶ 播放</a>
+          </div>`;
+        list.appendChild(row);
+      }
+    }
+  </script>
+</body>
+</html>

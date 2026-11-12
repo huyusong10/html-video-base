@@ -1,0 +1,219 @@
+// 端到端全量自检（零本地 videos/base 目录）：
+// 覆盖微内核开放注册表、30Hz 真实口型包络、受控 <video> 寻道与混音、多语种与 .vtt/.srt 外挂字幕、
+// Web 交互驻点、SSE 实时热重载端点、按幕 SHA-256 增量渲染缓存与独立静态包 bundle
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { PKG_ROOT, resolveFfmpeg, loadChromium, findBrowserExecutable } from './lib/paths.mjs';
+import { startEphemeralVideoServer } from './lib/http-static.mjs';
+
+const TEST_ROOT = path.join(PKG_ROOT, '.runtime/self-test-proj');
+const CLI_BIN = path.join(PKG_ROOT, 'bin/html-video.mjs');
+
+function runCliCmd(args) {
+  const r = spawnSync(process.execPath, [CLI_BIN, ...args], {
+    cwd: TEST_ROOT,
+    encoding: 'utf8',
+    env: Object.assign({}, process.env, { VIDEO_PROJECT_ROOT: TEST_ROOT }),
+  });
+  if (r.status !== 0) {
+    throw new Error(`CLI failed (${args.join(' ')}):\n${r.stdout || ''}\n${r.stderr || ''}`);
+  }
+  return (r.stdout || '') + (r.stderr || '');
+}
+
+function createSampleMp4(ffmpegBin, outMp4) {
+  fs.mkdirSync(path.dirname(outMp4), { recursive: true });
+  const r = spawnSync(ffmpegBin, [
+    '-y', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', 'color=c=0x1e293b:s=320x180:d=1.5:r=15',
+    '-f', 'lavfi', '-i', 'sine=frequency=520:duration=1.5',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest',
+    outMp4,
+  ], { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`Failed generating sample clip: ${r.stderr}`);
+}
+
+function writeTestProjectFiles(videoDir) {
+  fs.writeFileSync(path.join(videoDir, 'mock_tts.py'), [
+    'import numpy as np, soundfile as sf',
+    'async def synthesize(text: str, out_path: str, cfg: dict):',
+    '    sr = 24000',
+    '    dur = max(1.1, min(2.2, 0.12 * len(text)))',
+    '    t = np.linspace(0, dur, int(sr * dur), endpoint=False)',
+    '    env = 0.55 + 0.45 * np.sin(2 * np.pi * 6.0 * t)',
+    '    wav = (0.35 * env * np.sin(2 * np.pi * 220.0 * t)).astype(np.float32)',
+    '    sf.write(out_path, wav, sr)',
+    '    return []',
+    '',
+  ].join('\n'), 'utf8');
+
+  fs.mkdirSync(path.join(videoDir, 'locales'), { recursive: true });
+  fs.writeFileSync(path.join(videoDir, 'locales/en.js'), [
+    'V.locale("en", {',
+    '  title: "Microkernel Demo EN",',
+    '  scenes: {',
+    '    s01: {',
+    '      title: "Architecture",',
+    '      lines: ["Welcome to the critical microkernel timeline."],',
+    '      anchors: { "关键": "critical" },',
+    '    },',
+    '    s02: {',
+    '      title: "Verification",',
+    '      lines: ["Every pure function stays deterministic."],',
+    '    },',
+    '  },',
+    '});',
+    '',
+  ].join('\n'), 'utf8');
+
+  fs.writeFileSync(path.join(videoDir, 'video.config.js'), [
+    'window.__pluginInstalled = false;',
+    'window.__maxLayerEnergy = 0;',
+    'V.use({ name: "test-plugin", install(v) { window.__pluginInstalled = Boolean(v); } });',
+    'V.transition("zoomFade", (dom, near, dur, curSc) => {',
+    '  const k = Math.abs(near) < dur ? 1 - Math.abs(near) / dur : 0;',
+    '  if (curSc && curSc.root) curSc.root.style.opacity = (1 - k * 0.4).toFixed(3);',
+    '});',
+    'V.control({ id: "test-btn", label: "TAG", title: "Custom Control", onClick() { window.__ctrlClicked = true; } });',
+    'V.preset("badge", (label) => V.u.h("div", { class: "test-preset-badge" }, label));',
+    'V.layer({',
+    '  id: "host", prop: "host", zIndex: 25,',
+    '  defaultState: { x: 100, y: 100, scale: 1 },',
+    '  create() { return V.u.h("div", { id: "test-host-layer" }, "HOST"); },',
+    '  update(st, info) { if (info.energy > window.__maxLayerEnergy) window.__maxLayerEnergy = info.energy; },',
+    '});',
+    'V.config = {',
+    '  title: "微内核自检演示",',
+    '  width: 640, height: 360, fps: 10,',
+    '  tts: { provider: "custom", script: "./mock_tts.py" },',
+    '  sceneScripts: ["js/s01.js", "js/s02.js"],',
+    '};',
+    '',
+  ].join('\n'), 'utf8');
+
+  fs.mkdirSync(path.join(videoDir, 'js'), { recursive: true });
+  fs.rmSync(path.join(videoDir, 'js/scenes.js'), { force: true });
+  const idxHtml = path.join(videoDir, 'index.html');
+  fs.writeFileSync(idxHtml, fs.readFileSync(idxHtml, 'utf8').replace('<script src="js/scenes.js"></script>', ''), 'utf8');
+
+  fs.writeFileSync(path.join(videoDir, 'js/s01.js'), [
+    'V.scene({',
+    '  id: "s01", title: "微内核架构",',
+    '  lines: ["欢迎体验关键微内核时间轴引擎。"],',
+    '  checkpoints: x => [{ at: 0.45, id: "cp-1", prompt: "继续演示？", actions: [{ label: "继续", resume: true }] }],',
+    '  build(root, x) {',
+    '    const badge = V.c.badge("OPEN-KERNEL");',
+    '    const clip = V.u.videoClip("assets/clip.mp4", { start: 0.05, volume: 0.25, style: { width: "160px", height: "90px" } });',
+    '    root.append(badge, clip);',
+    '    this._badge = badge; this._clip = clip;',
+    '    this._tKey = x.at(0, "关键");',
+    '  },',
+    '  update(t) {',
+    '    V.u.set(this._badge, { opacity: t >= this._tKey ? 1 : 0.6 });',
+    '    V.u.syncVideoClip(this._clip, t);',
+    '  },',
+    '});',
+    '',
+  ].join('\n'), 'utf8');
+
+  fs.writeFileSync(path.join(videoDir, 'js/s02.js'), [
+    'V.scene({',
+    '  id: "s02", title: "纯函数校验", transition: "zoomFade", transitionDur: 0.35,',
+    '  lines: ["所有画面仅由时间纯函数唯一决定。"],',
+    '  build(root) { root.append(V.u.h("div", { class: "s2-box" }, "PURE F(T)")); },',
+    '  update() {},',
+    '});',
+    '',
+  ].join('\n'), 'utf8');
+}
+
+async function verifyBrowserCapabilities(videoDir) {
+  const { srv, port } = await startEphemeralVideoServer({ videosDir: path.join(TEST_ROOT, 'videos'), watch: true });
+  const chromium = await loadChromium(PKG_ROOT);
+  const browser = await chromium.launch({
+    executablePath: findBrowserExecutable(),
+    headless: true,
+    args: ['--autoplay-policy=no-user-gesture-required'],
+  });
+
+  try {
+    const hmrRes = await fetch(`http://127.0.0.1:${port}/__hmr`);
+    assert.equal(hmrRes.status, 200);
+    assert.ok((hmrRes.headers.get('content-type') || '').includes('text/event-stream'));
+    await hmrRes.body.cancel();
+
+    const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
+    await page.goto(`http://127.0.0.1:${port}/demo/?record=1`, { waitUntil: 'networkidle' });
+    await page.evaluate(async () => {
+      await window.V.seekToAsync(0.6);
+      await window.V.seekToAsync(0.9);
+    });
+    const recState = await page.evaluate(() => ({
+      pluginInstalled: window.__pluginInstalled,
+      hasPreset: Boolean(document.querySelector('.test-preset-badge')),
+      hasControl: Boolean(document.querySelector('[data-custom-ctrl="test-btn"]')),
+      maxEnergy: window.__maxLayerEnergy,
+      cpActiveInRecord: document.getElementById('checkpoint-overlay')?.classList.contains('on') || false,
+    }));
+    assert.equal(recState.pluginInstalled, true, 'Plugin should install');
+    assert.equal(recState.hasPreset, true, 'Preset should render');
+    assert.equal(recState.hasControl, true, 'Custom control should mount');
+    assert.ok(recState.maxEnergy > 0.05, `Expected 30Hz voice energy > 0.05, got ${recState.maxEnergy}`);
+    assert.equal(recState.cpActiveInRecord, false, 'Record mode must auto-bypass checkpoints');
+
+    await page.goto(`http://127.0.0.1:${port}/demo/?lang=en&record=1`, { waitUntil: 'networkidle' });
+    const enTitle = await page.evaluate(() => window.V.scenes[0].title);
+    assert.equal(enTitle, 'Architecture', 'Localized scene title should apply');
+    await page.close();
+  } finally {
+    await browser.close();
+    srv.close();
+  }
+
+  for (const sub of ['assets/subtitles.vtt', 'assets/subtitles.srt', 'assets/subtitles.en.vtt', 'assets/subtitles.en.srt']) {
+    assert.ok(fs.existsSync(path.join(videoDir, sub)), `Expected subtitle file ${sub}`);
+  }
+}
+
+async function main() {
+  fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+  fs.mkdirSync(path.join(TEST_ROOT, 'videos'), { recursive: true });
+
+  try {
+    console.log('[SelfTest 1/5] Scaffolding isolated video project (zero local videos/base)...');
+    runCliCmd(['init', 'demo', '--title', '微内核自检演示']);
+    assert.equal(fs.existsSync(path.join(TEST_ROOT, 'videos/base')), false, 'videos/base must NOT exist locally');
+
+    const videoDir = path.join(TEST_ROOT, 'videos/demo');
+    createSampleMp4(resolveFfmpeg(PKG_ROOT), path.join(videoDir, 'assets/clip.mp4'));
+    writeTestProjectFiles(videoDir);
+
+    console.log('[SelfTest 2/5] Building default & localized (en) tracks + visual determinism audit...');
+    runCliCmd(['build', 'demo', '--visual']);
+    runCliCmd(['build', 'demo', '--lang', 'en']);
+
+    console.log('[SelfTest 3/5] Verifying microkernel registries, 30Hz lip-sync energy, SSE HMR & i18n in Chromium...');
+    await verifyBrowserCapabilities(videoDir);
+
+    console.log('[SelfTest 4/5] Verifying per-scene SHA-256 render cache...');
+    const outMp4 = path.join(TEST_ROOT, 'demo.mp4');
+    runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
+    assert.ok(fs.existsSync(outMp4), 'Rendered MP4 should exist');
+    const out2 = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
+    assert.ok(out2.includes('2/2 scenes hit'), `Second render must hit 2/2 scene cache, got:\n${out2}`);
+
+    console.log('[SelfTest 5/5] Verifying standalone static bundler...');
+    const distDir = path.join(TEST_ROOT, 'dist');
+    runCliCmd(['bundle', 'demo', '--out', distDir]);
+    assert.ok(fs.existsSync(path.join(distDir, 'base/js/engine.js')), 'Bundled base/js/engine.js should exist');
+    assert.ok(fs.existsSync(path.join(distDir, 'demo/index.html')), 'Bundled demo/index.html should exist');
+
+    console.log('✅ All html-video-base v2.0 end-to-end self-tests PASSED.');
+  } finally {
+    fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+  }
+}
+
+await main();

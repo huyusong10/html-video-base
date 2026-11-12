@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>__VIDEO_TITLE__</title>
+  <link rel="stylesheet" href="../base/css/base.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <script src="../base/js/engine.js"></script>
+  <script src="video.config.js"></script>
+  <script src="assets/voice/timings.js"></script>
+  <script src="js/scenes.js"></script>
+  <script type="module">
+    // 如需启用 3D 粒子背景，取消下一行注释并在场景中配置 gl 关键帧：
+    // import '../base/js/gl.js';
+    await V.boot();
+  </script>
+</body>
+</html>

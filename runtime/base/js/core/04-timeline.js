@@ -1,0 +1,342 @@
+/* core/04-timeline.js · 时间轴排布、句内语义词锚 (x.at)、多语言覆盖与 30Hz 语音振幅包络采样 */
+(function (V) {
+  const { clamp } = V.u;
+  const DEFAULT_CPS = 5.4, DEFAULT_GAP = 0.22, DEFAULT_LEAD = 0.35, DEFAULT_TAIL = 0.38;
+
+  function getPacing() {
+    const cfg = V.getCfg();
+    return {
+      CPS: cfg.cps === undefined ? DEFAULT_CPS : cfg.cps,
+      GAP: cfg.gap === undefined ? DEFAULT_GAP : cfg.gap,
+      LEAD: cfg.lead === undefined ? DEFAULT_LEAD : cfg.lead,
+      TAIL: cfg.tail === undefined ? DEFAULT_TAIL : cfg.tail,
+    };
+  }
+
+  function weight(s) {
+    const str = String(s || '');
+    const words = str.match(/[A-Za-z0-9][A-Za-z0-9.\-]*/g) || [];
+    let w = words.length * 1.5;
+    const rest = str.replace(/[A-Za-z0-9][A-Za-z0-9.\-]*/g, '').replace(/\s/g, '');
+    for (const ch of rest) {
+      w += /[，。、：；！？“”‘’（）《》—…,!?:;"'()]/.test(ch) ? 0.45 : 1;
+    }
+    return w;
+  }
+
+  function normKey(s) {
+    return String(s || '').replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').toLowerCase();
+  }
+
+  function findNth(haystack, needle, nth = 1) {
+    if (!needle) return -1;
+    let idx = -1, from = 0;
+    for (let i = 0; i < nth; i++) {
+      idx = haystack.indexOf(needle, from);
+      if (idx < 0) return -1;
+      from = idx + Math.max(1, needle.length);
+    }
+    return idx;
+  }
+
+  function recordAnchorError(entry) {
+    if (!Array.isArray(V.__anchorErrors)) return;
+    const key = `${entry.scene}|${entry.lineIdx}|${entry.keyword}|${entry.reason}`;
+    if (!V.__anchorErrorKeys) V.__anchorErrorKeys = new Set();
+    if (V.__anchorErrorKeys.has(key)) return;
+    V.__anchorErrorKeys.add(key);
+    V.__anchorErrors.push(entry);
+  }
+
+  function parseAnchorOpts(optsOrOffset) {
+    if (typeof optsOrOffset === 'number') return { nth: 1, offset: optsOrOffset };
+    if (!optsOrOffset) return { nth: 1, offset: 0 };
+    return { nth: optsOrOffset.nth || 1, offset: optsOrOffset.offset || 0 };
+  }
+
+  function matchWordBoundary(words, needle, nth) {
+    let acc = '';
+    const spans = words.map(([t0, w]) => {
+      const s = acc.length;
+      acc += normKey(w);
+      return { t0, s, e: acc.length };
+    });
+    const pos = findNth(acc, needle, nth);
+    if (pos < 0) return null;
+    const hit = spans.find(sp => sp.e > pos) || spans[0];
+    return hit ? hit.t0 : null;
+  }
+
+  function estimateCharAnchor(rawText, needle, nth, dur) {
+    let charAcc = '';
+    const charMap = [];
+    for (let i = 0; i < rawText.length; i++) {
+      const k = normKey(rawText[i]);
+      if (!k) continue;
+      for (let j = 0; j < k.length; j++) charMap.push(i);
+      charAcc += k;
+    }
+    const pos = findNth(charAcc, needle, nth);
+    if (pos < 0) return null;
+    const rawIdx = charMap[pos] || 0;
+    const ratio = weight(rawText.slice(0, rawIdx)) / Math.max(1, weight(rawText));
+    return ratio * dur;
+  }
+
+  function resolveLocalizedKeyword(sc, lineIdx, keyword) {
+    const ln = sc.lines && sc.lines[lineIdx];
+    const map = ln && ln.anchors;
+    return (map && map[keyword]) || keyword;
+  }
+
+  function lookupLineWords(si, lineIdx) {
+    const w = V.voice && V.voice.words;
+    return (w && w[si] && w[si][lineIdx]) || null;
+  }
+
+  function warnBrokenAnchor(si, sc, lineIdx, keyword, text) {
+    const msg = `Broken anchor keyword "${keyword}" not found in line: "${text}"`;
+    recordAnchorError({ scene: si, title: sc.title, lineIdx, keyword: String(keyword), reason: msg });
+    if (typeof console !== 'undefined' && console.warn) console.warn(`[V.at] S${si}L${lineIdx}: ${msg}`);
+  }
+
+  function resolveAnchor(sc, si, lineIdx, keyword, optsOrOffset) {
+    const cue = sc.cues[lineIdx];
+    if (!cue) {
+      recordAnchorError({ scene: si, title: sc.title, lineIdx, keyword: String(keyword || ''), reason: `Line index ${lineIdx} out of range (lines=${sc.cues.length})` });
+      return 0;
+    }
+    const { nth, offset } = parseAnchorOpts(optsOrOffset);
+    const needle = normKey(resolveLocalizedKeyword(sc, lineIdx, keyword));
+    if (!needle) return Math.max(0, cue.start + offset);
+
+    const words = lookupLineWords(si, lineIdx);
+    const wb = words && words.length ? matchWordBoundary(words, needle, nth) : null;
+    if (wb != null) return Math.max(0, cue.start + wb + offset);
+
+    const est = estimateCharAnchor(cue.text || '', needle, nth, cue.end - cue.start);
+    if (est == null) {
+      warnBrokenAnchor(si, sc, lineIdx, keyword, cue.text || '');
+      return Math.max(0, cue.start + offset);
+    }
+    return Math.max(0, cue.start + est + offset);
+  }
+
+  function makeCtx(sc, si) {
+    return {
+      cue: i => (sc.cues[i] ? sc.cues[i].start : 0),
+      end: i => (sc.cues[i] ? sc.cues[i].end : sc.duration),
+      at: (i, kw, opts) => resolveAnchor(sc, si, i, kw, opts),
+      dur: sc.duration,
+      holdStart: () => (sc.cues.length ? sc.cues[sc.cues.length - 1].end + 0.3 : 0.3),
+    };
+  }
+
+  function chunkSentences(raw) {
+    const parts = raw.match(/[^。！？；.!?;]+[。！？；.!?;]?/g) || [raw];
+    const chunks = [];
+    for (const s of parts) {
+      const clean = s.trim();
+      if (!clean) continue;
+      if (clean.length <= 28) { chunks.push(clean); continue; }
+      const subs = clean.split(/(?<=[，、：,:])\s*/);
+      let buf = '';
+      for (const sub of subs) {
+        if ((buf + sub).length > 28 && buf) { chunks.push(buf); buf = sub; }
+        else buf += sub;
+      }
+      if (buf) chunks.push(buf);
+    }
+    return chunks.map(c => c.replace(/[。！？；，、：.!?;,:""''\s]+$/g, '')).filter(Boolean);
+  }
+
+  function mapWordsToChunks(chunks, words, cueStart, cueEnd) {
+    let flat = '';
+    const charTime = [];
+    for (const [t0, w] of words) {
+      const k = normKey(w);
+      for (let i = 0; i < k.length; i++) charTime.push(t0);
+      flat += k;
+    }
+    let searchFrom = 0;
+    const starts = chunks.map((c, idx) => {
+      if (idx === 0) return 0;
+      const key = normKey(c);
+      const pos = key ? flat.indexOf(key, searchFrom) : -1;
+      if (pos >= 0) { searchFrom = pos + key.length; return charTime[pos]; }
+      return null;
+    });
+    return chunks.map((text, i) => {
+      const s = starts[i] != null ? cueStart + starts[i] : (i === 0 ? cueStart : cueStart + (cueEnd - cueStart) * (i / chunks.length));
+      const e = (i + 1 < chunks.length && starts[i + 1] != null) ? cueStart + starts[i + 1] : cueEnd;
+      return { start: s, end: Math.max(s + 0.25, e), text };
+    });
+  }
+
+  function splitSubCues(text, cueStart, cueEnd, words) {
+    const raw = String(text || '').trim();
+    if (!raw) return [];
+    const chunks = chunkSentences(raw);
+    if (chunks.length <= 1) {
+      return [{ start: cueStart, end: cueEnd, text: chunks[0] || raw }];
+    }
+    if (words && words.length) return mapWordsToChunks(chunks, words, cueStart, cueEnd);
+    const total = chunks.reduce((a, c) => a + weight(c), 0) || 1;
+    const span = cueEnd - cueStart;
+    let cur = cueStart;
+    return chunks.map((c, idx) => {
+      const d = idx === chunks.length - 1 ? cueEnd - cur : span * (weight(c) / total);
+      const item = { start: cur, end: cur + d, text: c };
+      cur += d;
+      return item;
+    });
+  }
+
+  function getSceneLocaleOverride(sc, si) {
+    const lang = V.getActiveLang();
+    const scenes = lang && V.locales[lang] && V.locales[lang].scenes;
+    if (!scenes) return null;
+    return (sc.id && scenes[sc.id]) || scenes[si] || null;
+  }
+
+  function applyLocaleLine(lineObj, scLoc, li) {
+    if (!scLoc) return lineObj;
+    const rawOv = Array.isArray(scLoc) ? scLoc[li] : (scLoc.lines && scLoc.lines[li]);
+    if (!rawOv && !scLoc.anchors) return lineObj;
+    const patch = typeof rawOv === 'string' ? { text: rawOv } : (rawOv || {});
+    const mergedAnchors = Object.assign({}, lineObj.anchors || {}, scLoc.anchors || {}, patch.anchors || {});
+    return Object.assign({}, lineObj, patch, { anchors: mergedAnchors });
+  }
+
+  function buildCueEntry(lineObj, cueStart, cueEnd) {
+    return {
+      start: cueStart,
+      end: cueEnd,
+      text: lineObj.text,
+      speaker: lineObj.speaker || null,
+      voice: lineObj.voice,
+      speed: lineObj.speed,
+      pitch: lineObj.pitch,
+      model: lineObj.model,
+      provider: lineObj.provider,
+      style: lineObj.style,
+      instructions: lineObj.instructions,
+    };
+  }
+
+  function resolveSceneDuration(sc, bSc, lt, TAIL) {
+    if (bSc) return bSc.duration;
+    if (sc.lines.length === 0 && sc._explicitDuration != null) return sc._explicitDuration;
+    const hold = sc.lines.length === 0 ? (sc.hold === undefined ? 3.0 : sc.hold) : (sc.hold || 0);
+    return lt + hold + TAIL;
+  }
+
+  function isBakedValid(baked) {
+    if (!baked || V.__ignoreBakedLayout) return false;
+    if (!Array.isArray(baked.scenes) || baked.scenes.length !== V.scenes.length) return false;
+    return V.scenes.every((sc, idx) => {
+      const bs = baked.scenes[idx];
+      return bs && Array.isArray(bs.cues) && bs.cues.length === (sc.lines ? sc.lines.length : 0);
+    });
+  }
+
+  function resolveCueTiming(bSc, voiceDurs, si, li, lineObj, lt, CPS) {
+    const bCue = bSc ? bSc.cues[li] : null;
+    if (bCue) return [bCue[0], bCue[1]];
+    const vDur = voiceDurs[si] && voiceDurs[si][li];
+    const d = vDur || lineObj.dur || Math.max(1.2, weight(lineObj.text) / CPS);
+    return [lt, lt + d];
+  }
+
+  function appendLineSubCues(sc, lineObj, cueStart, cueEnd, exactSubs, lineWords) {
+    const speaker = lineObj.speaker || null;
+    if (exactSubs && exactSubs.length) {
+      sc.subCues.push(...exactSubs.map(([s0, s1, txt]) => ({ start: cueStart + s0, end: cueStart + s1, text: txt, speaker })));
+    } else {
+      sc.subCues.push(...splitSubCues(lineObj.text, cueStart, cueEnd, lineWords).map(s => ({ ...s, speaker })));
+    }
+  }
+
+  function layoutScene(sc, si, t, bSc, voiceInfo, pacing) {
+    if (sc._origTitle === undefined) sc._origTitle = sc.title;
+    if (!sc._origLines) sc._origLines = sc.lines.slice();
+    const scLoc = getSceneLocaleOverride(sc, si);
+    sc.title = (scLoc && scLoc.title) || sc._origTitle;
+    sc.start = bSc ? bSc.start : t;
+    let lt = sc.lead === undefined ? pacing.LEAD : sc.lead;
+    sc.cues = [];
+    sc.subCues = [];
+
+    sc._origLines.forEach((ln, li) => {
+      const baseObj = typeof ln === 'string' ? { text: ln } : ln;
+      const lineObj = applyLocaleLine(baseObj, scLoc, li);
+      sc.lines[li] = lineObj;
+      const [cueStart, cueEnd] = resolveCueTiming(bSc, voiceInfo.durs, si, li, lineObj, lt, pacing.CPS);
+      sc.cues.push(buildCueEntry(lineObj, cueStart, cueEnd));
+      const exactSubs = voiceInfo.subs[si] && voiceInfo.subs[si][li];
+      const lineWords = voiceInfo.words[si] && voiceInfo.words[si][li];
+      appendLineSubCues(sc, lineObj, cueStart, cueEnd, exactSubs, lineWords);
+      lt = cueEnd + pacing.GAP + (lineObj.pause || 0);
+    });
+
+    sc.duration = resolveSceneDuration(sc, bSc, lt, pacing.TAIL);
+    return sc.start + sc.duration;
+  }
+
+  function collectGlKeyframes() {
+    V.glKeys = [];
+    V.scenes.forEach((sc, si) => {
+      if (!sc.gl) return;
+      for (const k of sc.gl(makeCtx(sc, si))) {
+        const at = sc.start + k.t;
+        V.glKeys.push({ ...k, t: at, t0: k.t0 === 'self' ? at : k.t0 });
+      }
+    });
+    V.glKeys.sort((a, b) => a.t - b.t);
+  }
+
+  V.layout = function () {
+    const pacing = getPacing();
+    const vv = V.voice || {};
+    const voiceInfo = { durs: vv.durations || [], subs: vv.subCues || [], words: vv.words || [] };
+    const baked = vv.bakedLayout;
+    const useBaked = isBakedValid(baked);
+
+    let t = 0;
+    V.scenes.forEach((sc, si) => {
+      if (sc._explicitDuration === undefined && typeof sc.duration === 'number' && (!sc.lines || !sc.lines.length)) {
+        sc._explicitDuration = sc.duration;
+      }
+      sc.lines = sc.lines || [];
+      t = layoutScene(sc, si, t, useBaked ? baked.scenes[si] : null, voiceInfo, pacing);
+    });
+
+    V.duration = useBaked && typeof baked.duration === 'number' ? baked.duration : Math.max(0.1, t);
+    V.totalDuration = V.duration;
+    collectGlKeyframes();
+    V.emit('onLayout', { duration: V.duration, scenes: V.scenes });
+  };
+
+  // 采样 30Hz 真实语音振幅包络（0..1），驱动数字人真口型与声波可视化
+  function sampleEnvelopeArray(arr, relSec) {
+    const pos = clamp(relSec * 30, 0, arr.length - 1);
+    const i0 = Math.floor(pos);
+    const i1 = Math.min(arr.length - 1, i0 + 1);
+    const frac = pos - i0;
+    return ((arr[i0] * (1 - frac) + arr[i1] * frac) / 100);
+  }
+
+  V.getSceneEnergy = function (sc, si, lt) {
+    if (!sc || !sc.cues) return 0;
+    const li = sc.cues.findIndex(c => lt >= c.start && lt <= c.end);
+    if (li < 0) return 0;
+    const cue = sc.cues[li];
+    const env = V.voice && V.voice.envelopes && V.voice.envelopes[si] && V.voice.envelopes[si][li];
+    if (Array.isArray(env) && env.length) return clamp(sampleEnvelopeArray(env, lt - cue.start));
+    // 草稿期尚无音频时回退为自然语音节律波
+    const g = sc.start + lt;
+    return clamp(0.35 + 0.55 * Math.abs(Math.sin(g * 12.5)) * Math.abs(Math.cos(g * 3.1)));
+  };
+
+  V.makeCtx = makeCtx;
+})(globalThis.V = globalThis.V || {});
