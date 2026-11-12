@@ -53,7 +53,7 @@ html, body {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: var(--ctrl-h);
   display: grid; place-items: center;
-  background: #090d16;
+  background: var(--viewport-bg, #090d16);
   overflow: hidden;
 }
 
@@ -64,11 +64,14 @@ body.record #viewport {
 }
 
 #stage {
+  --ctrl-dodge: 0px;
   position: absolute; left: 50%; top: 50%;
   width: var(--stage-w); height: var(--stage-h);
   transform-origin: center center;
   overflow: hidden;
-  background: var(--bg);
+  background-color: var(--bg);
+  background-image: var(--stage-bg-image, none);
+  background-size: var(--stage-bg-size, auto);
   color: var(--fg);
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
 }
@@ -129,11 +132,11 @@ body.record #viewport {
 #hud.is-off { display: none; }
 #hud .hud-track {
   position: absolute; top: 0; left: 0; right: 0; height: 4px;
-  background: var(--line);
+  background: var(--hud-track-bg, var(--line));
 }
 #hud .hud-bar {
   display: block; height: 100%; width: 0%;
-  background: var(--accent);
+  background: var(--hud-bar-bg, var(--accent));
 }
 
 /* 通用转场覆盖层 */
@@ -158,9 +161,11 @@ body.record #viewport {
   will-change: transform;
 }
 
-/* 字幕条与对话角色铭牌 */
+/* 字幕条与对话角色铭牌（全屏唤起控制栏时自动上移 --ctrl-dodge 避让） */
 #subs {
-  position: absolute; left: 50%; bottom: var(--sub-bottom); transform: translateX(-50%);
+  position: absolute; left: 50%;
+  bottom: calc(var(--sub-bottom) + var(--ctrl-dodge, 0px));
+  transform: translateX(-50%);
   z-index: 25; max-width: 84%; pointer-events: none;
   padding: 11px 24px;
   border-radius: 10px;
@@ -170,6 +175,11 @@ body.record #viewport {
   backdrop-filter: blur(8px);
   display: flex; align-items: center; gap: 12px;
   opacity: 0; visibility: hidden;
+  transition: bottom 0.22s ease;
+}
+body.record #subs {
+  bottom: var(--sub-bottom) !important;
+  transition: none !important;
 }
 #subs .sub-speaker {
   display: none;
@@ -178,7 +188,7 @@ body.record #viewport {
   border-radius: 6px;
   background: var(--accent);
   color: #ffffff;
-  font-size: calc(var(--sub-size) * 0.72);
+  font-size: calc(var(--sub-font-size, var(--sub-size)) * 0.72);
   font-weight: 700;
   letter-spacing: 0.03em;
   line-height: 1.3;
@@ -186,8 +196,8 @@ body.record #viewport {
 #subs .sub-speaker.is-on { display: inline-block; }
 #subs .sub-text {
   position: relative;
-  font-size: var(--sub-size); font-weight: 500; line-height: 1.48;
-  color: var(--sub-fg); text-align: center; letter-spacing: 0.015em;
+  font-size: var(--sub-font-size, var(--sub-size)); font-weight: 500; line-height: 1.48;
+  color: var(--sub-color, var(--sub-fg)); text-align: center; letter-spacing: 0.015em;
 }
 #subs .sub-text > .ghost { visibility: hidden; display: block; }
 #subs .sub-text > span:last-child { position: absolute; inset: 0; }
@@ -261,12 +271,22 @@ body.web-full:not(.playing) #controls,
 body.os-full:not(.playing) #controls,
 body.web-full.ui-active #controls,
 body.os-full.ui-active #controls,
-body.web-full #controls:hover,
-body.os-full #controls:hover,
-body.web-full #controls.menu-open,
-body.os-full #controls.menu-open {
+body.web-full.scrubbing #controls,
+body.os-full.scrubbing #controls,
+body.web-full.menu-open #controls,
+body.os-full.menu-open #controls {
   opacity: 1;
   pointer-events: auto;
+}
+body.web-full:not(.playing) #stage,
+body.os-full:not(.playing) #stage,
+body.web-full.ui-active #stage,
+body.os-full.ui-active #stage,
+body.web-full.scrubbing #stage,
+body.os-full.scrubbing #stage,
+body.web-full.menu-open #stage,
+body.os-full.menu-open #stage {
+  --ctrl-dodge: var(--ctrl-overlap, 64px);
 }
 
 #controls button, #controls .ctrl-home {

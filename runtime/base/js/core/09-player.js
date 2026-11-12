@@ -258,9 +258,16 @@
     safePlayAudio();
   }
 
+  function setMenuOpen(bar, open) {
+    bar.classList.toggle('menu-open', open);
+    document.body.classList.toggle('menu-open', open);
+  }
+
   function play() {
     if (now >= V.duration - 0.01) { V.resetCheckpoints(); seek(0); }
     V._checkpointsRuntime.closeCheckpointOverlay();
+    const bar = document.getElementById('controls');
+    if (bar) setMenuOpen(bar, false);
     playing = true;
     if (audio && audio.error) audio = null;
     audioBlocked = false;
@@ -320,12 +327,12 @@
     list.innerHTML = '';
     ui.chapItems = V.scenes.map((sc, i) => {
       const item = h('div', { class: 'chap-item' }, h('em', null, String(i + 1).padStart(2, '0')), h('span', { class: 'chap-it-title' }, sc.title), h('small', null, fmtTime(sc.start)));
-      item.onclick = e => { e.stopPropagation(); bar.classList.remove('menu-open'); seek(sc.start + 0.02); };
+      item.onclick = e => { e.stopPropagation(); setMenuOpen(bar, false); seek(sc.start + 0.02); };
       list.appendChild(item);
       return item;
     });
-    trig.onclick = e => { e.stopPropagation(); bar.classList.toggle('menu-open'); };
-    addEventListener('pointerdown', e => { if (!wrap.contains(e.target)) bar.classList.remove('menu-open'); });
+    trig.onclick = e => { e.stopPropagation(); setMenuOpen(bar, !bar.classList.contains('menu-open')); };
+    addEventListener('pointerdown', e => { if (!wrap.contains(e.target)) setMenuOpen(bar, false); });
   }
 
   function bindScrubber(el) {
@@ -336,6 +343,7 @@
       const rect = el.getBoundingClientRect(), startX = e.clientX;
       let dragged = false, uncommittedT = null, lastAudioSeekTs = performance.now();
       scrubbing = true;
+      document.body.classList.add('scrubbing');
       if (el.setPointerCapture) el.setPointerCapture(e.pointerId);
       const toTime = cx => clamp((cx - rect.left) / rect.width) * V.duration;
       seek(toTime(e.clientX));
@@ -348,6 +356,7 @@
       };
       const up = () => {
         scrubbing = false;
+        document.body.classList.remove('scrubbing');
         if (uncommittedT != null) seek(uncommittedT);
         removeEventListener('pointermove', mv);
         removeEventListener('pointerup', up);
@@ -422,7 +431,7 @@
   }
 
   function handleEscapeKey(bar) {
-    if (bar.classList.contains('menu-open')) bar.classList.remove('menu-open');
+    if (bar.classList.contains('menu-open')) setMenuOpen(bar, false);
     else if (!isOsFull() && webFull) setWebFull(false);
   }
 
@@ -490,11 +499,13 @@
     bindKeyboard(bar);
 
     let idle;
-    addEventListener('pointermove', () => {
+    const wakeUi = () => {
       document.body.classList.add('ui-active');
       clearTimeout(idle);
       idle = setTimeout(() => document.body.classList.remove('ui-active'), 2500);
-    });
+    };
+    addEventListener('pointermove', wakeUi);
+    addEventListener('pointerdown', wakeUi);
     document.getElementById('viewport').addEventListener('click', e => {
       if (!e.target.closest('[data-interactive]')) (playing ? pause() : play());
     });
@@ -516,8 +527,13 @@
   function fit() {
     const vp = document.getElementById('viewport');
     const W = V.stageWidth || 1920, H = V.stageHeight || 1080;
-    const k = Math.min(((vp && vp.clientWidth) || innerWidth) / W, ((vp && vp.clientHeight) || innerHeight) / H);
+    const vpW = (vp && vp.clientWidth) || innerWidth;
+    const vpH = (vp && vp.clientHeight) || innerHeight;
+    const k = Math.min(vpW / W, vpH / H);
+    const letterbox = Math.max(0, (vpH - H * k) / 2);
+    const overlap = Math.round(Math.max(0, (54 - letterbox) / Math.max(0.1, k)));
     stage.style.transform = `translate(-50%,-50%) scale(${k})`;
+    stage.style.setProperty('--ctrl-overlap', overlap + 'px');
     if (vp) vp.style.setProperty('--k', k);
   }
 

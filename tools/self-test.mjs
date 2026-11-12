@@ -166,6 +166,19 @@ async function verifyBrowserCapabilities(videoDir) {
     await page.goto(`http://127.0.0.1:${port}/demo/?lang=en&record=1`, { waitUntil: 'networkidle' });
     const enTitle = await page.evaluate(() => window.V.scenes[0].title);
     assert.equal(enTitle, 'Architecture', 'Localized scene title should apply');
+
+    await page.goto(`http://127.0.0.1:${port}/demo/`, { waitUntil: 'networkidle' });
+    await page.evaluate(async () => {
+      await window.V.seekToAsync(0.8);
+      document.querySelector('[data-act="webfull"]').click();
+      document.getElementById('subs').style.transition = 'none';
+    });
+    const dodge = await page.evaluate(() => {
+      const s = document.getElementById('subs').getBoundingClientRect();
+      const c = document.getElementById('controls').getBoundingClientRect();
+      return { subBottom: s.bottom, ctrlTop: c.top };
+    });
+    assert.ok(dodge.subBottom <= dodge.ctrlTop, `Fullscreen #subs (${dodge.subBottom}) must dodge above #controls (${dodge.ctrlTop})`);
     await page.close();
   } finally {
     await browser.close();
