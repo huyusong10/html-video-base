@@ -84,6 +84,19 @@ const SHAPES = {
     const th = R[1][i] * TAU, ph = Math.acos(2 * R[2][i] - 1), r = e * (3 + R[0][i] * 9);
     return [(o.x || 0) + Math.sin(ph) * Math.cos(th) * r, (o.y || 0) + Math.cos(ph) * r * 0.7, Math.sin(ph) * Math.sin(th) * r];
   },
+  ring(i, t, o) {
+    const a = (i / 850) * TAU + t * 0.22, rad = (o.r || 4.8) + (R[0][i] - 0.5) * 1.1;
+    return [(o.x || 0) + Math.cos(a) * rad * 1.35, (o.y || 0) + Math.sin(a) * rad * 0.72, Math.sin(a * 3 + t) * 0.45 - 2.0];
+  },
+  grid(i, t) {
+    const cols = 34, gx = (i % cols) - cols / 2, gy = Math.floor(i / cols) - 12;
+    return [gx * 0.62, gy * 0.48 + Math.sin(gx * 0.35 + t * 1.1) * 0.14, -3.2 + Math.cos(gy * 0.4 + t * 0.9) * 0.35];
+  },
+  hex(i, t) {
+    const cols = 32, c = i % cols, r = Math.floor(i / cols);
+    const x = (c - cols / 2 + (r % 2) * 0.5) * 0.66, y = (r - 13) * 0.56;
+    return [x, y, -3.0 + Math.sin(Math.hypot(x, y) * 0.7 - t * 1.3) * 0.42];
+  },
 };
 
 function toneAt(i) {
@@ -258,4 +271,10 @@ V.gl = {
     this.ready = true;
   },
   render,
+  registerShape(name, shapeFn, colorFn) {
+    if (!name || typeof shapeFn !== 'function') return;
+    SHAPES[name] = shapeFn;
+    if (typeof colorFn === 'function') COLORS[name] = colorFn;
+    colorCache = {};
+  },
 };

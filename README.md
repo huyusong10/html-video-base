@@ -55,6 +55,16 @@ python -m venv .runtime/venv
 | `V.locale(lang, { title, scenes: { [id]: { title, lines, anchors } } })` | 注册多语种台词与 `x.at()` 语义词锚映射（`?lang=en` / `--lang en`） |
 | `V.u.videoClip(src, opts)` + `V.u.syncVideoClip(el, t)` | 受控内嵌 `<video>` 录屏：Web 播放同步、`seekToAsync` 精确锁帧、`mix.py` 原声混音 |
 | `scene.checkpoints` | Web 交互驻点暂停与分支问答（`?record=1` 导出模式自动直通） |
+| `V.config.ui` / `V.themeDefaults.ui` | 定制播放器模式（`controlsMode: 'docked' \| 'overlay'`）、章节分段刻度（`chapterMarks`）、倍速档位（`rates`）与全屏图标（`icons`） |
+
+## 主题与控制栏 CSS 变量槽位
+
+项目侧通过覆盖 `:root` 变量即可完整切换像素风、建筑编辑风或现代科技风（底座选择器均采用低权重类 / `:where()`，不抢业务权重）：
+
+- **视口与舞台**：`--viewport-bg`、`--stage-shadow`、`--stage-bg-image`、`--font-sans`、`--font-smoothing`、`--gl-rendering`
+- **顶栏分段 `#hud`**：`--hud-left/right/top/h`、`--hud-track-h/radius/bg`、`--hud-bar-bg`、`--hud-tick-w/bg`
+- **字幕胶囊 `#subs`**：`--sub-bottom`、`--sub-z`、`--sub-radius`、`--sub-bg/fg/border/border-w`、`--sub-size`
+- **底部控制栏与上拉菜单**：`--ctrl-h`、`--ctrl-font/font-size`、`--ctrl-radius`、`--ctrl-btn-w/h`、`--ctrl-time-w`、`--ctrl-chap-w`、`--ctrl-track-h/radius/bg`、`--ctrl-fill-bg`、`--ctrl-mark-w/h/bg`、`--ctrl-thumb-w/h/radius/border`、`--ctrl-menu-bg/border/radius/shadow`
 
 ## 工程门禁
 

@@ -129,6 +129,60 @@ function writeTestProjectFiles(videoDir) {
   ].join('\n'), 'utf8');
 }
 
+async function verifyPlayerBarContracts(page, port) {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto(`http://127.0.0.1:${port}/demo/`, { waitUntil: 'networkidle' });
+  const barInfo = await page.evaluate(async () => {
+    const track = document.querySelector('#controls .track');
+    const w0 = track.getBoundingClientRect().width;
+    await window.V.seekToAsync(window.V.scenes[1].start + 0.1);
+    const w1 = track.getBoundingClientRect().width;
+    document.querySelector('[data-act="rate"]').click();
+    const rateOpen = document.getElementById('controls').classList.contains('rate-open');
+    const item15 = Array.from(document.querySelectorAll('.rate-item')).find(el => el.textContent.includes('1.5x'));
+    item15.click();
+    const rbtns = Array.from(document.querySelectorAll('#controls .ctrl-rbtn')).map(b => {
+      const r = b.getBoundingClientRect();
+      return { w: Math.round(r.width), h: Math.round(r.height) };
+    });
+    const wf = document.querySelector('[data-act="webfull"]');
+    const ff = document.querySelector('[data-act="full"]');
+    return {
+      hudTicks: document.querySelectorAll('#hud .hud-tick').length,
+      trackMarks: document.querySelectorAll('#controls .track .mark').length,
+      w0: Math.round(w0 * 100),
+      w1: Math.round(w1 * 100),
+      rateOpen,
+      rateVal: window.__video.getSyncState().playbackRate,
+      rbtns,
+      iconOnly: wf.textContent.trim() === '' && ff.textContent.trim() === '' && Boolean(wf.querySelector('svg')) && Boolean(ff.querySelector('svg')),
+    };
+  });
+  assert.equal(barInfo.hudTicks, 1, 'Expected 1 .hud-tick for 2 scenes');
+  assert.equal(barInfo.trackMarks, 1, 'Expected 1 .track .mark for 2 scenes');
+  assert.equal(barInfo.w0, barInfo.w1, 'Progress bar width must stay invariant across chapter changes');
+  assert.equal(barInfo.rateOpen, true, 'Clicking rate button must open upward .rate-menu');
+  assert.equal(barInfo.rateVal, 1.5, 'Selecting 1.5x from rate menu must update playbackRate');
+  assert.equal(barInfo.iconOnly, true, 'Both fullscreen buttons must be icon-only');
+  assert.equal(barInfo.rbtns.length, 5, 'Expected 5 right-side control buttons');
+  for (const b of barInfo.rbtns) {
+    assert.equal(b.w, barInfo.rbtns[0].w, 'All 5 right-side buttons must share identical width');
+    assert.equal(b.h, barInfo.rbtns[0].h, 'All 5 right-side buttons must share identical height');
+  }
+
+  await page.evaluate(async () => {
+    await window.V.seekToAsync(0.8);
+    document.querySelector('[data-act="webfull"]').click();
+    document.getElementById('subs').style.transition = 'none';
+  });
+  const dodge = await page.evaluate(() => {
+    const s = document.getElementById('subs').getBoundingClientRect();
+    const c = document.getElementById('controls').getBoundingClientRect();
+    return { subBottom: s.bottom, ctrlTop: c.top };
+  });
+  assert.ok(dodge.subBottom <= dodge.ctrlTop, `Fullscreen #subs (${dodge.subBottom}) must dodge above #controls (${dodge.ctrlTop})`);
+}
+
 async function verifyBrowserCapabilities(videoDir) {
   const { srv, port } = await startEphemeralVideoServer({ videosDir: path.join(TEST_ROOT, 'videos'), watch: true });
   const chromium = await loadChromium(PKG_ROOT);
@@ -167,18 +221,7 @@ async function verifyBrowserCapabilities(videoDir) {
     const enTitle = await page.evaluate(() => window.V.scenes[0].title);
     assert.equal(enTitle, 'Architecture', 'Localized scene title should apply');
 
-    await page.goto(`http://127.0.0.1:${port}/demo/`, { waitUntil: 'networkidle' });
-    await page.evaluate(async () => {
-      await window.V.seekToAsync(0.8);
-      document.querySelector('[data-act="webfull"]').click();
-      document.getElementById('subs').style.transition = 'none';
-    });
-    const dodge = await page.evaluate(() => {
-      const s = document.getElementById('subs').getBoundingClientRect();
-      const c = document.getElementById('controls').getBoundingClientRect();
-      return { subBottom: s.bottom, ctrlTop: c.top };
-    });
-    assert.ok(dodge.subBottom <= dodge.ctrlTop, `Fullscreen #subs (${dodge.subBottom}) must dodge above #controls (${dodge.ctrlTop})`);
+    await verifyPlayerBarContracts(page, port);
     await page.close();
   } finally {
     await browser.close();
