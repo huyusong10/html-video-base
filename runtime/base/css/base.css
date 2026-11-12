@@ -63,6 +63,7 @@
   --ctrl-radius: 6px;
   --ctrl-play-w: 44px;
   --ctrl-btn-w: 52px;
+  --ctrl-icon-btn-w: 36px;
   --ctrl-btn-h: 32px;
   --ctrl-btn-bg: rgba(255, 255, 255, 0.08);
   --ctrl-btn-border: rgba(255, 255, 255, 0.28);
@@ -506,6 +507,11 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   padding: 0;
   font-variant-numeric: tabular-nums;
 }
+#controls :where(.ctrl-icon-btn, .chap-wrap ~ button:has(> svg), .chap-wrap ~ * button:has(> svg)) {
+  width: var(--ctrl-icon-btn-w);
+  height: var(--ctrl-btn-h);
+  padding: 0;
+}
 #controls :where(button.on),
 #controls.chap-open :where(.chap-trigger),
 #controls.rate-open :where(.rate-trigger) {
@@ -667,6 +673,7 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   :root {
     --ctrl-chap-w: 170px;
     --ctrl-btn-w: 44px;
+    --ctrl-icon-btn-w: 34px;
     --ctrl-time-w: 92px;
   }
 }

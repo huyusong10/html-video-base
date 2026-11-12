@@ -142,6 +142,11 @@ async function verifyIframeWebFullContract(page, port) {
     const f = document.getElementById('vid');
     const win = f.contentWindow;
     const doc = f.contentDocument;
+    const injected = doc.createElement('button');
+    injected.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16"></svg>';
+    doc.querySelector('[data-act="webfull"]').before(injected);
+    const iconWidths = [injected, doc.querySelector('[data-act="webfull"]'), doc.querySelector('[data-act="full"]')]
+      .map(b => Math.round(b.getBoundingClientRect().width));
     await win.V.seekToAsync(0.8);
     doc.querySelector('[data-act="webfull"]').click();
     doc.getElementById('subs').style.transition = 'none';
@@ -150,12 +155,14 @@ async function verifyIframeWebFullContract(page, port) {
     const c = doc.getElementById('controls').getBoundingClientRect();
     return {
       rbtnCount: doc.querySelectorAll('#controls .ctrl-rbtn').length,
+      iconWidths,
       expanded: Math.round(fr.width) === window.innerWidth && Math.round(fr.height) === window.innerHeight,
       subBottom: s.bottom,
       ctrlTop: c.top,
     };
   });
   assert.equal(dodge.rbtnCount, 5, 'Single-layer same-origin iframe must auto-render [data-act="webfull"] (5 right buttons)');
+  for (const w of dodge.iconWidths) assert.equal(w, dodge.iconWidths[0], 'All right-side icon buttons (including injected SVG buttons) must share uniform width');
   assert.equal(dodge.expanded, true, 'Clicking webfull inside single-layer iframe must expand iframe to viewport');
   assert.ok(dodge.subBottom <= dodge.ctrlTop, `Fullscreen #subs (${dodge.subBottom}) must dodge above #controls (${dodge.ctrlTop})`);
 }
@@ -172,12 +179,13 @@ async function verifyPlayerBarContracts(page, port) {
     const rateOpen = document.getElementById('controls').classList.contains('rate-open');
     const item15 = Array.from(document.querySelectorAll('.rate-item')).find(el => el.textContent.includes('1.5x'));
     item15.click();
-    const rbtns = Array.from(document.querySelectorAll('#controls .ctrl-rbtn')).map(b => {
+    const textBtns = Array.from(document.querySelectorAll('#controls .ctrl-rbtn:not(.ctrl-icon-btn)')).map(b => {
       const r = b.getBoundingClientRect();
       return { w: Math.round(r.width), h: Math.round(r.height) };
     });
     const wf = document.querySelector('[data-act="webfull"]');
     const ff = document.querySelector('[data-act="full"]');
+    const ffRect = ff.getBoundingClientRect();
     return {
       hudTicks: document.querySelectorAll('#hud .hud-tick').length,
       trackMarks: document.querySelectorAll('#controls .track .mark').length,
@@ -185,7 +193,8 @@ async function verifyPlayerBarContracts(page, port) {
       w1: Math.round(w1 * 100),
       rateOpen,
       rateVal: window.__video.getSyncState().playbackRate,
-      rbtns,
+      textBtns,
+      fullSize: { w: Math.round(ffRect.width), h: Math.round(ffRect.height) },
       noStandaloneWebFull: wf === null,
       iconOnly: ff.textContent.trim() === '' && Boolean(ff.querySelector('svg')),
     };
@@ -197,10 +206,11 @@ async function verifyPlayerBarContracts(page, port) {
   assert.equal(barInfo.rateVal, 1.5, 'Selecting 1.5x from rate menu must update playbackRate');
   assert.equal(barInfo.noStandaloneWebFull, true, 'Standalone top-level page must omit redundant webfull button by default');
   assert.equal(barInfo.iconOnly, true, 'Fullscreen button must be icon-only');
-  assert.equal(barInfo.rbtns.length, 4, 'Expected 4 right-side control buttons on standalone page');
-  for (const b of barInfo.rbtns) {
-    assert.equal(b.w, barInfo.rbtns[0].w, 'All right-side buttons must share identical width');
-    assert.equal(b.h, barInfo.rbtns[0].h, 'All right-side buttons must share identical height');
+  assert.equal(barInfo.textBtns.length, 3, 'Expected 3 right-side text buttons on standalone page');
+  assert.equal(barInfo.fullSize.h, barInfo.textBtns[0].h, 'Icon button height must match text button height');
+  for (const b of barInfo.textBtns) {
+    assert.equal(b.w, barInfo.textBtns[0].w, 'All right-side text buttons must share identical width');
+    assert.equal(b.h, barInfo.textBtns[0].h, 'All right-side text buttons must share identical height');
   }
 
   await page.evaluate(() => window.V.setSubLayout('mascotLeft'));
