@@ -226,11 +226,12 @@
     if (!V._playerCtl || V._playerCtl.isRecord || !searchInputEl) return;
     document.body.classList.add('ui-active');
     V._playerCtl.setOpenMenu('chap');
+    void searchInputEl.offsetWidth;
     if (initialQuery !== undefined) {
       searchInputEl.value = String(initialQuery);
       searchInputEl.dispatchEvent(new Event('input'));
     }
-    searchInputEl.focus();
+    searchInputEl.focus({ preventScroll: true });
     searchInputEl.select();
   };
 

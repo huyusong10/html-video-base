@@ -627,7 +627,7 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   border-radius: var(--ctrl-menu-radius);
   box-shadow: var(--ctrl-menu-shadow);
   opacity: 0; visibility: hidden;
-  transition: opacity 0.15s, transform 0.15s, visibility 0.15s;
+  transition: opacity 0.15s, transform 0.15s, visibility 0s linear 0.15s;
   overflow: hidden; z-index: 60;
 }
 .chap-menu {
@@ -641,8 +641,14 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   padding: 5px; gap: 2px;
   transform: translate(-50%, 6px);
 }
-#controls.chap-open .chap-menu { opacity: 1; visibility: visible; transform: translateY(0); }
-#controls.rate-open .rate-menu { opacity: 1; visibility: visible; transform: translate(-50%, 0); }
+#controls.chap-open .chap-menu {
+  opacity: 1; visibility: visible; transform: translateY(0);
+  transition: opacity 0.15s, transform 0.15s, visibility 0s;
+}
+#controls.rate-open .rate-menu {
+  opacity: 1; visibility: visible; transform: translate(-50%, 0);
+  transition: opacity 0.15s, transform 0.15s, visibility 0s;
+}
 
 .chap-menu-hd {
   padding: 10px 14px; font-size: 0.85em; letter-spacing: 0.06em;

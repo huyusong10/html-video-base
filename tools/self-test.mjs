@@ -263,14 +263,19 @@ async function verifyPlayerBarContracts(page, port) {
 }
 
 async function verifySearchAndDeepLinkContract(page) {
+  await page.evaluate(() => window.__video.seek(0.1));
+  await page.keyboard.press('/');
+  await page.keyboard.type('唯一决定');
+  const markCount = await page.evaluate(() => document.querySelectorAll('#controls .chap-hit-mark').length);
+  assert.ok(markCount >= 1, 'Pressing / and typing must focus .chap-search and highlight hits');
+  await page.keyboard.press('Enter');
+
   const res = await page.evaluate(async () => {
-    window.__video.seek(0.1);
+    const afterJump = window.__video.getSyncState().now;
     const hits = window.__video.search('唯一决定');
     window.__video.openSearch('唯一决定');
     const menuOpen = document.getElementById('controls').classList.contains('chap-open');
-    const hitRow = document.querySelector('.chap-search-results .chap-item');
-    if (hitRow) hitRow.click();
-    const afterJump = window.__video.getSyncState().now;
+    window.V._playerCtl.setOpenMenu('');
     const link5 = window.__video.getDeepLink(5);
     const timeEl = document.querySelector('#controls .time');
     timeEl.click();
