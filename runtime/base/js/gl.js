@@ -205,14 +205,14 @@ function keysAt(now) {
   return [keys[Math.max(0, k - 1)], keys[k]];
 }
 
-function stepParticles(now, a, b, mix, cnt) {
+function stepParticles(clock, a, b, mix, cnt, now) {
   const pos = geo.attributes.position.array, col = geo.attributes.color.array;
   const ca = colorsFor(a), cb = colorsFor(b);
   const fa = SHAPES[a.shape] || SHAPES.drift, fb = SHAPES[b.shape] || SHAPES.drift;
   for (let i = 0; i < cnt; i++) {
     const m = mix >= 1 ? 1 : smooth(clamp(mix * 1.5 - R[2][i] * 0.5));
-    const pb = fb(i, now, b, now);
-    const pa = m < 1 ? fa(i, now, a, now) : pb;
+    const pb = fb(i, clock, b, now);
+    const pa = m < 1 ? fa(i, clock, a, now) : pb;
     const o = i * 3;
     pos[o] = pa[0] + (pb[0] - pa[0]) * m;
     pos[o + 1] = pa[1] + (pb[1] - pa[1]) * m;
@@ -229,19 +229,19 @@ function valOr(v, fallback) {
   return v === undefined ? fallback : v;
 }
 
-function render(now) {
+function render(now, clock = now) {
   if (!renderer || !V.glKeys || !V.glKeys.length) return;
   const [a, b] = keysAt(now);
   const mix = a === b ? 1 : smooth(clamp((now - b.t) / (b.dur || 1.1)));
   const cnt = (a.shape === 'text' || b.shape === 'text') ? N : 850;
   geo.setDrawRange(0, cnt);
-  stepParticles(now, a, b, mix, cnt);
+  stepParticles(clock, a, b, mix, cnt, now);
   const l = (x, y) => x + (y - x) * mix;
   mat.uniforms.uBright.value = l(valOr(a.bright, 0.14), valOr(b.bright, 0.14));
   floorMat.opacity = l(valOr(a.floor, 0.22), valOr(b.floor, 0.22));
-  floor.position.z = (now * 1.8) % 1.5;
+  floor.position.z = (clock * 1.8) % 1.5;
   const sway = l(valOr(a.sway, 0.6), valOr(b.sway, 0.6));
-  camera.position.set(Math.sin(now * 0.18) * 0.5 * sway, 0.25 + Math.sin(now * 0.12) * 0.18 * sway, 10);
+  camera.position.set(Math.sin(clock * 0.18) * 0.5 * sway, 0.25 + Math.sin(clock * 0.12) * 0.18 * sway, 10);
   camera.lookAt(0, 0, 0);
   renderer.render(scene, camera);
 }

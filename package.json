@@ -1,6 +1,6 @@
 {
   "name": "html-video-base",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "type": "module",
   "description": "Minimal, universal, extensible pure-function timeline HTML video framework & multi-TTS rendering toolchain",
   "license": "MIT",
@@ -10,6 +10,7 @@
   "exports": {
     ".": "./runtime/base/js/index.mjs",
     "./cli": "./tools/cli.mjs",
+    "./bundler": "./tools/bundle.mjs",
     "./paths": "./tools/lib/paths.mjs",
     "./runtime/engine": "./runtime/base/js/engine.js",
     "./runtime/css": "./runtime/base/css/base.css"

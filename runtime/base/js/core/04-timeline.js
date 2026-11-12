@@ -128,6 +128,9 @@
       end: i => (sc.cues[i] ? sc.cues[i].end : sc.duration),
       at: (i, kw, opts) => resolveAnchor(sc, si, i, kw, opts),
       dur: sc.duration,
+      clock: 0,
+      idle: 0,
+      ended: false,
       holdStart: () => (sc.cues.length ? sc.cues[sc.cues.length - 1].end + 0.3 : 0.3),
     };
   }
@@ -295,10 +298,28 @@
     V.glKeys.sort((a, b) => a.t - b.t);
   }
 
+  function normalizeLineSegs(lineSegs) {
+    if (!Array.isArray(lineSegs)) return [];
+    let prev = 0;
+    return lineSegs.map(item => {
+      if (!Array.isArray(item) || item.length >= 3) return item;
+      const end = Number(item[0]) || prev;
+      const triple = [Math.round(prev * 1000) / 1000, end, item[1]];
+      prev = end;
+      return triple;
+    });
+  }
+
+  function resolveVoiceSubCues(vv) {
+    if (Array.isArray(vv.subCues) && vv.subCues.length) return vv.subCues;
+    if (!Array.isArray(vv.segs)) return [];
+    return vv.segs.map(scSegs => (Array.isArray(scSegs) ? scSegs.map(normalizeLineSegs) : []));
+  }
+
   V.layout = function () {
     const pacing = getPacing();
     const vv = V.voice || {};
-    const voiceInfo = { durs: vv.durations || [], subs: vv.subCues || [], words: vv.words || [] };
+    const voiceInfo = { durs: vv.durations || [], subs: resolveVoiceSubCues(vv), words: vv.words || [] };
     const baked = vv.bakedLayout;
     const useBaked = isBakedValid(baked);
 

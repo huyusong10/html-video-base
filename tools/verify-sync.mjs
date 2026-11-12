@@ -32,6 +32,24 @@ function buildSpokenNormalizer(pronunciation) {
   };
 }
 
+function normalizeLegacyLineSegs(lineSegs) {
+  if (!Array.isArray(lineSegs)) return [];
+  let prev = 0;
+  return lineSegs.map(item => {
+    if (!Array.isArray(item) || item.length >= 3) return item;
+    const end = round3(Number(item[0]) || prev);
+    const triple = [round3(prev), end, item[1]];
+    prev = end;
+    return triple;
+  });
+}
+
+function resolveVoiceSubCuesGrid(voice) {
+  if (Array.isArray(voice.subCues) && voice.subCues.length) return voice.subCues;
+  if (!Array.isArray(voice.segs)) return [];
+  return voice.segs.map(scSegs => (Array.isArray(scSegs) ? scSegs.map(normalizeLegacyLineSegs) : []));
+}
+
 function computeSceneSubCuesGrid(scenes) {
   return scenes.map(sc => {
     let subCursor = 0;
@@ -59,7 +77,8 @@ export function stampBakedLayout(videoId, lang = '') {
   };
 
   if (!Array.isArray(V.voice.subCues) || !V.voice.subCues.length) {
-    V.voice.subCues = computeSceneSubCuesGrid(V.scenes);
+    const fromLegacy = resolveVoiceSubCuesGrid(V.voice);
+    V.voice.subCues = fromLegacy.length ? fromLegacy : computeSceneSubCuesGrid(V.scenes);
   }
   V.voice.bakedLayout = bakedLayout;
 
@@ -99,7 +118,7 @@ function checkSingleLineTextAndWords(si, li, lnText, dur, lSubs, lWords, normSpo
 }
 
 function verifyScenesAndTimings(V, voice, normSpoken, errors) {
-  const durs = voice.durations || [], subs = voice.subCues || [], words = voice.words || [];
+  const durs = voice.durations || [], subs = resolveVoiceSubCuesGrid(voice), words = voice.words || [];
   if (V.scenes.length !== durs.length) {
     errors.push(`Scene count mismatch: scenes=${V.scenes.length}, timings.durations=${durs.length}`);
   }

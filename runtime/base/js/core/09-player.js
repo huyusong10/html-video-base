@@ -17,12 +17,13 @@
   V._isRecord = RECORD;
 
   let audio = null, stage = null, subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
-  let current = null, now = 0, prevRenderNow = 0, playing = false, lastTs = 0;
+  let current = null, now = 0, prevRenderNow = 0, playing = false, lastTs = 0, pauseBaseTs = 0, ended = false;
   let showSubs = !params.has('nosubs'), playbackRate = 1, loopScene = false, muted = false;
   let scrubbing = false, targetSeekTime = null, lastSeekTarget = -1, lastSeekAt = 0;
   let audioBlocked = false, playPending = false, activeCueIdx = -1;
   let webFull = false, savedFrameStyle = null;
   let wipeState = { name: '', handler: null, dom: null };
+  const sandboxState = { active: false, entering: false, returnTime: null, el: null, txtEl: null, backEl: null };
   const ui = {};
 
   function getUiCfg(cfg) {
@@ -31,6 +32,8 @@
       controlsMode: u.controlsMode || (cfg && cfg.controlsMode) || 'docked',
       chapterMarks: u.chapterMarks !== false && (!cfg || cfg.chapterMarks !== false),
       hud: u.hud !== undefined ? Boolean(u.hud) : (!cfg || cfg.hud !== false),
+      rate: u.rate !== false,
+      webFull: u.webFull !== false,
       rates: Array.isArray(u.rates) && u.rates.length ? u.rates : DEFAULT_RATES,
       icons: Object.assign({}, CTRL_ICONS, u.icons || {}),
     };
@@ -61,6 +64,14 @@
     const homeLink = cfg.homeUrl === false
       ? null
       : h('a', { class: 'ctrl-home', href: cfg.homeUrl || '../', title: '返回视频中心主界面' }, cfg.homeLabel || '⌂ 主界面');
+    const rateWrap = uiCfg.rate
+      ? h('div', { class: 'rate-wrap' },
+          h('button', { class: 'ctrl-rbtn rate-trigger', 'data-act': 'rate', title: '播放倍速' }, '1.0x'),
+          h('div', { class: 'rate-menu' }))
+      : null;
+    const webFullBtn = uiCfg.webFull
+      ? h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'webfull', title: '窗口全屏（W）', 'aria-label': '窗口全屏' }, makeCtrlIcon(uiCfg.icons.webEnter))
+      : null;
     return h('div', { id: 'controls', 'data-interactive': '1' },
       homeLink,
       h('button', { 'data-act': 'play', title: '播放 / 暂停（空格）' }, '▶'),
@@ -71,12 +82,10 @@
         h('button', { class: 'chap-trigger', 'data-act': 'chap', title: '切换章节' }, h('span', { class: 'chap-cur-txt' }), h('i', { class: 'chap-caret' }, '▲')),
         h('div', { class: 'chap-menu' }, h('div', { class: 'chap-menu-hd' }, '章节导航 · CHAPTERS'), h('div', { class: 'chap-list' }))),
       ...renderCustomControls('right'),
-      h('div', { class: 'rate-wrap' },
-        h('button', { class: 'ctrl-rbtn rate-trigger', 'data-act': 'rate', title: '播放倍速' }, '1.0x'),
-        h('div', { class: 'rate-menu' })),
+      rateWrap,
       h('button', { class: 'ctrl-rbtn', 'data-act': 'subs', title: '字幕开关' }, '字幕'),
       h('button', { class: 'ctrl-rbtn', 'data-act': 'mute', title: '声音开关' }, '声音'),
-      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'webfull', title: '窗口全屏（W）', 'aria-label': '窗口全屏' }, makeCtrlIcon(uiCfg.icons.webEnter)),
+      webFullBtn,
       h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'full', title: '全屏（F）', 'aria-label': '全屏' }, makeCtrlIcon(uiCfg.icons.fullEnter)));
   }
 
@@ -92,6 +101,13 @@
     document.body.classList.toggle('ctrl-overlay', uiCfg.controlsMode === 'overlay');
     if (document.getElementById('stage')) return;
 
+    const sbTxt = h('span', { class: 'v-sandbox-txt egg-ban-txt' }, '🎮 彩蛋试玩中');
+    const sbBack = h('button', { class: 'v-sandbox-back egg-back-btn', 'data-interactive': '1', type: 'button' }, '↩ 返回终章');
+    const sbBar = h('div', { class: 'v-sandbox-bar egg-banner', 'data-interactive': '1' }, sbTxt, sbBack);
+    sandboxState.el = sbBar;
+    sandboxState.txtEl = sbTxt;
+    sandboxState.backEl = sbBack;
+
     const vp = h('div', { id: 'viewport' },
       h('div', { id: 'stage' },
         h('canvas', { id: 'gl', width: String(W), height: String(H), class: V.gl ? '' : 'is-off' }),
@@ -101,6 +117,7 @@
           h('span', { class: 'sub-speaker' }),
           h('p', { class: 'sub-text' }, h('span', { class: 'ghost' }), h('span')),
           h('div', { class: 'sub-tail' })),
+        sbBar,
         h('div', { id: 'checkpoint-overlay' }),
         h('div', { id: 'wipe' }),
         h('div', { id: 'safe-guide' }, h('div', { class: 'safe-action' }), h('div', { class: 'safe-sub' }, 'SUBTITLE SAFE ZONE'))),
@@ -208,10 +225,11 @@
     if (subCfg.layout || subCfg.position) applySubLayout(subCfg.layout || subCfg.position);
   }
 
-  function runSubHook(subCfg, cue, sc, idx, lt) {
+  function runSubHook(subCfg, cue, sc, idx, lt, clock) {
     const fn = subCfg.onUpdate || subCfg.update;
     if (typeof fn !== 'function') return;
-    const info = { t: now, lt, scene: sc, sceneIndex: idx, speaking: Boolean(cue), energy: V.getSceneEnergy(sc, idx, lt) };
+    const lineCue = activeCueIdx >= 0 ? sc.cues[activeCueIdx] : null;
+    const info = { t: now, clock, lt, scene: sc, sceneIndex: idx, lineCue, speaking: Boolean(cue), energy: V.getSceneEnergy(sc, idx, lt) };
     fn(cue, info, { subs, lead: subLead, tail: subTail, speaker: subSpeaker, text: subText });
   }
 
@@ -221,19 +239,7 @@
     applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
   }
 
-  function updateSubs(sc, idx, lt) {
-    const subCfg = getSubCfg();
-    syncSceneSubLayout(sc, lt);
-    const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
-    let cue = null;
-    activeCueIdx = -1;
-    sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
-    list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
-    subs.style.visibility = cue && showSubs ? 'visible' : 'hidden';
-    runSubHook(subCfg, cue, sc, idx, lt);
-    if (!cue) return;
-    const a = Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
-    subs.style.opacity = String(clamp(a));
+  function updateSubDomText(cue) {
     if (subSpeaker && subSpeaker._sp !== (cue.speaker || '')) {
       subSpeaker._sp = cue.speaker || '';
       subSpeaker.textContent = subSpeaker._sp;
@@ -246,34 +252,127 @@
     }
   }
 
+  function updateSubs(sc, idx, lt, clock) {
+    const subCfg = getSubCfg();
+    syncSceneSubLayout(sc, lt);
+    const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
+    let cue = null;
+    activeCueIdx = -1;
+    sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
+    list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
+    subs.style.visibility = cue && showSubs ? 'visible' : 'hidden';
+    if (cue) {
+      const a = Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
+      subs.style.opacity = String(clamp(a));
+      updateSubDomText(cue);
+    }
+    runSubHook(subCfg, cue, sc, idx, lt, clock);
+  }
+
   function syncSceneVideoClips(lt) {
     for (const clip of V._videoClips) {
       if (clip.isConnected) syncVideoClip(clip, lt, playing && !scrubbing);
     }
   }
 
-  function render(t) {
-    if (!V.scenes.length) return;
+  function resolveDefaultSandboxReturn() {
+    const last = V.scenes[V.scenes.length - 1];
+    if (!last) return Math.max(0, V.duration - 0.5);
+    if (typeof last.sandboxReturnOffset === 'number') return last.start + last.sandboxReturnOffset;
+    const lastCue = last.cues && last.cues.length ? last.cues[last.cues.length - 1] : null;
+    return lastCue ? Math.min(V.duration - 0.05, last.start + lastCue.start + 2.5) : Math.max(0, V.duration - 0.5);
+  }
+
+  function setSandboxActiveDom(on, hint, backLabel) {
+    sandboxState.active = on;
+    document.body.classList.toggle('sandbox-mode', on);
+    document.body.classList.toggle('egg-mode', on);
+    if (!sandboxState.el) return;
+    sandboxState.el.classList.toggle('on', on);
+    if (on && hint && sandboxState.txtEl) sandboxState.txtEl.textContent = hint;
+    if (on && backLabel && sandboxState.backEl) sandboxState.backEl.textContent = backLabel;
+  }
+
+  function exitSandbox(seekBack = true) {
+    const ret = sandboxState.returnTime;
+    setSandboxActiveDom(false);
+    if (seekBack && ret != null) {
+      seek(ret);
+      pause();
+    }
+  }
+
+  function enterSandbox(opts = {}) {
+    const target = Number(opts.targetTime);
+    if (!Number.isFinite(target)) return;
+    const prefix = opts.prefix === undefined ? '🎮 彩蛋试玩：' : opts.prefix;
+    const label = opts.hint ? prefix + opts.hint : '🎮 彩蛋试玩中';
+    sandboxState.returnTime = Number.isFinite(opts.returnTime) ? opts.returnTime : resolveDefaultSandboxReturn();
+    sandboxState.entering = true;
+    setSandboxActiveDom(true, label, opts.backLabel || '↩ 返回终章');
+    seek(target);
+    pause();
+    sandboxState.entering = false;
+  }
+
+  function tryEgg(targetTime, hint, opts) {
+    enterSandbox(Object.assign({}, opts || {}, { targetTime, hint }));
+  }
+
+  function replay() {
+    exitSandbox(false);
+    V.resetCheckpoints();
+    seek(0);
+    play();
+  }
+
+  function isInteractiveHold() {
+    if (sandboxState.active) return true;
+    if (!ended || !current) return false;
+    const cfg = V.getCfg();
+    return Boolean(current.live || current.interactiveEnd || cfg.interactiveEnd);
+  }
+
+  function shouldContinueSceneAtEnd(sc, idleSec) {
+    if (!ended || idleSec <= 0 || !sc.live || sc.freezeTimelineAtEnd) return false;
+    return sc === V.scenes[V.scenes.length - 1];
+  }
+
+  function syncSceneCtxAndEndState(sc, idle) {
+    ended = !playing && now >= V.duration - 0.01;
+    document.body.classList.toggle('is-ended', ended);
+    if (sandboxState.active && !sandboxState.entering && sc === V.scenes[V.scenes.length - 1]) setSandboxActiveDom(false);
+    if (sc !== current) enter(sc);
+    sc.ctx.clock = V._clock;
+    sc.ctx.idle = idle;
+    sc.ctx.ended = ended;
+  }
+
+  function render(t, idleSec) {
+    if (!V.scenes.length || !Number.isFinite(t)) return;
+    const idle = idleSec || 0;
     const prevT = prevRenderNow;
     now = clamp(t, 0, V.duration - 0.001);
+    const clock = now + idle;
     prevRenderNow = now;
     V._now = now;
+    V._clock = clock;
     const sc = sceneAt(now);
-    if (sc !== current) enter(sc);
+    syncSceneCtxAndEndState(sc, idle);
     const lt = now - sc.start;
     const idx = V.scenes.indexOf(sc);
 
     runTransition();
-    if (V.gl && V.gl.ready) V.gl.render(now);
+    if (V.gl && V.gl.ready) V.gl.render(now, clock);
     updateHud();
-    stage.style.setProperty('--tg', ((now % 6) / 6) * 150);
+    stage.style.setProperty('--tg', ((clock % 6) / 6) * 150);
     document.body.classList.toggle('started', now > 0.05);
-    sc.update(lt, sc.ctx);
+    sc.update(shouldContinueSceneAtEnd(sc, idle) ? lt + idle : lt, sc.ctx);
     syncSceneVideoClips(lt);
-    updateSubs(sc, idx, lt);
+    updateSubs(sc, idx, lt, clock);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
     V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: RECORD, playing, scrubbing, pause, play });
-    V.emit('onRender', { now, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx, playing, scrubbing, hasAudio: Boolean(audio), isRecord: RECORD, muted });
+    V.emit('onRender', { now, clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx, playing, scrubbing, hasAudio: Boolean(audio), isRecord: RECORD, muted });
     if (!RECORD) updateUI();
   }
 
@@ -298,24 +397,30 @@
     return true;
   }
 
+  function finishPlayback() {
+    render(V.duration - 0.001, 0);
+    pause();
+    V.emit('onEnded', { duration: V.duration, scene: current });
+  }
+
   function advanceAudioClock(ts) {
     lastTs = ts;
     if (targetSeekTime == null && !audio.paused && !audio.seeking && audio.readyState >= 2) {
       if (checkSceneLoop(audio.currentTime)) return;
-      if (audio.ended || audio.currentTime >= V.duration - 0.01) { render(V.duration - 0.001); pause(); }
-      else render(audio.currentTime);
+      if (audio.ended || audio.currentTime >= V.duration - 0.01) finishPlayback();
+      else render(audio.currentTime, 0);
       return;
     }
     if (audio.paused && audio.readyState >= 1 && !audio.seeking) safePlayAudio();
-    if (current && current.live) render(now);
+    if (current && current.live) render(now, 0);
   }
 
   function advanceWallClock(ts) {
     const dt = Math.min(0.1, (ts - lastTs) / 1000) * playbackRate;
     lastTs = ts;
     if (checkSceneLoop(now + dt)) return;
-    if (now + dt >= V.duration - 0.002) { render(V.duration - 0.001); pause(); }
-    else render(now + dt);
+    if (now + dt >= V.duration - 0.002) finishPlayback();
+    else render(now + dt, 0);
   }
 
   function canSyncAudioWhileScrubbing() {
@@ -326,13 +431,15 @@
   function frame(ts) {
     if (scrubbing) {
       lastTs = ts;
-      if (canSyncAudioWhileScrubbing()) render(audio.currentTime);
-      else if (current && current.live) render(now);
+      pauseBaseTs = ts;
+      if (canSyncAudioWhileScrubbing()) render(audio.currentTime, 0);
+      else if (current && current.live) render(now, 0);
     } else if (playing) {
       if (audio && !audioBlocked) advanceAudioClock(ts);
       else advanceWallClock(ts);
-    } else if (current && current.live) {
-      render(now);
+    } else if (current && current.live && !RECORD) {
+      const idleSec = pauseBaseTs > 0 ? Math.max(0, (ts - pauseBaseTs) / 1000) : 0;
+      render(now, idleSec);
     }
     requestAnimationFrame(frame);
   }
@@ -360,6 +467,9 @@
 
   function play() {
     if (now >= V.duration - 0.01) { V.resetCheckpoints(); seek(0); }
+    setSandboxActiveDom(false);
+    ended = false;
+    document.body.classList.remove('is-ended');
     V._checkpointsRuntime.closeCheckpointOverlay();
     setOpenMenu(document.getElementById('controls'), '');
     playing = true;
@@ -376,7 +486,10 @@
 
   function pause() {
     playing = false;
+    pauseBaseTs = performance.now();
+    ended = now >= V.duration - 0.01;
     document.body.classList.remove('playing');
+    document.body.classList.toggle('is-ended', ended);
     if (audio) audio.pause();
     for (const clip of V._videoClips) if (clip.pause) clip.pause();
     if (!RECORD) updateUI();
@@ -402,13 +515,15 @@
   }
 
   function seek(t) {
+    if (!Number.isFinite(t)) return;
     const target = clamp(t, 0, V.duration - 0.001);
     const ts = performance.now();
     if (Math.abs(target - lastSeekTarget) < 0.015 && ts - lastSeekAt < 600) return;
     lastTs = ts;
+    pauseBaseTs = ts;
     lastSeekTarget = target;
     lastSeekAt = ts;
-    render(target);
+    render(target, 0);
     V.emit('onSeek', target);
     if (!audio) return;
     if (audio.readyState >= 1) {
@@ -595,6 +710,7 @@
 
   function handleEscapeKey(bar) {
     if (bar && bar.classList.contains('menu-open')) setOpenMenu(bar, '');
+    else if (sandboxState.active) exitSandbox(true);
     else if (!isOsFull() && webFull) setWebFull(false);
   }
 
@@ -634,7 +750,9 @@
     addEventListener('pointermove', wakeUi);
     addEventListener('pointerdown', wakeUi);
     document.getElementById('viewport').addEventListener('click', e => {
-      if (!e.target.closest('[data-interactive]')) (playing ? pause() : play());
+      if (e.target.closest('[data-interactive]')) return;
+      if (!playing && isInteractiveHold()) return;
+      playing ? pause() : play();
     });
   }
 
@@ -674,8 +792,11 @@
       if (audio) audio.muted = muted;
       e.currentTarget.classList.toggle('on', !muted);
     };
-    ui.webfull.onclick = () => setWebFull(!webFull);
+    if (ui.webfull) ui.webfull.onclick = () => setWebFull(!webFull);
     ui.full.onclick = toggleOsFull;
+    if (sandboxState.backEl) {
+      sandboxState.backEl.onclick = e => { e.stopPropagation(); exitSandbox(true); };
+    }
     document.addEventListener('fullscreenchange', syncFullUI);
     document.addEventListener('webkitfullscreenchange', syncFullUI);
     bindKeyboard(bar);
@@ -721,7 +842,7 @@
     });
     el.addEventListener('seeked', () => { if (playing && el.paused) safePlayAudio(); });
     el.addEventListener('canplay', () => { if (playing && el.paused && !el.seeking) safePlayAudio(); });
-    el.addEventListener('ended', () => { if (playing && targetSeekTime == null) { render(V.duration - 0.001); pause(); } });
+    el.addEventListener('ended', () => { if (playing && targetSeekTime == null) finishPlayback(); });
     el.addEventListener('error', () => {
       if (audio === el) { audio = null; if (!RECORD && ui.mute) ui.mute.classList.remove('on'); }
       audioBlocked = true;
@@ -787,15 +908,22 @@
       width: V.stageWidth,
       height: V.stageHeight,
       fps: cfg.fps || 30,
-      seek: t => (RECORD ? render(t) : seek(t)),
-      seekVisual: t => render(t),
+      seek: t => (RECORD ? render(t, 0) : seek(t)),
+      seekVisual: t => render(t, 0),
       seekAsync: V.seekToAsync,
       setRate,
       play,
       pause,
+      replay,
+      tryEgg,
+      enterSandbox,
+      exitSandbox,
       resume: V.resume,
       getSyncState: () => ({
         now,
+        clock: V._clock || now,
+        ended,
+        sandbox: sandboxState.active,
         playing,
         playbackRate,
         audioTime: audio ? audio.currentTime : null,
@@ -828,9 +956,13 @@
     const audioSrc = resolveAudioSource(cfg);
     if (audioSrc) audio = initAudio(audioSrc);
 
-    V.seekTo = t => render(t);
-    V.seekToAsync = async t => { render(t); await waitStageAssets(); };
-    V._playerCtl = { play, pause, seek, setRate, getRate: () => playbackRate, toggleLoopScene: () => (loopScene = !loopScene), isDev: DEV, isRecord: RECORD };
+    V.seekTo = t => render(t, 0);
+    V.seekToAsync = async t => { render(t, 0); await waitStageAssets(); };
+    V.enterSandbox = enterSandbox;
+    V.exitSandbox = exitSandbox;
+    V.tryEgg = tryEgg;
+    V.replay = replay;
+    V._playerCtl = { play, pause, replay, seek, setRate, enterSandbox, exitSandbox, tryEgg, getRate: () => playbackRate, toggleLoopScene: () => (loopScene = !loopScene), isDev: DEV, isRecord: RECORD };
 
     if (RECORD) document.body.classList.add('record');
     else buildUI(uiCfg);
@@ -838,9 +970,10 @@
 
     fit();
     addEventListener('resize', fit);
+    pauseBaseTs = performance.now();
     const t0 = resolveInitialTime();
     if (t0 > 0) seek(t0);
-    else render(0);
+    else render(0, 0);
     requestAnimationFrame(frame);
     if (params.has('autoplay')) play();
     exposeBridge(cfg);
@@ -876,6 +1009,7 @@
     if (V.gl && glEl) {
       glEl.classList.remove('is-off');
       await V.gl.init(glEl, V.getCfg());
+      if (V.gl.ready === undefined) V.gl.ready = true;
     }
     V.start();
   };

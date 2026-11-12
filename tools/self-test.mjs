@@ -125,10 +125,10 @@ function writeTestProjectFiles(videoDir) {
 
   fs.writeFileSync(path.join(videoDir, 'js/s02.js'), [
     'V.scene({',
-    '  id: "s02", title: "纯函数校验", transition: "zoomFade", transitionDur: 0.35,',
+    '  id: "s02", title: "纯函数校验", live: true, transition: "zoomFade", transitionDur: 0.35,',
     '  lines: ["所有画面仅由时间纯函数唯一决定。"],',
     '  build(root) { root.append(V.u.h("div", { class: "s2-box" }, "PURE F(T)")); },',
-    '  update() {},',
+    '  update(t) { window.__s2LiveT = t; },',
     '});',
     '',
   ].join('\n'), 'utf8');
@@ -202,6 +202,35 @@ async function verifyPlayerBarContracts(page, port) {
     return { subBottom: s.bottom, ctrlTop: c.top };
   });
   assert.ok(dodge.subBottom <= dodge.ctrlTop, `Fullscreen #subs (${dodge.subBottom}) must dodge above #controls (${dodge.ctrlTop})`);
+
+  const postEnd = await page.evaluate(async () => {
+    window.__video.seek(window.__video.duration);
+    window.__video.pause();
+    const t0 = window.__s2LiveT;
+    const tg0 = document.getElementById('stage').style.getPropertyValue('--tg');
+    document.getElementById('viewport').click();
+    const nowAfterClick = window.__video.getSyncState().now;
+    await new Promise(r => setTimeout(r, 120));
+    const t1 = window.__s2LiveT;
+    const tg1 = document.getElementById('stage').style.getPropertyValue('--tg');
+    window.__video.tryEgg(0.4, '点击卡片交互');
+    const inEgg = document.body.classList.contains('egg-mode') && document.querySelector('.v-sandbox-bar').classList.contains('on');
+    const eggNow = window.__video.getSyncState().now;
+    document.querySelector('.v-sandbox-back').click();
+    const backState = window.__video.getSyncState();
+    return {
+      isEnded: nowAfterClick >= window.__video.duration - 0.02,
+      liveAdvanced: t1 > t0 + 0.04 && tg1 !== tg0,
+      inEgg,
+      eggNow,
+      exitedEgg: !backState.sandbox && backState.now >= window.V.scenes[1].start,
+    };
+  });
+  assert.equal(postEnd.isEnded, true, 'Blank #viewport click at end of live scene must NOT reset timeline to 0');
+  assert.equal(postEnd.liveAdvanced, true, 'Live scene HTML & --tg animations must keep moving after timeline ends');
+  assert.equal(postEnd.inEgg, true, 'tryEgg() must activate .v-sandbox-bar and body.egg-mode');
+  assert.ok(Math.abs(postEnd.eggNow - 0.4) < 0.05, 'tryEgg() must jump to targetTime');
+  assert.equal(postEnd.exitedEgg, true, 'Clicking .v-sandbox-back must exit egg mode and return to finale');
 }
 
 async function verifyBrowserCapabilities(videoDir) {
@@ -286,6 +315,12 @@ async function main() {
     runCliCmd(['bundle', 'demo', '--out', distDir]);
     assert.ok(fs.existsSync(path.join(distDir, 'base/js/engine.js')), 'Bundled base/js/engine.js should exist');
     assert.ok(fs.existsSync(path.join(distDir, 'demo/index.html')), 'Bundled demo/index.html should exist');
+
+    const singleDir = path.join(TEST_ROOT, 'dist-single');
+    runCliCmd(['bundle', 'demo', '--single', '--out', singleDir]);
+    assert.ok(fs.existsSync(path.join(singleDir, 'index.html')), 'Single bundle root index.html should exist');
+    assert.ok(fs.existsSync(path.join(singleDir, 'base/js/engine.js')), 'Single bundle base/js/engine.js should exist');
+    assert.ok(fs.readFileSync(path.join(singleDir, 'index.html'), 'utf8').includes('./base/js/engine.js'), 'Single bundle index.html must rewrite ../base/ -> ./base/');
 
     console.log('✅ All html-video-base v2.0 end-to-end self-tests PASSED.');
   } finally {

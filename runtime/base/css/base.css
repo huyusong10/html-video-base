@@ -351,6 +351,52 @@ body.record #subs {
 .sub-text > span { grid-area: 1 / 1; }
 .sub-text > .ghost { visibility: hidden; }
 body.nosubs #subs { display: none; }
+body.sandbox-mode #subs,
+body.egg-mode #subs {
+  visibility: hidden !important;
+  opacity: 0 !important;
+}
+
+/* 彩蛋 / 沙盒互动试玩浮条（保持 :where 低权重，允许业务通过 .egg-banner 等类自由覆盖像素或品牌皮肤） */
+:where(.v-sandbox-bar) {
+  position: absolute;
+  left: 50%;
+  bottom: calc(62px + var(--ctrl-dodge, 0px));
+  z-index: 26;
+  display: flex; align-items: center; gap: 18px;
+  padding: 10px 16px 10px 24px;
+  border-radius: var(--ctrl-radius);
+  background: var(--ctrl-menu-bg);
+  border: 2px solid var(--accent);
+  box-shadow: var(--ctrl-menu-shadow);
+  color: var(--ctrl-fg);
+  font-size: 21px;
+  opacity: 0; pointer-events: none;
+  transform: translate(-50%, 14px);
+  transition: opacity 0.22s, transform 0.22s, bottom 0.22s;
+}
+:where(.v-sandbox-bar.on) {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+:where(.v-sandbox-txt) {
+  white-space: nowrap;
+}
+:where(.v-sandbox-back) {
+  appearance: none;
+  padding: 6px 18px;
+  border-radius: var(--ctrl-radius);
+  border: 1.5px solid rgba(255, 255, 255, 0.7);
+  background: var(--accent);
+  color: #ffffff;
+  font: inherit;
+  font-size: 0.9em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+:where(.v-sandbox-back:hover) { filter: brightness(1.08); }
+body.record .v-sandbox-bar { display: none !important; }
 
 /* 交互式检查点遮罩层（仅网页模式生效，录制态自动跳过） */
 #checkpoint-overlay {

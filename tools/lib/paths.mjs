@@ -43,12 +43,18 @@ function readRuntimeHint(root, filename) {
 }
 
 function pythonCandidates(root) {
+  const parent = path.resolve(root, '..');
   return [
     process.env.PYTHON_BIN,
     readRuntimeHint(root, 'python-path.txt'),
+    readRuntimeHint(parent, 'python-path.txt'),
     readRuntimeHint(PKG_ROOT, 'python-path.txt'),
     path.join(root, '.runtime/venv/Scripts/python.exe'),
     path.join(root, '.runtime/venv/bin/python'),
+    path.join(parent, '.runtime/venv/Scripts/python.exe'),
+    path.join(parent, '.runtime/venv/bin/python'),
+    path.join(root, '.venv/Scripts/python.exe'),
+    path.join(root, '.venv/bin/python'),
     path.join(PKG_ROOT, '.runtime/venv/Scripts/python.exe'),
     path.join(PKG_ROOT, '.runtime/venv/bin/python'),
     'python',
@@ -86,11 +92,14 @@ export function resolveFfmpeg(root = ROOT) {
 }
 
 function playwrightHintCandidates(root) {
+  const parent = path.resolve(root, '..');
   return [
     process.env.PLAYWRIGHT_CORE_PATH,
     readRuntimeHint(root, 'playwright-path.txt'),
+    readRuntimeHint(parent, 'playwright-path.txt'),
     readRuntimeHint(PKG_ROOT, 'playwright-path.txt'),
     path.join(root, 'node_modules/playwright-core/index.mjs'),
+    path.join(parent, 'node_modules/playwright-core/index.mjs'),
     path.join(PKG_ROOT, 'node_modules/playwright-core/index.mjs'),
   ].filter(Boolean);
 }
