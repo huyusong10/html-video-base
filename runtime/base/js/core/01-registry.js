@@ -162,11 +162,32 @@
     }
   };
 
+  function extractCfgLocaleCode(item) {
+    if (typeof item === 'string') return item;
+    return item && item.code ? String(item.code) : '';
+  }
+
+  function resolveOptInQueryLang(q) {
+    if (!q) return '';
+    const low = String(q).toLowerCase();
+    const regKeys = V.locales ? Object.keys(V.locales) : [];
+    const regHit = regKeys.find(k => k.toLowerCase() === low);
+    if (regHit) return regHit;
+    const cfgLoc = V.config && V.config.locales;
+    if (cfgLoc === true) return q;
+    if (!Array.isArray(cfgLoc) || !cfgLoc.length) return '';
+    for (const item of cfgLoc) {
+      const code = extractCfgLocaleCode(item);
+      if (code && code.toLowerCase() === low) return code;
+    }
+    return '';
+  }
+
   V.getActiveLang = function () {
     if (V.__langOverridden) return V.__activeLang || (V.config && V.config.lang) || '';
     if (V.__activeLang) return V.__activeLang;
     if (typeof location !== 'undefined' && location.search) {
-      const q = new URLSearchParams(location.search).get('lang');
+      const q = resolveOptInQueryLang(new URLSearchParams(location.search).get('lang'));
       if (q) return q;
     }
     return (V.config && V.config.lang) || '';
@@ -232,20 +253,25 @@
     return out;
   }
 
+  function mergeOptionalDict(a, b, c) {
+    if (!a && !b && !c) return undefined;
+    return Object.assign({}, a || {}, b || {}, c || {});
+  }
+
   V.getCfg = function () {
     V.applyConfiguredPresets();
     const lang = V.getActiveLang();
     const loc = (lang && V.locales[lang]) || null;
     const locCfg = extractLocaleCfg(loc);
-    const td = V.themeDefaults || {};
-    const vc = V.config || {};
+    const td = V.themeDefaults || {}, vc = V.config || {};
     const merged = Object.assign({}, td, vc, locCfg);
     merged.ui = mergeUiDict(mergeUiDict(td.ui, vc.ui), locCfg.ui);
     const tts = mergeTtsDict(mergeTtsDict(td.tts, vc.tts), locCfg.tts);
     if (tts) merged.tts = tts;
-    if (td.strings || vc.strings || (loc && loc.strings)) {
-      merged.strings = Object.assign({}, td.strings || {}, vc.strings || {}, (loc && loc.strings) || {});
-    }
+    const texts = mergeOptionalDict(td.texts, vc.texts, loc && loc.texts);
+    if (texts) merged.texts = texts;
+    const strings = mergeOptionalDict(td.strings, vc.strings, loc && loc.strings);
+    if (strings) merged.strings = strings;
     return merged;
   };
 })(globalThis.V = globalThis.V || {});

@@ -22,8 +22,15 @@
     return [{ label, value: true, primary: true }];
   }
 
+  function trCheckpointText(raw, fallbackKey) {
+    if (!raw || !V.t) return raw;
+    const direct = V.t(raw, raw);
+    if (direct !== raw) return direct;
+    return fallbackKey ? V.t(fallbackKey, raw) : raw;
+  }
+
   function buildChoiceBtn(ch, idx, cp, resumeFn) {
-    const label = cp.id && V.t ? V.t(`cp.${cp.id}.choice.${idx}`, ch.label) : ch.label;
+    const label = trCheckpointText(ch.label, cp.id ? `cp.${cp.id}.choice.${idx}` : '');
     const b = h('button', { class: 'cp-btn' + (ch.primary || idx === 0 ? ' is-primary' : '') }, label);
     b.onclick = e => {
       e.stopPropagation();
@@ -42,8 +49,8 @@
       return;
     }
     const btns = resolveCheckpointChoices(cp).map((ch, idx) => buildChoiceBtn(ch, idx, cp, resumeFn));
-    const title = cp.title && cp.id && V.t ? V.t(`cp.${cp.id}.title`, cp.title) : cp.title;
-    const prompt = cp.prompt && cp.id && V.t ? V.t(`cp.${cp.id}.prompt`, cp.prompt) : cp.prompt;
+    const title = trCheckpointText(cp.title, cp.id ? `cp.${cp.id}.title` : '');
+    const prompt = trCheckpointText(cp.prompt, cp.id ? `cp.${cp.id}.prompt` : '');
     const card = h('div', { class: 'cp-card', 'data-interactive': '1' },
       title ? h('h4', null, title) : null,
       prompt ? h('p', null, prompt) : null,

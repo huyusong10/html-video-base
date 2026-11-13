@@ -54,17 +54,17 @@ function writeTestProjectFiles(videoDir) {
   fs.writeFileSync(path.join(videoDir, 'locales/en.js'), [
     'V.locale("en", {',
     '  title: "Microkernel Demo EN",',
-    '  strings: { globalTag: "MICROKERNEL" },',
+    '  texts: { "继续演示？": "Continue demo?", "继续": "Continue" },',
     '  scenes: {',
     '    s01: {',
     '      title: "Architecture",',
-    '      strings: { badgeText: "OPEN-KERNEL-EN" },',
+    '      texts: { "OPEN-KERNEL": "OPEN-KERNEL-EN" },',
     '      lines: ["Welcome to the critical microkernel timeline."],',
     '      anchors: { "关键": "critical" },',
     '    },',
     '    s02: {',
     '      title: "Verification",',
-    '      strings: { boxLabel: "PURE F(T) EN" },',
+    '      texts: { "PURE F(T)": "PURE F(T) EN" },',
     '      lines: ["Every pure function stays deterministic."],',
     '    },',
     '  },',
@@ -108,8 +108,7 @@ function writeTestProjectFiles(videoDir) {
     'V.config = {',
     '  title: "微内核自检演示",',
     '  lang: "zh-CN",',
-    '  locales: ["zh-CN", "en"],',
-    '  strings: { globalTag: "微内核" },',
+    '  locales: ["zh-CN", "en", "zh-TW"],',
     '  width: 640, height: 360, fps: 10,',
     '  ui: { resumeMinSec: 0.5, idleHideDelay: 420, leaveHideDelay: 120 },',
     '  tts: { provider: "custom", script: "./mock_tts.py" },',
@@ -129,7 +128,7 @@ function writeTestProjectFiles(videoDir) {
     '  lines: [{ text: "欢迎体验关键微内核时间轴引擎。", enSlowdown: 0.9, align: "acoustic", volume: 0.85, whisperModel: "tiny", xmlLang: "zh-CN" }],',
     '  checkpoints: x => [{ at: 0.45, id: "cp-1", defaultValue: "auto-ok", prompt: "继续演示？", actions: [{ label: "继续", resume: true }] }],',
     '  build(root, x) {',
-    '    const badge = V.c.badge(x.t("badgeText", "OPEN-KERNEL"));',
+    '    const badge = V.c.badge("OPEN-KERNEL");',
     '    const clip = V.u.videoClip("assets/clip.mp4", { start: 0.05, volume: 0.25, style: { width: "160px", height: "90px" } });',
     '    root.append(badge, clip);',
     '    this._badge = badge; this._clip = clip;',
@@ -148,7 +147,7 @@ function writeTestProjectFiles(videoDir) {
     '  // 1) don\'t break stripSceneCalls )',
     '  id: "s02", title: "纯函数校验", live: true, transition: "zoomFade", transitionDur: 0.35,',
     '  lines: ["所有画面仅由时间纯函数唯一决定。"],',
-    '  build(root) { root.append(V.u.h("div", { class: "s2-box", "data-i18n": "boxLabel", "data-ref": "../assets/shared.svg" }, "PURE F(T)")); },',
+    '  build(root) { root.append(V.u.h("div", { class: "s2-box", "data-ref": "../assets/shared.svg" }, "PURE F(T)")); },',
     '  update(t) { window.__s2LiveT = t; window.__s2SeenCp = V.checkpointState["cp-1"]; },',
     '});',
     '',
@@ -1154,12 +1153,14 @@ async function verifyRuntimeSetLangHotSwitch(page, port) {
     window.__video.seek(mid);
     return {
       langCount: document.querySelectorAll('.sound-lang-item').length,
+      i18nTouchedOnBase: Boolean(window.V.scenes[1].root && window.V.scenes[1].root._i18nTouched),
       docTitle: document.title,
       boxTxt: document.querySelector('.s2-box')?.textContent,
       subTxt: document.querySelector('#subs .sub-text > span:last-child')?.textContent,
     };
   });
-  assert.equal(beforeSwitch.langCount, 2, 'Multi-locale config must render 2 language rows in .sound-menu');
+  assert.equal(beforeSwitch.langCount, 3, 'Multi-locale config must render 3 language rows in .sound-menu');
+  assert.equal(beforeSwitch.i18nTouchedOnBase, false, 'Base locale must skip DOM text scan (zero overhead)');
   assert.equal(beforeSwitch.docTitle, '微内核自检演示');
   assert.equal(beforeSwitch.boxTxt, 'PURE F(T)');
   assert.ok(beforeSwitch.subTxt.includes('时间纯函数'), `Expected zh-CN subtitle before switch, got "${beforeSwitch.subTxt}"`);
@@ -1208,6 +1209,53 @@ async function verifyRuntimeSetLangHotSwitch(page, port) {
   assert.equal(zhRoundTrip.chapHd, '章节导航', 'setLang("zh-CN") must restore Chinese UI chrome');
   assert.equal(zhRoundTrip.muteTxt, '全部静音', 'setLang("zh-CN") must restore Chinese sound menu label');
   assert.equal(zhRoundTrip.deepLink.includes('lang='), false, 'getDeepLink() on base lang must omit redundant lang param');
+
+  const ghostFallback = await page.evaluate(async () => {
+    const ret = await window.__video.setLang('nonexistent');
+    return { ret, voiceOk: Boolean(window.V.getActiveVoice && window.V.getActiveVoice()) };
+  });
+  assert.equal(ghostFallback.ret, 'zh-CN', 'setLang("nonexistent") must roll back to base lang');
+  assert.equal(ghostFallback.voiceOk, true, 'Missing locale rollback must preserve base V.voice');
+}
+
+async function verifySingleLangOptOutSafety(browser, port) {
+  const ctx = await browser.newContext({ viewport: { width: 640, height: 360 } });
+  const p = await ctx.newPage();
+  const probedUrls = [];
+  p.on('request', req => {
+    if (/\/locales\/|timings\.[a-z-]+\.js/i.test(req.url())) probedUrls.push(req.url());
+  });
+  await p.goto(`http://127.0.0.1:${port}/demo/?lang=fr`, { waitUntil: 'networkidle' });
+  const unlisted = await p.evaluate(() => ({
+    lang: window.__video.getSyncState().lang,
+    voiceOk: Boolean(window.V.getActiveVoice && window.V.getActiveVoice()),
+    hasBgm: window.__video.getSyncState().hasBgm,
+  }));
+  assert.equal(probedUrls.length, 0, 'Unlisted ?lang=fr must not trigger 404 locale/timings probes');
+  assert.equal(unlisted.lang, 'zh-CN', 'Unlisted ?lang=fr must fall back to base lang');
+  assert.equal(unlisted.voiceOk, true, 'Unlisted ?lang=fr must preserve base V.voice');
+  assert.equal(unlisted.hasBgm, true, 'Unlisted ?lang=fr must preserve base audio/BGM');
+
+  await p.route('**/demo/video.config.js', async route => {
+    const resp = await route.fetch();
+    const txt = (await resp.text()).replace(/locales:\s*\[[^\]]*\],?\s*/g, '');
+    await route.fulfill({ response: resp, body: txt });
+  });
+  await p.goto(`http://127.0.0.1:${port}/demo/?lang=en`, { waitUntil: 'networkidle' });
+  const singleLang = await p.evaluate(() => ({
+    lang: window.__video.getSyncState().lang,
+    langCount: document.querySelectorAll('.sound-lang-item').length,
+    chapHd: document.querySelector('.chap-menu-hd')?.textContent,
+    voiceOk: Boolean(window.V.getActiveVoice && window.V.getActiveVoice()),
+    hasBgm: window.__video.getSyncState().hasBgm,
+  }));
+  assert.equal(probedUrls.length, 0, 'Single-language video (no locales config) must ignore ?lang=en with zero probes');
+  assert.equal(singleLang.lang, 'zh-CN', 'Single-language video must ignore external ?lang=en');
+  assert.equal(singleLang.langCount, 0, 'Single-language video must render zero language rows');
+  assert.equal(singleLang.chapHd, '章节导航', 'Single-language video must keep base UI chrome under ?lang=en');
+  assert.equal(singleLang.voiceOk, true, 'Single-language video must keep V.voice under ?lang=en');
+  assert.equal(singleLang.hasBgm, true, 'Single-language video must keep audio & BGM under ?lang=en');
+  await ctx.close();
 }
 
 async function verifyBrowserCapabilities(videoDir) {
@@ -1260,6 +1308,7 @@ async function verifyBrowserCapabilities(videoDir) {
     await verifyPlayerBarContracts(page, port);
     await verifySfxAndMultiScriptContracts(page, port);
     await verifyRuntimeSetLangHotSwitch(page, port);
+    await verifySingleLangOptOutSafety(browser, port);
     await verifyAutoplayBlockedUnlock(browser, port);
     await page.close();
   } finally {

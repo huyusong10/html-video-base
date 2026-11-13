@@ -164,11 +164,32 @@
     }
   };
 
+  function extractCfgLocaleCode(item) {
+    if (typeof item === 'string') return item;
+    return item && item.code ? String(item.code) : '';
+  }
+
+  function resolveOptInQueryLang(q) {
+    if (!q) return '';
+    const low = String(q).toLowerCase();
+    const regKeys = V.locales ? Object.keys(V.locales) : [];
+    const regHit = regKeys.find(k => k.toLowerCase() === low);
+    if (regHit) return regHit;
+    const cfgLoc = V.config && V.config.locales;
+    if (cfgLoc === true) return q;
+    if (!Array.isArray(cfgLoc) || !cfgLoc.length) return '';
+    for (const item of cfgLoc) {
+      const code = extractCfgLocaleCode(item);
+      if (code && code.toLowerCase() === low) return code;
+    }
+    return '';
+  }
+
   V.getActiveLang = function () {
     if (V.__langOverridden) return V.__activeLang || (V.config && V.config.lang) || '';
     if (V.__activeLang) return V.__activeLang;
     if (typeof location !== 'undefined' && location.search) {
-      const q = new URLSearchParams(location.search).get('lang');
+      const q = resolveOptInQueryLang(new URLSearchParams(location.search).get('lang'));
       if (q) return q;
     }
     return (V.config && V.config.lang) || '';
@@ -234,20 +255,25 @@
     return out;
   }
 
+  function mergeOptionalDict(a, b, c) {
+    if (!a && !b && !c) return undefined;
+    return Object.assign({}, a || {}, b || {}, c || {});
+  }
+
   V.getCfg = function () {
     V.applyConfiguredPresets();
     const lang = V.getActiveLang();
     const loc = (lang && V.locales[lang]) || null;
     const locCfg = extractLocaleCfg(loc);
-    const td = V.themeDefaults || {};
-    const vc = V.config || {};
+    const td = V.themeDefaults || {}, vc = V.config || {};
     const merged = Object.assign({}, td, vc, locCfg);
     merged.ui = mergeUiDict(mergeUiDict(td.ui, vc.ui), locCfg.ui);
     const tts = mergeTtsDict(mergeTtsDict(td.tts, vc.tts), locCfg.tts);
     if (tts) merged.tts = tts;
-    if (td.strings || vc.strings || (loc && loc.strings)) {
-      merged.strings = Object.assign({}, td.strings || {}, vc.strings || {}, (loc && loc.strings) || {});
-    }
+    const texts = mergeOptionalDict(td.texts, vc.texts, loc && loc.texts);
+    if (texts) merged.texts = texts;
+    const strings = mergeOptionalDict(td.strings, vc.strings, loc && loc.strings);
+    if (strings) merged.strings = strings;
     return merged;
   };
 })(globalThis.V = globalThis.V || {});
@@ -433,29 +459,81 @@
     return (sc && sc.id && scenes[sc.id]) || scenes[sceneIdx] || null;
   }
 
-  function lookupSceneString(lang, sceneIdx, key) {
-    const scLoc = resolveSceneLocDict(lang, sceneIdx);
-    return scLoc && scLoc.strings ? scLoc.strings[key] : undefined;
+  function lookupDictKey(obj, key) {
+    if (!obj) return undefined;
+    if (obj.texts && obj.texts[key] !== undefined) return obj.texts[key];
+    return obj.strings ? obj.strings[key] : undefined;
+  }
+
+  function lookupTranslatedEntry(lang, sceneIdx, key) {
+    const scHit = lookupDictKey(resolveSceneLocDict(lang, sceneIdx), key);
+    if (scHit !== undefined) return scHit;
+    const cfg = V.getCfg ? V.getCfg() : (V.config || {});
+    return lookupDictKey(cfg, key);
   }
 
   V.t = function (key, fallback, vars, sceneIdx) {
     const lang = V.getActiveLang ? V.getActiveLang() : '';
-    const scVal = lookupSceneString(lang, sceneIdx === undefined ? V._currentSceneIdx : sceneIdx, key);
-    if (scVal !== undefined) return interpolateVars(scVal, vars);
-    const cfg = V.getCfg ? V.getCfg() : (V.config || {});
-    const gVal = cfg.strings && cfg.strings[key];
-    if (gVal !== undefined) return interpolateVars(gVal, vars);
+    const idx = sceneIdx === undefined ? V._currentSceneIdx : sceneIdx;
+    const val = lookupTranslatedEntry(lang, idx, key);
+    if (val !== undefined) return interpolateVars(val, vars);
     return interpolateVars(fallback !== undefined ? fallback : key, vars);
   };
 
-  V.localizeDom = function (root, sceneIdx) {
-    if (!root || !root.querySelectorAll) return;
+  function hasActiveTextLocalization(root) {
+    if (root._i18nTouched) return true;
+    const lang = V.getActiveLang ? V.getActiveLang() : '';
+    if (lang && V.locales && V.locales[lang]) return true;
+    if (V.isSecondaryLocale && V.isSecondaryLocale(lang)) return true;
+    const vc = V.config || {};
+    return Boolean(vc.texts || vc.strings);
+  }
+
+  function localizeKeyedElements(root, sceneIdx) {
     for (const el of root.querySelectorAll('[data-i18n]')) {
       const key = el.getAttribute('data-i18n');
       if (!key) continue;
       if (el._i18nOrig === undefined) el._i18nOrig = el.textContent;
       el.textContent = V.t(key, el._i18nOrig, null, sceneIdx);
     }
+  }
+
+  function shouldSkipTextNodeParent(parent) {
+    if (!parent) return false;
+    const tag = parent.tagName;
+    return tag === 'SCRIPT' || tag === 'STYLE' || parent.hasAttribute('data-i18n');
+  }
+
+  function applyLiteralTextNode(node, lang, sceneIdx) {
+    if (shouldSkipTextNodeParent(node.parentElement)) return;
+    if (node._i18nOrig === undefined) node._i18nOrig = node.nodeValue || '';
+    const orig = node._i18nOrig;
+    const trimmed = orig.trim();
+    if (!trimmed) return;
+    const hit = lookupTranslatedEntry(lang, sceneIdx, trimmed);
+    if (hit === undefined) {
+      if (node.nodeValue !== orig) node.nodeValue = orig;
+      return;
+    }
+    const at = orig.indexOf(trimmed);
+    node.nodeValue = orig.slice(0, at) + String(hit) + orig.slice(at + trimmed.length);
+  }
+
+  function localizeLiteralTextNodes(root, lang, sceneIdx) {
+    if (typeof document === 'undefined' || !document.createTreeWalker) return;
+    const walker = document.createTreeWalker(root, 4);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      applyLiteralTextNode(n, lang, sceneIdx);
+    }
+  }
+
+  V.localizeDom = function (root, sceneIdx) {
+    if (!root || !root.querySelectorAll || !hasActiveTextLocalization(root)) return;
+    root._i18nTouched = true;
+    const idx = sceneIdx === undefined ? V._currentSceneIdx : sceneIdx;
+    const lang = V.getActiveLang ? V.getActiveLang() : '';
+    localizeKeyedElements(root, idx);
+    localizeLiteralTextNodes(root, lang, idx);
   };
 
   V.captureVoice = function (voiceObj = V.voice) {
@@ -1608,8 +1686,15 @@
     return [{ label, value: true, primary: true }];
   }
 
+  function trCheckpointText(raw, fallbackKey) {
+    if (!raw || !V.t) return raw;
+    const direct = V.t(raw, raw);
+    if (direct !== raw) return direct;
+    return fallbackKey ? V.t(fallbackKey, raw) : raw;
+  }
+
   function buildChoiceBtn(ch, idx, cp, resumeFn) {
-    const label = cp.id && V.t ? V.t(`cp.${cp.id}.choice.${idx}`, ch.label) : ch.label;
+    const label = trCheckpointText(ch.label, cp.id ? `cp.${cp.id}.choice.${idx}` : '');
     const b = h('button', { class: 'cp-btn' + (ch.primary || idx === 0 ? ' is-primary' : '') }, label);
     b.onclick = e => {
       e.stopPropagation();
@@ -1628,8 +1713,8 @@
       return;
     }
     const btns = resolveCheckpointChoices(cp).map((ch, idx) => buildChoiceBtn(ch, idx, cp, resumeFn));
-    const title = cp.title && cp.id && V.t ? V.t(`cp.${cp.id}.title`, cp.title) : cp.title;
-    const prompt = cp.prompt && cp.id && V.t ? V.t(`cp.${cp.id}.prompt`, cp.prompt) : cp.prompt;
+    const title = trCheckpointText(cp.title, cp.id ? `cp.${cp.id}.title` : '');
+    const prompt = trCheckpointText(cp.prompt, cp.id ? `cp.${cp.id}.prompt` : '');
     const card = h('div', { class: 'cp-card', 'data-interactive': '1' },
       title ? h('h4', null, title) : null,
       prompt ? h('p', null, prompt) : null,
@@ -4201,16 +4286,16 @@
     return sc.start + resolveMappedCueLt(sc.cues, sc.duration, pos);
   }
 
-  async function ensureLocaleAssetsLoaded(target) {
+  async function ensureLocaleAssetsLoaded(target, fallbackLang) {
     if (shouldProbeLocalePack(target)) await loadOptionalScript(`locales/${target}.js`);
-    if (V.activateCachedVoice && V.activateCachedVoice(target)) return;
+    if (V.activateCachedVoice && V.activateCachedVoice(target)) return true;
     const cfg0 = V.getCfg();
     const baseTimings = cfg0.timingsScript || 'assets/voice/timings.js';
     const isSec = V.isSecondaryLocale ? V.isSecondaryLocale(target) : false;
     const targetTimings = isSec ? baseTimings.replace(/\.js$/i, `.${target}.js`) : baseTimings;
     const ok = await loadOptionalScript(targetTimings);
-    if (ok && V.captureVoice) V.captureVoice(V.voice);
-    else clearStaleVoiceIfNeeded();
+    if (ok && V.captureVoice) { V.captureVoice(V.voice); return true; }
+    return finalizeLocaleFallback(target, fallbackLang);
   }
 
   function syncStaticBarLabels(bar, cfg) {
@@ -4275,12 +4360,16 @@
     const pos = captureLogicalPos();
     const wasPlaying = playing;
     if (wasPlaying && audioRt) audioRt.pausePlayback();
-    V.resetCheckpoints();
     if (V.captureVoice && V.voice) V.captureVoice(V.voice);
     V.__langOverridden = true;
     V.__activeLang = target;
-    await ensureLocaleAssetsLoaded(target);
-    applyPostLocaleReload(pos, wasPlaying, target);
+    const ok = await ensureLocaleAssetsLoaded(target, prevLang);
+    if (!ok && V.getActiveLang() === prevLang) {
+      if (wasPlaying && audioRt) audioRt.startPlayback();
+      return prevLang;
+    }
+    V.resetCheckpoints();
+    applyPostLocaleReload(pos, wasPlaying, V.getActiveLang());
     return V.getActiveLang();
   }
 
@@ -4446,12 +4535,30 @@
     }
   }
 
+  function hasLocaleResources(lang) {
+    if (!lang || (V.isSecondaryLocale && !V.isSecondaryLocale(lang))) return true;
+    if (V.locales && V.locales[lang]) return true;
+    if (V.voices && V.voices[lang]) return true;
+    return Boolean(V.voice && V.voice.lang === lang);
+  }
+
+  function finalizeLocaleFallback(lang, fallbackLang) {
+    if (hasLocaleResources(lang)) {
+      clearStaleVoiceIfNeeded();
+      return true;
+    }
+    const fb = fallbackLang !== undefined ? fallbackLang : ((V.getBaseLang && V.getBaseLang()) || '');
+    V.__langOverridden = true;
+    V.__activeLang = fb;
+    if (V.activateCachedVoice) V.activateCachedVoice(fb);
+    return false;
+  }
+
   function shouldProbeLocalePack(lang) {
     if (!lang || V.locales[lang]) return false;
     if (V.isSecondaryLocale && V.isSecondaryLocale(lang)) return true;
     const base = V.getBaseLang ? V.getBaseLang() : '';
-    const explicit = Boolean(V.__activeLang || params.get('lang'));
-    return explicit && Boolean(!base || lang.toLowerCase() !== base.toLowerCase());
+    return Boolean(!base || lang.toLowerCase() !== base.toLowerCase());
   }
 
   async function loadBootLocaleTimings(cfg, lang) {
@@ -4461,7 +4568,7 @@
     if (langTimings === baseTimings) return;
     const ok = await loadOptionalScript(langTimings);
     if (ok && V.captureVoice) V.captureVoice(V.voice);
-    else clearStaleVoiceIfNeeded();
+    else finalizeLocaleFallback(lang);
   }
 
   async function ensureDynamicBootAssets() {

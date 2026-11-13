@@ -80,12 +80,10 @@ function resolveAspectDims(aspect) {
 }
 
 function exportSkillDoc(outDir) {
-  const src = path.join(PKG_ROOT, 'skills/html-video/SKILL.md');
+  const srcDir = path.join(PKG_ROOT, 'skills/html-video');
   const targetDir = outDir ? path.resolve(ROOT, outDir) : path.join(ROOT, '.agents/skills/html-video');
-  fs.mkdirSync(targetDir, { recursive: true });
-  const dest = path.join(targetDir, 'SKILL.md');
-  fs.copyFileSync(src, dest);
-  console.log(`✅ Exported Agent Skill -> ${dest}`);
+  fs.cpSync(srcDir, targetDir, { recursive: true, force: true });
+  console.log(`✅ Exported Agent Skill -> ${targetDir}`);
 }
 
 function cmdSkill(args) {

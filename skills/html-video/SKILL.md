@@ -76,10 +76,7 @@ V.scene({
   - **业务新增按钮建议一律用图标**：调用 `V.control({ id: 'xray', position: 'right', title: 'X-Ray 透视', icon: ['M...'], onClick(e, V) {} })`，不要塞多字中文撑宽工具栏。
   - **覆盖默认图标**：可通过 `V.icons({ play: '...', subsOn: '...' })` 或 `V.config.ui.icons` 按需覆盖任意内置键名；像素风主题可直接设 `ui: { iconPreset: 'pixel' }` 并加 `--ctrl-ico-render: crispEdges`。图标值支持 `16×16` `<path d>` 数组、内联 SVG 字符串、完整 `<svg>` 字符串或 `(h, V) => Node` 渲染函数。
 - **内置检索、深链、音量调节、分幕配乐闪避与自动播放解锁**：按 `/` 或 `Ctrl+K` 全文检索台词与章节跳转；点击时间码复制当前 `?t=` 深链；点击声音图标打开上拉面板拖动 `0%–100%` 音量滑块（亦可在声音图标上滚轮或按 `↑`/`↓` 键按 `5%` 步进调音并闪出 `#osd` 提示，调用 `V.setVolume(v)` 编程设置），有配乐时可独立开关 BGM（`V.setBgm(on)` / `V.setVoice(on)`，按 `B` 开关配乐，按 `M` 静音）；浏览器拦截有声自动播放时声音图标自动切为高亮待开启态，点一下即刻解锁发声；单幕可设 `bgm: false | 0.25 | { volume: 0.25 }` 在混音期做 `0.4s` 平滑配乐静默或压低。
-- **全链路多语言（i18n）契约**：
-  - 在 `locales/<lang>.js` 调用 `V.locale('en', { label: 'English', title: '...', tts: { voice: '...', speakers: { host: { label: 'Ling', voice: '...' } } }, strings: { cta: 'Try Now' }, scenes: { intro: { title: '...', strings: { hero: 'HTML First' }, anchors: { 对齐: 'align' }, lines: ['...'] } } })`，并在 `V.config.locales = ['zh-CN', 'en']` 声明可用语种。
-  - 分镜画布文案用 `x.t('hero', 'HTML 原型先行')` 或节点属性 `data-i18n="hero"` 读取当前语种字典；多角色对话通过 `tts.speakers` 统一管理各语种角色名与音色。
-  - 构建期传 `--lang en`（`npx html-video build <id> --lang en` / `verify --lang en` / `render --lang en`）独立生成 `soundtrack.en.m4a`、`bgm.en.m4a`、`timings.en.js` 与外挂 `.en.vtt/.srt`；网页端可通过 `?lang=en`、声音菜单语种项或 `await V.setLang('en')` 实时热切音轨、字幕、画布文案与播放器界面文案，并按当前句内相对进度无缝对齐时间轴。
+- **多语言为纯可选项（默认严禁预埋）**：默认一律按单语种直写自然中文 DOM、台词与词锚；用户未明确提出多语言需求时，严禁在业务代码或配置中预埋 `locales`、`x.t`、`data-i18n` 或拆分多语言字典。后续确需增加外语版本时，读取 [references/i18n.md](references/i18n.md)，在外部 `locales/<lang>.js` 中用原文直映（`texts`、`lines`、`anchors`）无侵入扩展，无需返工修改分镜源码。
 
 ## 5. 核心 CSS 主题变量表
 

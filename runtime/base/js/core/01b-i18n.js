@@ -179,29 +179,81 @@
     return (sc && sc.id && scenes[sc.id]) || scenes[sceneIdx] || null;
   }
 
-  function lookupSceneString(lang, sceneIdx, key) {
-    const scLoc = resolveSceneLocDict(lang, sceneIdx);
-    return scLoc && scLoc.strings ? scLoc.strings[key] : undefined;
+  function lookupDictKey(obj, key) {
+    if (!obj) return undefined;
+    if (obj.texts && obj.texts[key] !== undefined) return obj.texts[key];
+    return obj.strings ? obj.strings[key] : undefined;
+  }
+
+  function lookupTranslatedEntry(lang, sceneIdx, key) {
+    const scHit = lookupDictKey(resolveSceneLocDict(lang, sceneIdx), key);
+    if (scHit !== undefined) return scHit;
+    const cfg = V.getCfg ? V.getCfg() : (V.config || {});
+    return lookupDictKey(cfg, key);
   }
 
   V.t = function (key, fallback, vars, sceneIdx) {
     const lang = V.getActiveLang ? V.getActiveLang() : '';
-    const scVal = lookupSceneString(lang, sceneIdx === undefined ? V._currentSceneIdx : sceneIdx, key);
-    if (scVal !== undefined) return interpolateVars(scVal, vars);
-    const cfg = V.getCfg ? V.getCfg() : (V.config || {});
-    const gVal = cfg.strings && cfg.strings[key];
-    if (gVal !== undefined) return interpolateVars(gVal, vars);
+    const idx = sceneIdx === undefined ? V._currentSceneIdx : sceneIdx;
+    const val = lookupTranslatedEntry(lang, idx, key);
+    if (val !== undefined) return interpolateVars(val, vars);
     return interpolateVars(fallback !== undefined ? fallback : key, vars);
   };
 
-  V.localizeDom = function (root, sceneIdx) {
-    if (!root || !root.querySelectorAll) return;
+  function hasActiveTextLocalization(root) {
+    if (root._i18nTouched) return true;
+    const lang = V.getActiveLang ? V.getActiveLang() : '';
+    if (lang && V.locales && V.locales[lang]) return true;
+    if (V.isSecondaryLocale && V.isSecondaryLocale(lang)) return true;
+    const vc = V.config || {};
+    return Boolean(vc.texts || vc.strings);
+  }
+
+  function localizeKeyedElements(root, sceneIdx) {
     for (const el of root.querySelectorAll('[data-i18n]')) {
       const key = el.getAttribute('data-i18n');
       if (!key) continue;
       if (el._i18nOrig === undefined) el._i18nOrig = el.textContent;
       el.textContent = V.t(key, el._i18nOrig, null, sceneIdx);
     }
+  }
+
+  function shouldSkipTextNodeParent(parent) {
+    if (!parent) return false;
+    const tag = parent.tagName;
+    return tag === 'SCRIPT' || tag === 'STYLE' || parent.hasAttribute('data-i18n');
+  }
+
+  function applyLiteralTextNode(node, lang, sceneIdx) {
+    if (shouldSkipTextNodeParent(node.parentElement)) return;
+    if (node._i18nOrig === undefined) node._i18nOrig = node.nodeValue || '';
+    const orig = node._i18nOrig;
+    const trimmed = orig.trim();
+    if (!trimmed) return;
+    const hit = lookupTranslatedEntry(lang, sceneIdx, trimmed);
+    if (hit === undefined) {
+      if (node.nodeValue !== orig) node.nodeValue = orig;
+      return;
+    }
+    const at = orig.indexOf(trimmed);
+    node.nodeValue = orig.slice(0, at) + String(hit) + orig.slice(at + trimmed.length);
+  }
+
+  function localizeLiteralTextNodes(root, lang, sceneIdx) {
+    if (typeof document === 'undefined' || !document.createTreeWalker) return;
+    const walker = document.createTreeWalker(root, 4);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      applyLiteralTextNode(n, lang, sceneIdx);
+    }
+  }
+
+  V.localizeDom = function (root, sceneIdx) {
+    if (!root || !root.querySelectorAll || !hasActiveTextLocalization(root)) return;
+    root._i18nTouched = true;
+    const idx = sceneIdx === undefined ? V._currentSceneIdx : sceneIdx;
+    const lang = V.getActiveLang ? V.getActiveLang() : '';
+    localizeKeyedElements(root, idx);
+    localizeLiteralTextNodes(root, lang, idx);
   };
 
   V.captureVoice = function (voiceObj = V.voice) {

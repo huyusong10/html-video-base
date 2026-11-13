@@ -1306,16 +1306,16 @@
     return sc.start + resolveMappedCueLt(sc.cues, sc.duration, pos);
   }
 
-  async function ensureLocaleAssetsLoaded(target) {
+  async function ensureLocaleAssetsLoaded(target, fallbackLang) {
     if (shouldProbeLocalePack(target)) await loadOptionalScript(`locales/${target}.js`);
-    if (V.activateCachedVoice && V.activateCachedVoice(target)) return;
+    if (V.activateCachedVoice && V.activateCachedVoice(target)) return true;
     const cfg0 = V.getCfg();
     const baseTimings = cfg0.timingsScript || 'assets/voice/timings.js';
     const isSec = V.isSecondaryLocale ? V.isSecondaryLocale(target) : false;
     const targetTimings = isSec ? baseTimings.replace(/\.js$/i, `.${target}.js`) : baseTimings;
     const ok = await loadOptionalScript(targetTimings);
-    if (ok && V.captureVoice) V.captureVoice(V.voice);
-    else clearStaleVoiceIfNeeded();
+    if (ok && V.captureVoice) { V.captureVoice(V.voice); return true; }
+    return finalizeLocaleFallback(target, fallbackLang);
   }
 
   function syncStaticBarLabels(bar, cfg) {
@@ -1380,12 +1380,16 @@
     const pos = captureLogicalPos();
     const wasPlaying = playing;
     if (wasPlaying && audioRt) audioRt.pausePlayback();
-    V.resetCheckpoints();
     if (V.captureVoice && V.voice) V.captureVoice(V.voice);
     V.__langOverridden = true;
     V.__activeLang = target;
-    await ensureLocaleAssetsLoaded(target);
-    applyPostLocaleReload(pos, wasPlaying, target);
+    const ok = await ensureLocaleAssetsLoaded(target, prevLang);
+    if (!ok && V.getActiveLang() === prevLang) {
+      if (wasPlaying && audioRt) audioRt.startPlayback();
+      return prevLang;
+    }
+    V.resetCheckpoints();
+    applyPostLocaleReload(pos, wasPlaying, V.getActiveLang());
     return V.getActiveLang();
   }
 
@@ -1551,12 +1555,30 @@
     }
   }
 
+  function hasLocaleResources(lang) {
+    if (!lang || (V.isSecondaryLocale && !V.isSecondaryLocale(lang))) return true;
+    if (V.locales && V.locales[lang]) return true;
+    if (V.voices && V.voices[lang]) return true;
+    return Boolean(V.voice && V.voice.lang === lang);
+  }
+
+  function finalizeLocaleFallback(lang, fallbackLang) {
+    if (hasLocaleResources(lang)) {
+      clearStaleVoiceIfNeeded();
+      return true;
+    }
+    const fb = fallbackLang !== undefined ? fallbackLang : ((V.getBaseLang && V.getBaseLang()) || '');
+    V.__langOverridden = true;
+    V.__activeLang = fb;
+    if (V.activateCachedVoice) V.activateCachedVoice(fb);
+    return false;
+  }
+
   function shouldProbeLocalePack(lang) {
     if (!lang || V.locales[lang]) return false;
     if (V.isSecondaryLocale && V.isSecondaryLocale(lang)) return true;
     const base = V.getBaseLang ? V.getBaseLang() : '';
-    const explicit = Boolean(V.__activeLang || params.get('lang'));
-    return explicit && Boolean(!base || lang.toLowerCase() !== base.toLowerCase());
+    return Boolean(!base || lang.toLowerCase() !== base.toLowerCase());
   }
 
   async function loadBootLocaleTimings(cfg, lang) {
@@ -1566,7 +1588,7 @@
     if (langTimings === baseTimings) return;
     const ok = await loadOptionalScript(langTimings);
     if (ok && V.captureVoice) V.captureVoice(V.voice);
-    else clearStaleVoiceIfNeeded();
+    else finalizeLocaleFallback(lang);
   }
 
   async function ensureDynamicBootAssets() {
