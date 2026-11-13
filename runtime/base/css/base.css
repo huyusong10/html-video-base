@@ -76,7 +76,7 @@
   --ctrl-time-w: 94px;
   --ctrl-chap-w: 210px;
   --ctrl-rate-menu-w: 104px;
-  --ctrl-sound-menu-w: 148px;
+  --ctrl-sound-menu-w: 176px;
 
   --ctrl-track-h: 6px;
   --ctrl-track-radius: 999px;
@@ -463,11 +463,11 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   transition: opacity 0.16s ease;
 }
 :is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing), .ui-active, .scrubbing, .menu-open) #controls,
-:is(body.ctrl-overlay, body.web-full, body.os-full) #controls:has(input:focus) {
+:is(body.ctrl-overlay, body.web-full, body.os-full) #controls:has(.chap-search:focus) {
   opacity: 1;
 }
 :is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing), .ui-active, .scrubbing, .menu-open) #stage,
-:is(body.ctrl-overlay, body.web-full, body.os-full):has(#controls input:focus) #stage {
+:is(body.ctrl-overlay, body.web-full, body.os-full):has(#controls .chap-search:focus) #stage {
   --ctrl-dodge: var(--ctrl-overlap, 52px);
 }
 :is(body.web-full, body.os-full).playing:not(.ui-active, .scrubbing, .menu-open) #viewport {
@@ -787,6 +787,33 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 .sound-item.on i { opacity: 1; }
 .sound-item:not(.on) { opacity: 0.62; }
 .sound-item:hover { background: rgba(255, 255, 255, 0.12); opacity: 1; }
+.sound-menu [hidden] { display: none; }
+.sound-vol-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px 5px;
+}
+.sound-vol-range {
+  appearance: none; -webkit-appearance: none;
+  flex: 1; min-width: 0; height: 5px; margin: 0;
+  border-radius: 999px; outline: none; cursor: pointer;
+  background: linear-gradient(to right, var(--ctrl-fill-bg) 0%, var(--ctrl-fill-bg) var(--vol-pct, 100%), var(--ctrl-track-bg) var(--vol-pct, 100%), var(--ctrl-track-bg) 100%);
+}
+.sound-vol-range::-webkit-slider-thumb {
+  appearance: none; -webkit-appearance: none;
+  width: 12px; height: 12px; border-radius: var(--ctrl-thumb-radius);
+  background: var(--ctrl-thumb-bg); border: var(--ctrl-thumb-border);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+.sound-vol-range::-moz-range-thumb {
+  width: 12px; height: 12px; border-radius: var(--ctrl-thumb-radius);
+  background: var(--ctrl-thumb-bg); border: var(--ctrl-thumb-border);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  box-sizing: border-box;
+}
+.sound-vol-val {
+  width: 34px; text-align: right; font-size: 0.86em;
+  color: var(--ctrl-fg); font-variant-numeric: tabular-nums;
+}
 .sound-sep { height: 1px; margin: 2px 4px; background: var(--ctrl-border); pointer-events: none; }
 
 @media (max-width: 960px) {

@@ -81,7 +81,12 @@
       writeSaved(V._getUiCfg(V.getCfg()), { rate });
     },
     onSoundChange(st) {
-      writeSaved(V._getUiCfg(V.getCfg()), { muted: st.rawMuted, voice: st.rawVoiceOn, bgm: st.rawBgmOn });
+      writeSaved(V._getUiCfg(V.getCfg()), {
+        volume: st.volume,
+        muted: st.rawMuted,
+        voice: st.rawVoiceOn,
+        bgm: st.rawBgmOn,
+      });
     },
     onSubsChange(subs) {
       writeSaved(V._getUiCfg(V.getCfg()), { subs });

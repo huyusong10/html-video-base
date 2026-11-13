@@ -49,7 +49,7 @@
 
   function canPlayDraftSfx(st) {
     if (!st.playing || st.scrubbing || st.hasAudio || st.isRecord || st.muted || st.voiceOn === false) return false;
-    if (resolveDraftSfxGain() <= 0) return false;
+    if ((st.volume !== undefined && st.volume <= 0) || resolveDraftSfxGain() <= 0) return false;
     return st.now > st.prevT && st.now - st.prevT <= 0.25;
   }
 
@@ -71,7 +71,7 @@
     onRender(st) {
       if (!canPlayDraftSfx(st)) return;
       const sc = st.scene;
-      const masterGain = resolveDraftSfxGain();
+      const masterGain = resolveDraftSfxGain() * (st.volume === undefined ? 1 : st.volume);
       for (const ev of resolveSceneSfxList(sc, st.sceneIndex)) {
         if (!ev || ev.at == null) continue;
         const gAt = sc.start + Number(ev.at);

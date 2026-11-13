@@ -71,7 +71,7 @@
       ...renderCustomControls('right', uiCfg),
       rateWrap,
       h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'subs', title: '关闭字幕', 'aria-label': '关闭字幕' }, makeCtrlIcon(uiCfg.icons.subsOn)),
-      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'mute', title: '声音设置（M 静音 / B 开关配乐）', 'aria-label': '声音设置' }, makeCtrlIcon(uiCfg.icons.volumeOn)),
+      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'mute', title: '声音设置（M 静音 / ↑↓ 调节音量）', 'aria-label': '声音设置' }, makeCtrlIcon(uiCfg.icons.volumeOn)),
       h('div', { class: 'sound-menu' }),
       webFullBtn,
       h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'full', title: '全屏（F）', 'aria-label': '全屏' }, makeCtrlIcon(uiCfg.icons.fullEnter)));
@@ -317,11 +317,11 @@
     activeCueIdx = V._subtitlesRuntime.updateSubs(sc, idx, lt, now, clock, showSubs);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
     if (!RECORD) V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: false, playing, scrubbing, pause, play });
-    const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false, voiceOn: true };
+    const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false, voiceOn: true, volume: 1 };
     V.emit('onRender', {
       now, clock, alive: clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
       playing, scrubbing, sandbox: sandboxState.active, pointer: ptr,
-      hasAudio: aState.hasAudio, isRecord: RECORD, muted: aState.muted, voiceOn: aState.voiceOn !== false,
+      hasAudio: aState.hasAudio, isRecord: RECORD, muted: aState.muted, voiceOn: aState.voiceOn !== false, volume: aState.volume,
     });
     if (!RECORD) updateUI();
   }
@@ -359,6 +359,15 @@
   }
   V.flashOsd = flashOsd;
 
+  function syncVolumeSliderUI(st) {
+    const pct = st.muted ? 0 : Math.round(st.volume * 100);
+    if (ui.volRange) {
+      ui.volRange.value = String(pct);
+      ui.volRange.style.setProperty('--vol-pct', pct + '%');
+    }
+    if (ui.volVal) ui.volVal.textContent = pct + '%';
+  }
+
   function syncSoundMenuUI() {
     if (!audioRt) return;
     const st = audioRt.getState(now);
@@ -369,9 +378,35 @@
       ui.mute.dataset.soundMode = key;
       swapBtnIcon(ui.mute, key, icons[key], label);
     }
-    if (ui.soundVoice) toggle(ui.soundVoice, 'on', st.voiceOn);
-    if (ui.soundBgm) toggle(ui.soundBgm, 'on', st.bgmOn);
-    if (ui.soundAllMute) toggle(ui.soundAllMute, 'on', st.muted);
+    syncVolumeSliderUI(st);
+    if (ui.soundVoice) { ui.soundVoice.hidden = !st.hasBgm; toggle(ui.soundVoice, 'on', st.voiceOn); }
+    if (ui.soundBgm) { ui.soundBgm.hidden = !st.hasBgm; toggle(ui.soundBgm, 'on', st.bgmOn); }
+    if (ui.soundSepBgm) ui.soundSepBgm.hidden = !st.hasBgm;
+    if (ui.soundAllMute) {
+      if (ui.soundMuteTxt) ui.soundMuteTxt.textContent = st.hasBgm ? '全部静音' : '静音';
+      toggle(ui.soundAllMute, 'on', st.muted);
+    }
+  }
+
+  function stepVolumeBy(delta, showOsd = true) {
+    if (!audioRt) return;
+    const cur = audioRt.getState(now);
+    const base = cur.muted && cur.volume <= 0.001 ? 0 : cur.volume;
+    const next = Math.round(clamp(base + delta, 0, 1) * 100) / 100;
+    audioRt.setVolume(next);
+    if (!showOsd) return;
+    const pct = Math.round(next * 100);
+    flashOsd(pct <= 0 ? '已静音 · 0%' : `音量 ${pct}%`);
+  }
+
+  function bindVolumeWheel(el) {
+    if (!el) return;
+    el.addEventListener('wheel', e => {
+      if (!e.deltaY) return;
+      e.preventDefault();
+      e.stopPropagation();
+      stepVolumeBy(e.deltaY < 0 ? 0.05 : -0.05, true);
+    }, { passive: false });
   }
 
   function checkSceneLoop(nextT) {
@@ -473,10 +508,15 @@
     const barRect = bar.getBoundingClientRect();
     const btnRect = ui.mute.getBoundingClientRect();
     if (!barRect.width || !btnRect.width) return;
-    const menuW = ui.soundMenu.offsetWidth || 148;
+    const menuW = ui.soundMenu.offsetWidth || 176;
     const center = btnRect.left - barRect.left + btnRect.width / 2;
     const left = clamp(center - menuW / 2, 8, Math.max(8, barRect.width - menuW - 8));
     ui.soundMenu.style.left = Math.round(left) + 'px';
+  }
+
+  function blurMenuInput(bar) {
+    const ae = document.activeElement;
+    if (ae && bar.contains(ae) && ae.tagName === 'INPUT') ae.blur();
   }
 
   function setOpenMenu(bar, which) {
@@ -490,7 +530,10 @@
     bar.classList.toggle('rate-open', mode === 'rate');
     bar.classList.toggle('sound-open', mode === 'sound');
     document.body.classList.toggle('menu-open', Boolean(mode));
-    if (prev && !mode && !inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
+    if (prev && !mode) {
+      blurMenuInput(bar);
+      if (!inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
+    }
   }
 
   function play() {
@@ -671,13 +714,21 @@
     ui.soundMenu = menu;
     if (!menu) return;
     menu.innerHTML = '';
+    ui.volRange = h('input', { class: 'sound-vol-range', type: 'range', min: '0', max: '100', step: '1', value: '100', 'aria-label': '音量' });
+    ui.volVal = h('span', { class: 'sound-vol-val' }, '100%');
+    const volRow = h('div', { class: 'sound-vol-row' }, ui.volRange, ui.volVal);
+    volRow.onclick = e => e.stopPropagation();
+    ui.volRange.oninput = () => audioRt.setVolume(Number(ui.volRange.value) / 100);
     ui.soundVoice = h('div', { class: 'sound-item', 'data-sound': 'voice' }, h('span', null, '解说声音'), h('i', null, '✓'));
     ui.soundBgm = h('div', { class: 'sound-item', 'data-sound': 'bgm' }, h('span', null, '背景音乐'), h('i', null, '✓'));
-    ui.soundAllMute = h('div', { class: 'sound-item', 'data-sound': 'mute' }, h('span', null, '全部静音'), h('i', null, '✓'));
+    ui.soundSepBgm = h('div', { class: 'sound-sep' });
+    ui.soundMuteTxt = h('span', null, '全部静音');
+    ui.soundAllMute = h('div', { class: 'sound-item', 'data-sound': 'mute' }, ui.soundMuteTxt, h('i', null, '✓'));
     ui.soundVoice.onclick = e => { e.stopPropagation(); audioRt.toggleVoiceFromMenu(); };
     ui.soundBgm.onclick = e => { e.stopPropagation(); audioRt.toggleBgmFromMenu(); };
     ui.soundAllMute.onclick = e => { e.stopPropagation(); audioRt.setMuted(!audioRt.isAllMuted()); };
-    menu.append(ui.soundVoice, ui.soundBgm, h('div', { class: 'sound-sep' }), ui.soundAllMute);
+    menu.append(volRow, h('div', { class: 'sound-sep' }), ui.soundVoice, ui.soundBgm, ui.soundSepBgm, ui.soundAllMute);
+    bindVolumeWheel(menu);
     syncSoundMenuUI();
   }
 
@@ -792,6 +843,7 @@
   function isEditableTarget(target) {
     if (!target) return false;
     if (target.isContentEditable) return true;
+    if (target.tagName === 'INPUT' && target.type === 'range') return false;
     return /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || '');
   }
 
@@ -808,7 +860,8 @@
   function toggleMuteShortcut() {
     const next = !audioRt.isAllMuted();
     audioRt.setMuted(next);
-    flashOsd(next ? '已静音' : '声音已开启');
+    const pct = Math.round(audioRt.getState(now).volume * 100);
+    flashOsd(next ? '已静音' : `音量 ${pct}%`);
   }
 
   function toggleBgmShortcut() {
@@ -845,8 +898,10 @@
       M: toggleMuteShortcut,
       b: toggleBgmShortcut,
       B: toggleBgmShortcut,
-      ArrowRight: e => seekDeltaShortcut(e.shiftKey ? 1 : 5),
-      ArrowLeft: e => seekDeltaShortcut(e.shiftKey ? -1 : -5),
+      ArrowUp: e => { e.preventDefault(); stepVolumeBy(0.05, true); },
+      ArrowDown: e => { e.preventDefault(); stepVolumeBy(-0.05, true); },
+      ArrowRight: e => { if (e.target !== ui.volRange) seekDeltaShortcut(e.shiftKey ? 1 : 5); },
+      ArrowLeft: e => { if (e.target !== ui.volRange) seekDeltaShortcut(e.shiftKey ? -1 : -5); },
     };
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') { handleEscapeKey(bar, e); return; }
@@ -921,7 +976,7 @@
     if (!(b.contains('ctrl-overlay') || b.contains('web-full') || b.contains('os-full'))) return false;
     if (!b.contains('playing')) return false;
     if (b.contains('ui-active') || b.contains('scrubbing') || b.contains('menu-open')) return false;
-    return !(bar && bar.matches && bar.matches(':has(input:focus)'));
+    return !(bar && bar.matches && bar.matches(':has(.chap-search:focus)'));
   }
 
   function bindBlindBarGuard(bar, uiCfg) {
@@ -1024,10 +1079,10 @@
     syncSubsBtnUI();
     ui.subs.onclick = () => setSubs(!showSubs);
     syncSoundMenuUI();
+    bindVolumeWheel(ui.mute);
     ui.mute.onclick = e => {
       e.stopPropagation();
-      if (audioRt.hasBgm()) setOpenMenu(bar, bar.dataset.menu === 'sound' ? '' : 'sound');
-      else audioRt.setMuted(!audioRt.isAllMuted());
+      setOpenMenu(bar, bar.dataset.menu === 'sound' ? '' : 'sound');
     };
     if (ui.webfull) ui.webfull.onclick = () => setWebFull(!webFull);
     ui.full.onclick = toggleOsFull;
@@ -1165,6 +1220,8 @@
       seekAsync: V.seekToAsync,
       setRate,
       setSubs,
+      setVolume: v => audioRt.setVolume(v),
+      getVolume: () => audioRt.getState(now).volume,
       setBgm: on => audioRt.setBgm(on),
       setVoice: on => audioRt.setVoice(on),
       setMuted: on => audioRt.setMuted(on),
@@ -1193,6 +1250,7 @@
           playing,
           playbackRate,
           subsEnabled: showSubs,
+          volume: a.volume,
           muted: a.muted,
           hasBgm: a.hasBgm,
           bgmEnabled: a.bgmOn,
@@ -1232,10 +1290,7 @@
       onSoundUI: syncSoundMenuUI,
       onEnded: finishPlayback,
       onVisibilitySync: t => render(t, 0),
-      onBgmUnavailable: () => {
-        const bar = document.getElementById('controls');
-        if (bar && bar.dataset.menu === 'sound') setOpenMenu(bar, '');
-      },
+      onBgmUnavailable: syncSoundMenuUI,
     });
     audioRt.setRate(playbackRate);
     audioRt.initTracks(cfg, uiCfg, savedPrefs);
@@ -1243,6 +1298,8 @@
     V.seekTo = t => render(t, 0);
     V.seekToAsync = async t => { render(t, 0); await waitStageAssets(); };
     V.setSubs = setSubs;
+    V.setVolume = v => audioRt.setVolume(v);
+    V.getVolume = () => audioRt.getState(now).volume;
     V.setBgm = on => audioRt.setBgm(on);
     V.setVoice = on => audioRt.setVoice(on);
     V.setMuted = on => audioRt.setMuted(on);
@@ -1252,6 +1309,7 @@
     V.replay = replay;
     V._playerCtl = {
       play, pause, replay, seek, setRate, setSubs,
+      setVolume: V.setVolume, getVolume: V.getVolume,
       setBgm: V.setBgm, setVoice: V.setVoice, setMuted: V.setMuted,
       enterSandbox, exitSandbox, tryEgg,
       fmtTime, updateUI, flashUi, flashOsd,

@@ -75,17 +75,42 @@
     return dur && loopOn ? Math.min(diff, Math.max(0, dur - diff)) : diff;
   }
 
+  function clampUnitVolume(val, fallback = 1) {
+    const n = Number(val);
+    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
+  }
+
   V._createAudioRuntime = function (hooks) {
     const { params, isRecord } = hooks;
     let audio = null, bgmAudio = null, playbackRate = 1, bgmLoop = true;
+    let volume = 1, restoreVolume = 1, bgmBaseVolume = 1;
     let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm'), muted = false;
     let audioBlocked = false, unlockArmed = false, playPending = false, bgmPlayPending = false, targetSeekTime = null;
 
     function isAllMuted() {
-      if (muted) return true;
+      if (muted || volume <= 0.001) return true;
       const activeVoice = audio ? voiceOn : (!bgmAudio && voiceOn);
       const activeBgm = Boolean(bgmAudio) && bgmOn;
       return !activeVoice && !activeBgm;
+    }
+
+    function syncTrackVolumes() {
+      V._masterVolume = volume;
+      if (audio) { try { audio.volume = volume; } catch {} }
+      if (bgmAudio) { try { bgmAudio.volume = clampUnitVolume(bgmBaseVolume * volume, 1); } catch {} }
+    }
+
+    function ensureActiveTrack() {
+      const hasActive = (audio ? voiceOn : (!bgmAudio && voiceOn)) || (Boolean(bgmAudio) && bgmOn);
+      if (hasActive) return;
+      if (audio || !bgmAudio) voiceOn = true;
+      else bgmOn = true;
+    }
+
+    function restoreZeroVolumeIfNeeded() {
+      if (volume > 0.001) return;
+      volume = restoreVolume >= 0.1 ? restoreVolume : 0.5;
+      syncTrackVolumes();
     }
 
     function resolveRefTime() {
@@ -183,11 +208,11 @@
     }
 
     function resolveSoundBtnSpec() {
-      const allOff = isAllMuted();
-      if (allOff) return ['volumeMute', '取消静音（M）'];
-      if (bgmAudio && (!audio || !voiceOn) && bgmOn) return ['volumeBgm', '声音设置：仅背景音乐（M 静音 / B 开关配乐）'];
-      if (bgmAudio && voiceOn && !bgmOn) return ['volumeVoice', '声音设置：已关背景乐（M 静音 / B 恢复配乐）'];
-      return ['volumeOn', bgmAudio ? '声音设置（M 静音 / B 开关配乐）' : '静音（M）'];
+      const pct = Math.round(volume * 100);
+      if (isAllMuted()) return ['volumeMute', '声音设置：已静音（M 取消静音 / ↑↓ 调节音量）'];
+      if (bgmAudio && (!audio || !voiceOn) && bgmOn) return ['volumeBgm', `声音设置：仅背景音乐 ${pct}%（M 静音 / B 开关配乐）`];
+      if (bgmAudio && voiceOn && !bgmOn) return ['volumeVoice', `声音设置：已关背景乐 ${pct}%（M 静音 / B 恢复配乐）`];
+      return [volume < 0.5 ? 'volumeLow' : 'volumeOn', `声音设置 ${pct}%（M 静音 / ↑↓ 调节音量）`];
     }
 
     function emitAndSync() {
@@ -197,6 +222,7 @@
       syncBgmPlaybackNow();
       hooks.onSoundUI();
       V.emit('onSoundChange', {
+        volume,
         muted: allOff,
         voiceOn: voiceActive,
         bgmOn: Boolean(bgmAudio) && !allOff && bgmOn,
@@ -206,34 +232,45 @@
       });
     }
 
+    function setVolume(nextVol) {
+      volume = Math.round(clampUnitVolume(nextVol, volume) * 100) / 100;
+      if (volume > 0.001) {
+        if (volume >= 0.1) restoreVolume = volume;
+        if (muted) muted = false;
+        ensureActiveTrack();
+      }
+      syncTrackVolumes();
+      emitAndSync();
+    }
+
     function setBgm(on) {
       bgmOn = Boolean(on);
-      if (bgmOn && muted) muted = false;
+      if (bgmOn) { muted = false; restoreZeroVolumeIfNeeded(); }
       emitAndSync();
     }
 
     function setVoice(on) {
       voiceOn = Boolean(on);
-      if (voiceOn && muted) muted = false;
+      if (voiceOn) { muted = false; restoreZeroVolumeIfNeeded(); }
       emitAndSync();
     }
 
     function setMuted(nextMuted) {
       muted = Boolean(nextMuted);
-      if (!muted && isAllMuted()) {
-        if (audio || !bgmAudio) voiceOn = true;
-        else bgmOn = true;
+      if (!muted) {
+        restoreZeroVolumeIfNeeded();
+        ensureActiveTrack();
       }
       emitAndSync();
     }
 
     function toggleVoiceFromMenu() {
-      if (isAllMuted()) { muted = false; voiceOn = true; bgmOn = false; emitAndSync(); }
+      if (isAllMuted()) { muted = false; voiceOn = true; bgmOn = false; restoreZeroVolumeIfNeeded(); emitAndSync(); }
       else setVoice(!voiceOn);
     }
 
     function toggleBgmFromMenu() {
-      if (isAllMuted()) { muted = false; voiceOn = false; bgmOn = true; emitAndSync(); }
+      if (isAllMuted()) { muted = false; voiceOn = false; bgmOn = true; restoreZeroVolumeIfNeeded(); emitAndSync(); }
       else setBgm(!bgmOn);
     }
 
@@ -344,24 +381,36 @@
       return el;
     }
 
-    function applySavedSoundPrefs(savedPrefs) {
+    function applySavedPrefsDict(savedPrefs) {
       if (!savedPrefs) return;
+      if (typeof savedPrefs.volume === 'number') volume = clampUnitVolume(savedPrefs.volume, volume);
       if (typeof savedPrefs.muted === 'boolean') muted = savedPrefs.muted;
       if (typeof savedPrefs.voice === 'boolean' && !params.has('novoice')) voiceOn = savedPrefs.voice;
       if (typeof savedPrefs.bgm === 'boolean' && !params.has('nobgm') && !params.has('bgm')) bgmOn = savedPrefs.bgm;
     }
 
+    function applySavedSoundPrefs(savedPrefs, cfg) {
+      if (cfg && cfg.volume !== undefined) volume = clampUnitVolume(cfg.volume, 1);
+      applySavedPrefsDict(savedPrefs);
+      if (params.has('volume')) volume = clampUnitVolume(params.get('volume'), volume);
+      if (params.has('muted')) muted = params.get('muted') !== '0' && params.get('muted') !== 'false';
+      if (volume >= 0.1) restoreVolume = volume;
+      V._masterVolume = volume;
+    }
+
     function initTracks(cfg, uiCfg, savedPrefs) {
       bgmLoop = !(cfg.bgm && typeof cfg.bgm === 'object' && cfg.bgm.loop === false);
       if (uiCfg.bgmDefault === false && !params.has('bgm')) bgmOn = false;
-      applySavedSoundPrefs(savedPrefs);
+      applySavedSoundPrefs(savedPrefs, cfg);
       const audioSrc = resolveAudioSource(cfg, isRecord);
       if (audioSrc) {
         audio = createMasterAudio(audioSrc);
         audio.muted = isAllMuted() || !voiceOn;
       }
       const bgmSpec = resolveBgmTrackSpec(cfg, isRecord);
+      bgmBaseVolume = bgmSpec ? bgmSpec.volume : 1;
       if (bgmSpec) bgmAudio = createBgmAudio(bgmSpec);
+      syncTrackVolumes();
     }
 
     function getState(nowVal) {
@@ -369,6 +418,7 @@
       return {
         hasAudio: Boolean(audio),
         hasBgm: Boolean(bgmAudio),
+        volume,
         muted: allOff,
         voiceOn: Boolean(audio || !bgmAudio) && !allOff && voiceOn,
         bgmOn: Boolean(bgmAudio) && !allOff && bgmOn,
@@ -383,7 +433,7 @@
 
     return {
       initTracks, startPlayback, pausePlayback, seekTracks, setRate,
-      setBgm, setVoice, setMuted, toggleVoiceFromMenu, toggleBgmFromMenu,
+      setVolume, setBgm, setVoice, setMuted, toggleVoiceFromMenu, toggleBgmFromMenu,
       isAllMuted, resolveSoundBtnSpec, canUseMasterClock,
       tickMasterClock, syncWithWallClock: keepBgmInSync,
       hasBgm: () => Boolean(bgmAudio), getState,

@@ -1416,7 +1416,7 @@
 
   function canPlayDraftSfx(st) {
     if (!st.playing || st.scrubbing || st.hasAudio || st.isRecord || st.muted || st.voiceOn === false) return false;
-    if (resolveDraftSfxGain() <= 0) return false;
+    if ((st.volume !== undefined && st.volume <= 0) || resolveDraftSfxGain() <= 0) return false;
     return st.now > st.prevT && st.now - st.prevT <= 0.25;
   }
 
@@ -1438,7 +1438,7 @@
     onRender(st) {
       if (!canPlayDraftSfx(st)) return;
       const sc = st.scene;
-      const masterGain = resolveDraftSfxGain();
+      const masterGain = resolveDraftSfxGain() * (st.volume === undefined ? 1 : st.volume);
       for (const ev of resolveSceneSfxList(sc, st.sceneIndex)) {
         if (!ev || ev.at == null) continue;
         const gAt = sc.start + Number(ev.at);
@@ -1529,6 +1529,7 @@
     subsOn: ['M2.25 3.5h11.5a.75.75 0 0 1 .75.75v7.5a.75.75 0 0 1-.75.75H2.25a.75.75 0 0 1-.75-.75v-7.5a.75.75 0 0 1 .75-.75z', 'M4.25 8.25h3', 'M9 8.25h2.75', 'M4.25 10.6h5.25'],
     subsOff: ['M2.25 3.5h11.5a.75.75 0 0 1 .75.75v7.5a.75.75 0 0 1-.75.75H2.25a.75.75 0 0 1-.75-.75v-7.5a.75.75 0 0 1 .75-.75z', 'M4.25 8.25h2', 'M2.25 2.25l11.5 11.5'],
     volumeOn: ['M2.5 6.25h2.3L8.25 3.5v9L4.8 9.75H2.5a.5.5 0 0 1-.5-.5v-2.5a.5.5 0 0 1 .5-.5z', 'M10.6 5.6a3.4 3.4 0 0 1 0 4.8', 'M12.6 3.8a6 6 0 0 1 0 8.4'],
+    volumeLow: ['M2.5 6.25h2.3L8.25 3.5v9L4.8 9.75H2.5a.5.5 0 0 1-.5-.5v-2.5a.5.5 0 0 1 .5-.5z', 'M10.8 5.6a3.4 3.4 0 0 1 0 4.8'],
     volumeVoice: ['M2.5 6.25h2.3L8.25 3.5v9L4.8 9.75H2.5a.5.5 0 0 1-.5-.5v-2.5a.5.5 0 0 1 .5-.5z', 'M10.8 5.6a3.4 3.4 0 0 1 0 4.8'],
     volumeBgm: ['M6.5 11.5V4l6-1.25v7.5', 'M4.75 13a1.75 1.75 0 1 0 0-3.5 1.75 1.75 0 0 0 0 3.5z', 'M10.75 11.75a1.75 1.75 0 1 0 0-3.5 1.75 1.75 0 0 0 0 3.5z'],
     volumeMute: ['M2.5 6.25h2.3L8.25 3.5v9L4.8 9.75H2.5a.5.5 0 0 1-.5-.5v-2.5a.5.5 0 0 1 .5-.5z', 'M10.75 6l3.25 4', 'M14 6l-3.25 4'],
@@ -1548,6 +1549,7 @@
     subsOn: '<path d="M1 3h14v10H1V3zm2 2v6h10V5H3zm1 2h3v1H4V7zm5 0h3v1H9V7zm-5 2h6v1H4V9z"/>',
     subsOff: '<path d="M1 3h14v10H1V3zm2 2v6h10V5H3z"/><rect x="2" y="2" width="2" height="2"/><rect x="4" y="4" width="2" height="2"/><rect x="6" y="6" width="2" height="2"/><rect x="8" y="8" width="2" height="2"/><rect x="10" y="10" width="2" height="2"/><rect x="12" y="12" width="2" height="2"/>',
     volumeOn: '<path d="M2 6h3V5h1V4h1V3h2v10H7v-1H6v-1H5v-1H2V6z"/><rect x="11" y="5" width="1" height="6"/><rect x="10" y="4" width="1" height="1"/><rect x="10" y="11" width="1" height="1"/><rect x="13" y="3" width="1" height="10"/><rect x="12" y="2" width="1" height="1"/><rect x="12" y="13" width="1" height="1"/>',
+    volumeLow: '<path d="M2 6h3V5h1V4h1V3h2v10H7v-1H6v-1H5v-1H2V6z"/><rect x="11" y="5" width="2" height="6"/><rect x="10" y="4" width="1" height="1"/><rect x="10" y="11" width="1" height="1"/>',
     volumeVoice: '<path d="M2 6h3V5h1V4h1V3h2v10H7v-1H6v-1H5v-1H2V6z"/><rect x="11" y="5" width="2" height="6"/><rect x="10" y="4" width="1" height="1"/><rect x="10" y="11" width="1" height="1"/>',
     volumeBgm: '<path d="M5 3h9v3H7v6H4v-1H3V9h2V3zm7 3h2v5h-1v1h-3V9h2V6z"/>',
     volumeMute: '<path d="M2 6h3V5h1V4h1V3h2v10H7v-1H6v-1H5v-1H2V6z"/><rect x="10" y="5" width="2" height="2"/><rect x="13" y="5" width="2" height="2"/><rect x="11" y="7" width="3" height="2"/><rect x="10" y="9" width="2" height="2"/><rect x="13" y="9" width="2" height="2"/>',
@@ -1912,17 +1914,42 @@
     return dur && loopOn ? Math.min(diff, Math.max(0, dur - diff)) : diff;
   }
 
+  function clampUnitVolume(val, fallback = 1) {
+    const n = Number(val);
+    return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
+  }
+
   V._createAudioRuntime = function (hooks) {
     const { params, isRecord } = hooks;
     let audio = null, bgmAudio = null, playbackRate = 1, bgmLoop = true;
+    let volume = 1, restoreVolume = 1, bgmBaseVolume = 1;
     let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm'), muted = false;
     let audioBlocked = false, unlockArmed = false, playPending = false, bgmPlayPending = false, targetSeekTime = null;
 
     function isAllMuted() {
-      if (muted) return true;
+      if (muted || volume <= 0.001) return true;
       const activeVoice = audio ? voiceOn : (!bgmAudio && voiceOn);
       const activeBgm = Boolean(bgmAudio) && bgmOn;
       return !activeVoice && !activeBgm;
+    }
+
+    function syncTrackVolumes() {
+      V._masterVolume = volume;
+      if (audio) { try { audio.volume = volume; } catch {} }
+      if (bgmAudio) { try { bgmAudio.volume = clampUnitVolume(bgmBaseVolume * volume, 1); } catch {} }
+    }
+
+    function ensureActiveTrack() {
+      const hasActive = (audio ? voiceOn : (!bgmAudio && voiceOn)) || (Boolean(bgmAudio) && bgmOn);
+      if (hasActive) return;
+      if (audio || !bgmAudio) voiceOn = true;
+      else bgmOn = true;
+    }
+
+    function restoreZeroVolumeIfNeeded() {
+      if (volume > 0.001) return;
+      volume = restoreVolume >= 0.1 ? restoreVolume : 0.5;
+      syncTrackVolumes();
     }
 
     function resolveRefTime() {
@@ -2020,11 +2047,11 @@
     }
 
     function resolveSoundBtnSpec() {
-      const allOff = isAllMuted();
-      if (allOff) return ['volumeMute', '取消静音（M）'];
-      if (bgmAudio && (!audio || !voiceOn) && bgmOn) return ['volumeBgm', '声音设置：仅背景音乐（M 静音 / B 开关配乐）'];
-      if (bgmAudio && voiceOn && !bgmOn) return ['volumeVoice', '声音设置：已关背景乐（M 静音 / B 恢复配乐）'];
-      return ['volumeOn', bgmAudio ? '声音设置（M 静音 / B 开关配乐）' : '静音（M）'];
+      const pct = Math.round(volume * 100);
+      if (isAllMuted()) return ['volumeMute', '声音设置：已静音（M 取消静音 / ↑↓ 调节音量）'];
+      if (bgmAudio && (!audio || !voiceOn) && bgmOn) return ['volumeBgm', `声音设置：仅背景音乐 ${pct}%（M 静音 / B 开关配乐）`];
+      if (bgmAudio && voiceOn && !bgmOn) return ['volumeVoice', `声音设置：已关背景乐 ${pct}%（M 静音 / B 恢复配乐）`];
+      return [volume < 0.5 ? 'volumeLow' : 'volumeOn', `声音设置 ${pct}%（M 静音 / ↑↓ 调节音量）`];
     }
 
     function emitAndSync() {
@@ -2034,6 +2061,7 @@
       syncBgmPlaybackNow();
       hooks.onSoundUI();
       V.emit('onSoundChange', {
+        volume,
         muted: allOff,
         voiceOn: voiceActive,
         bgmOn: Boolean(bgmAudio) && !allOff && bgmOn,
@@ -2043,34 +2071,45 @@
       });
     }
 
+    function setVolume(nextVol) {
+      volume = Math.round(clampUnitVolume(nextVol, volume) * 100) / 100;
+      if (volume > 0.001) {
+        if (volume >= 0.1) restoreVolume = volume;
+        if (muted) muted = false;
+        ensureActiveTrack();
+      }
+      syncTrackVolumes();
+      emitAndSync();
+    }
+
     function setBgm(on) {
       bgmOn = Boolean(on);
-      if (bgmOn && muted) muted = false;
+      if (bgmOn) { muted = false; restoreZeroVolumeIfNeeded(); }
       emitAndSync();
     }
 
     function setVoice(on) {
       voiceOn = Boolean(on);
-      if (voiceOn && muted) muted = false;
+      if (voiceOn) { muted = false; restoreZeroVolumeIfNeeded(); }
       emitAndSync();
     }
 
     function setMuted(nextMuted) {
       muted = Boolean(nextMuted);
-      if (!muted && isAllMuted()) {
-        if (audio || !bgmAudio) voiceOn = true;
-        else bgmOn = true;
+      if (!muted) {
+        restoreZeroVolumeIfNeeded();
+        ensureActiveTrack();
       }
       emitAndSync();
     }
 
     function toggleVoiceFromMenu() {
-      if (isAllMuted()) { muted = false; voiceOn = true; bgmOn = false; emitAndSync(); }
+      if (isAllMuted()) { muted = false; voiceOn = true; bgmOn = false; restoreZeroVolumeIfNeeded(); emitAndSync(); }
       else setVoice(!voiceOn);
     }
 
     function toggleBgmFromMenu() {
-      if (isAllMuted()) { muted = false; voiceOn = false; bgmOn = true; emitAndSync(); }
+      if (isAllMuted()) { muted = false; voiceOn = false; bgmOn = true; restoreZeroVolumeIfNeeded(); emitAndSync(); }
       else setBgm(!bgmOn);
     }
 
@@ -2181,24 +2220,36 @@
       return el;
     }
 
-    function applySavedSoundPrefs(savedPrefs) {
+    function applySavedPrefsDict(savedPrefs) {
       if (!savedPrefs) return;
+      if (typeof savedPrefs.volume === 'number') volume = clampUnitVolume(savedPrefs.volume, volume);
       if (typeof savedPrefs.muted === 'boolean') muted = savedPrefs.muted;
       if (typeof savedPrefs.voice === 'boolean' && !params.has('novoice')) voiceOn = savedPrefs.voice;
       if (typeof savedPrefs.bgm === 'boolean' && !params.has('nobgm') && !params.has('bgm')) bgmOn = savedPrefs.bgm;
     }
 
+    function applySavedSoundPrefs(savedPrefs, cfg) {
+      if (cfg && cfg.volume !== undefined) volume = clampUnitVolume(cfg.volume, 1);
+      applySavedPrefsDict(savedPrefs);
+      if (params.has('volume')) volume = clampUnitVolume(params.get('volume'), volume);
+      if (params.has('muted')) muted = params.get('muted') !== '0' && params.get('muted') !== 'false';
+      if (volume >= 0.1) restoreVolume = volume;
+      V._masterVolume = volume;
+    }
+
     function initTracks(cfg, uiCfg, savedPrefs) {
       bgmLoop = !(cfg.bgm && typeof cfg.bgm === 'object' && cfg.bgm.loop === false);
       if (uiCfg.bgmDefault === false && !params.has('bgm')) bgmOn = false;
-      applySavedSoundPrefs(savedPrefs);
+      applySavedSoundPrefs(savedPrefs, cfg);
       const audioSrc = resolveAudioSource(cfg, isRecord);
       if (audioSrc) {
         audio = createMasterAudio(audioSrc);
         audio.muted = isAllMuted() || !voiceOn;
       }
       const bgmSpec = resolveBgmTrackSpec(cfg, isRecord);
+      bgmBaseVolume = bgmSpec ? bgmSpec.volume : 1;
       if (bgmSpec) bgmAudio = createBgmAudio(bgmSpec);
+      syncTrackVolumes();
     }
 
     function getState(nowVal) {
@@ -2206,6 +2257,7 @@
       return {
         hasAudio: Boolean(audio),
         hasBgm: Boolean(bgmAudio),
+        volume,
         muted: allOff,
         voiceOn: Boolean(audio || !bgmAudio) && !allOff && voiceOn,
         bgmOn: Boolean(bgmAudio) && !allOff && bgmOn,
@@ -2220,7 +2272,7 @@
 
     return {
       initTracks, startPlayback, pausePlayback, seekTracks, setRate,
-      setBgm, setVoice, setMuted, toggleVoiceFromMenu, toggleBgmFromMenu,
+      setVolume, setBgm, setVoice, setMuted, toggleVoiceFromMenu, toggleBgmFromMenu,
       isAllMuted, resolveSoundBtnSpec, canUseMasterClock,
       tickMasterClock, syncWithWallClock: keepBgmInSync,
       hasBgm: () => Boolean(bgmAudio), getState,
@@ -2311,7 +2363,12 @@
       writeSaved(V._getUiCfg(V.getCfg()), { rate });
     },
     onSoundChange(st) {
-      writeSaved(V._getUiCfg(V.getCfg()), { muted: st.rawMuted, voice: st.rawVoiceOn, bgm: st.rawBgmOn });
+      writeSaved(V._getUiCfg(V.getCfg()), {
+        volume: st.volume,
+        muted: st.rawMuted,
+        voice: st.rawVoiceOn,
+        bgm: st.rawBgmOn,
+      });
     },
     onSubsChange(subs) {
       writeSaved(V._getUiCfg(V.getCfg()), { subs });
@@ -2405,7 +2462,7 @@
       ...renderCustomControls('right', uiCfg),
       rateWrap,
       h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'subs', title: '关闭字幕', 'aria-label': '关闭字幕' }, makeCtrlIcon(uiCfg.icons.subsOn)),
-      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'mute', title: '声音设置（M 静音 / B 开关配乐）', 'aria-label': '声音设置' }, makeCtrlIcon(uiCfg.icons.volumeOn)),
+      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'mute', title: '声音设置（M 静音 / ↑↓ 调节音量）', 'aria-label': '声音设置' }, makeCtrlIcon(uiCfg.icons.volumeOn)),
       h('div', { class: 'sound-menu' }),
       webFullBtn,
       h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'full', title: '全屏（F）', 'aria-label': '全屏' }, makeCtrlIcon(uiCfg.icons.fullEnter)));
@@ -2651,11 +2708,11 @@
     activeCueIdx = V._subtitlesRuntime.updateSubs(sc, idx, lt, now, clock, showSubs);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
     if (!RECORD) V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: false, playing, scrubbing, pause, play });
-    const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false, voiceOn: true };
+    const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false, voiceOn: true, volume: 1 };
     V.emit('onRender', {
       now, clock, alive: clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
       playing, scrubbing, sandbox: sandboxState.active, pointer: ptr,
-      hasAudio: aState.hasAudio, isRecord: RECORD, muted: aState.muted, voiceOn: aState.voiceOn !== false,
+      hasAudio: aState.hasAudio, isRecord: RECORD, muted: aState.muted, voiceOn: aState.voiceOn !== false, volume: aState.volume,
     });
     if (!RECORD) updateUI();
   }
@@ -2693,6 +2750,15 @@
   }
   V.flashOsd = flashOsd;
 
+  function syncVolumeSliderUI(st) {
+    const pct = st.muted ? 0 : Math.round(st.volume * 100);
+    if (ui.volRange) {
+      ui.volRange.value = String(pct);
+      ui.volRange.style.setProperty('--vol-pct', pct + '%');
+    }
+    if (ui.volVal) ui.volVal.textContent = pct + '%';
+  }
+
   function syncSoundMenuUI() {
     if (!audioRt) return;
     const st = audioRt.getState(now);
@@ -2703,9 +2769,35 @@
       ui.mute.dataset.soundMode = key;
       swapBtnIcon(ui.mute, key, icons[key], label);
     }
-    if (ui.soundVoice) toggle(ui.soundVoice, 'on', st.voiceOn);
-    if (ui.soundBgm) toggle(ui.soundBgm, 'on', st.bgmOn);
-    if (ui.soundAllMute) toggle(ui.soundAllMute, 'on', st.muted);
+    syncVolumeSliderUI(st);
+    if (ui.soundVoice) { ui.soundVoice.hidden = !st.hasBgm; toggle(ui.soundVoice, 'on', st.voiceOn); }
+    if (ui.soundBgm) { ui.soundBgm.hidden = !st.hasBgm; toggle(ui.soundBgm, 'on', st.bgmOn); }
+    if (ui.soundSepBgm) ui.soundSepBgm.hidden = !st.hasBgm;
+    if (ui.soundAllMute) {
+      if (ui.soundMuteTxt) ui.soundMuteTxt.textContent = st.hasBgm ? '全部静音' : '静音';
+      toggle(ui.soundAllMute, 'on', st.muted);
+    }
+  }
+
+  function stepVolumeBy(delta, showOsd = true) {
+    if (!audioRt) return;
+    const cur = audioRt.getState(now);
+    const base = cur.muted && cur.volume <= 0.001 ? 0 : cur.volume;
+    const next = Math.round(clamp(base + delta, 0, 1) * 100) / 100;
+    audioRt.setVolume(next);
+    if (!showOsd) return;
+    const pct = Math.round(next * 100);
+    flashOsd(pct <= 0 ? '已静音 · 0%' : `音量 ${pct}%`);
+  }
+
+  function bindVolumeWheel(el) {
+    if (!el) return;
+    el.addEventListener('wheel', e => {
+      if (!e.deltaY) return;
+      e.preventDefault();
+      e.stopPropagation();
+      stepVolumeBy(e.deltaY < 0 ? 0.05 : -0.05, true);
+    }, { passive: false });
   }
 
   function checkSceneLoop(nextT) {
@@ -2807,10 +2899,15 @@
     const barRect = bar.getBoundingClientRect();
     const btnRect = ui.mute.getBoundingClientRect();
     if (!barRect.width || !btnRect.width) return;
-    const menuW = ui.soundMenu.offsetWidth || 148;
+    const menuW = ui.soundMenu.offsetWidth || 176;
     const center = btnRect.left - barRect.left + btnRect.width / 2;
     const left = clamp(center - menuW / 2, 8, Math.max(8, barRect.width - menuW - 8));
     ui.soundMenu.style.left = Math.round(left) + 'px';
+  }
+
+  function blurMenuInput(bar) {
+    const ae = document.activeElement;
+    if (ae && bar.contains(ae) && ae.tagName === 'INPUT') ae.blur();
   }
 
   function setOpenMenu(bar, which) {
@@ -2824,7 +2921,10 @@
     bar.classList.toggle('rate-open', mode === 'rate');
     bar.classList.toggle('sound-open', mode === 'sound');
     document.body.classList.toggle('menu-open', Boolean(mode));
-    if (prev && !mode && !inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
+    if (prev && !mode) {
+      blurMenuInput(bar);
+      if (!inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
+    }
   }
 
   function play() {
@@ -3005,13 +3105,21 @@
     ui.soundMenu = menu;
     if (!menu) return;
     menu.innerHTML = '';
+    ui.volRange = h('input', { class: 'sound-vol-range', type: 'range', min: '0', max: '100', step: '1', value: '100', 'aria-label': '音量' });
+    ui.volVal = h('span', { class: 'sound-vol-val' }, '100%');
+    const volRow = h('div', { class: 'sound-vol-row' }, ui.volRange, ui.volVal);
+    volRow.onclick = e => e.stopPropagation();
+    ui.volRange.oninput = () => audioRt.setVolume(Number(ui.volRange.value) / 100);
     ui.soundVoice = h('div', { class: 'sound-item', 'data-sound': 'voice' }, h('span', null, '解说声音'), h('i', null, '✓'));
     ui.soundBgm = h('div', { class: 'sound-item', 'data-sound': 'bgm' }, h('span', null, '背景音乐'), h('i', null, '✓'));
-    ui.soundAllMute = h('div', { class: 'sound-item', 'data-sound': 'mute' }, h('span', null, '全部静音'), h('i', null, '✓'));
+    ui.soundSepBgm = h('div', { class: 'sound-sep' });
+    ui.soundMuteTxt = h('span', null, '全部静音');
+    ui.soundAllMute = h('div', { class: 'sound-item', 'data-sound': 'mute' }, ui.soundMuteTxt, h('i', null, '✓'));
     ui.soundVoice.onclick = e => { e.stopPropagation(); audioRt.toggleVoiceFromMenu(); };
     ui.soundBgm.onclick = e => { e.stopPropagation(); audioRt.toggleBgmFromMenu(); };
     ui.soundAllMute.onclick = e => { e.stopPropagation(); audioRt.setMuted(!audioRt.isAllMuted()); };
-    menu.append(ui.soundVoice, ui.soundBgm, h('div', { class: 'sound-sep' }), ui.soundAllMute);
+    menu.append(volRow, h('div', { class: 'sound-sep' }), ui.soundVoice, ui.soundBgm, ui.soundSepBgm, ui.soundAllMute);
+    bindVolumeWheel(menu);
     syncSoundMenuUI();
   }
 
@@ -3126,6 +3234,7 @@
   function isEditableTarget(target) {
     if (!target) return false;
     if (target.isContentEditable) return true;
+    if (target.tagName === 'INPUT' && target.type === 'range') return false;
     return /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || '');
   }
 
@@ -3142,7 +3251,8 @@
   function toggleMuteShortcut() {
     const next = !audioRt.isAllMuted();
     audioRt.setMuted(next);
-    flashOsd(next ? '已静音' : '声音已开启');
+    const pct = Math.round(audioRt.getState(now).volume * 100);
+    flashOsd(next ? '已静音' : `音量 ${pct}%`);
   }
 
   function toggleBgmShortcut() {
@@ -3179,8 +3289,10 @@
       M: toggleMuteShortcut,
       b: toggleBgmShortcut,
       B: toggleBgmShortcut,
-      ArrowRight: e => seekDeltaShortcut(e.shiftKey ? 1 : 5),
-      ArrowLeft: e => seekDeltaShortcut(e.shiftKey ? -1 : -5),
+      ArrowUp: e => { e.preventDefault(); stepVolumeBy(0.05, true); },
+      ArrowDown: e => { e.preventDefault(); stepVolumeBy(-0.05, true); },
+      ArrowRight: e => { if (e.target !== ui.volRange) seekDeltaShortcut(e.shiftKey ? 1 : 5); },
+      ArrowLeft: e => { if (e.target !== ui.volRange) seekDeltaShortcut(e.shiftKey ? -1 : -5); },
     };
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') { handleEscapeKey(bar, e); return; }
@@ -3255,7 +3367,7 @@
     if (!(b.contains('ctrl-overlay') || b.contains('web-full') || b.contains('os-full'))) return false;
     if (!b.contains('playing')) return false;
     if (b.contains('ui-active') || b.contains('scrubbing') || b.contains('menu-open')) return false;
-    return !(bar && bar.matches && bar.matches(':has(input:focus)'));
+    return !(bar && bar.matches && bar.matches(':has(.chap-search:focus)'));
   }
 
   function bindBlindBarGuard(bar, uiCfg) {
@@ -3358,10 +3470,10 @@
     syncSubsBtnUI();
     ui.subs.onclick = () => setSubs(!showSubs);
     syncSoundMenuUI();
+    bindVolumeWheel(ui.mute);
     ui.mute.onclick = e => {
       e.stopPropagation();
-      if (audioRt.hasBgm()) setOpenMenu(bar, bar.dataset.menu === 'sound' ? '' : 'sound');
-      else audioRt.setMuted(!audioRt.isAllMuted());
+      setOpenMenu(bar, bar.dataset.menu === 'sound' ? '' : 'sound');
     };
     if (ui.webfull) ui.webfull.onclick = () => setWebFull(!webFull);
     ui.full.onclick = toggleOsFull;
@@ -3499,6 +3611,8 @@
       seekAsync: V.seekToAsync,
       setRate,
       setSubs,
+      setVolume: v => audioRt.setVolume(v),
+      getVolume: () => audioRt.getState(now).volume,
       setBgm: on => audioRt.setBgm(on),
       setVoice: on => audioRt.setVoice(on),
       setMuted: on => audioRt.setMuted(on),
@@ -3527,6 +3641,7 @@
           playing,
           playbackRate,
           subsEnabled: showSubs,
+          volume: a.volume,
           muted: a.muted,
           hasBgm: a.hasBgm,
           bgmEnabled: a.bgmOn,
@@ -3566,10 +3681,7 @@
       onSoundUI: syncSoundMenuUI,
       onEnded: finishPlayback,
       onVisibilitySync: t => render(t, 0),
-      onBgmUnavailable: () => {
-        const bar = document.getElementById('controls');
-        if (bar && bar.dataset.menu === 'sound') setOpenMenu(bar, '');
-      },
+      onBgmUnavailable: syncSoundMenuUI,
     });
     audioRt.setRate(playbackRate);
     audioRt.initTracks(cfg, uiCfg, savedPrefs);
@@ -3577,6 +3689,8 @@
     V.seekTo = t => render(t, 0);
     V.seekToAsync = async t => { render(t, 0); await waitStageAssets(); };
     V.setSubs = setSubs;
+    V.setVolume = v => audioRt.setVolume(v);
+    V.getVolume = () => audioRt.getState(now).volume;
     V.setBgm = on => audioRt.setBgm(on);
     V.setVoice = on => audioRt.setVoice(on);
     V.setMuted = on => audioRt.setMuted(on);
@@ -3586,6 +3700,7 @@
     V.replay = replay;
     V._playerCtl = {
       play, pause, replay, seek, setRate, setSubs,
+      setVolume: V.setVolume, getVolume: V.getVolume,
       setBgm: V.setBgm, setVoice: V.setVoice, setMuted: V.setMuted,
       enterSandbox, exitSandbox, tryEgg,
       fmtTime, updateUI, flashUi, flashOsd,

@@ -668,6 +668,7 @@ async function verifyV26ExperienceContracts(page) {
   await page.evaluate(() => {
     window.__video.pause();
     window.__video.setRate(1.25);
+    window.__video.setVolume(0.65);
     window.__video.setSubs(false);
     window.__video.setBgm(false);
     window.__video.seek(1.2);
@@ -688,6 +689,7 @@ async function verifyV26ExperienceContracts(page) {
     return { sync, osdText, optInResumeT };
   });
   assert.equal(reloaded.sync.playbackRate, 1.25, 'Reload must restore persisted playbackRate');
+  assert.equal(reloaded.sync.volume, 0.65, 'Reload must restore persisted master volume');
   assert.equal(reloaded.sync.subsEnabled, false, 'Reload must restore persisted subtitle visibility');
   assert.equal(reloaded.sync.bgmEnabled, false, 'Reload must restore persisted BGM toggle');
   assert.ok(reloaded.sync.now < 0.05, `Default ui.resume=false must start from 0 on reload, got ${reloaded.sync.now}`);
@@ -697,6 +699,7 @@ async function verifyV26ExperienceContracts(page) {
   await page.evaluate(() => {
     window.__video.clearSavedState();
     window.__video.setRate(1);
+    window.__video.setVolume(1);
     window.__video.setSubs(true);
     window.__video.setBgm(true);
     window.__video.seek(0.2);
@@ -774,6 +777,77 @@ async function verifyDualStemBgmContract(page) {
   await page.keyboard.press('b');
   const afterBKey = await page.evaluate(() => window.__video.getSyncState());
   assert.equal(afterBKey.bgmEnabled, true, 'Pressing B shortcut must toggle BGM back on');
+  await verifyVolumeControlContract(page);
+}
+
+async function verifyVolumeControlContract(page) {
+  await page.locator('[data-act="mute"]').click();
+  const volSliderRes = await page.evaluate(() => {
+    const range = document.querySelector('.sound-vol-range');
+    const valEl = document.querySelector('.sound-vol-val');
+    const muteBtn = document.querySelector('[data-act="mute"]');
+    range.focus();
+    range.value = '35';
+    range.dispatchEvent(new Event('input', { bubbles: true }));
+    const s35 = {
+      vol: window.__video.getSyncState().volume,
+      muted: window.__video.getSyncState().muted,
+      txt: valEl.textContent,
+      mode: muteBtn.dataset.soundMode,
+    };
+    range.value = '2';
+    range.dispatchEvent(new Event('input', { bubbles: true }));
+    range.value = '0';
+    range.dispatchEvent(new Event('input', { bubbles: true }));
+    const s0 = {
+      vol: window.__video.getSyncState().volume,
+      muted: window.__video.getSyncState().muted,
+      txt: valEl.textContent,
+      mode: muteBtn.dataset.soundMode,
+    };
+    return { s35, s0 };
+  });
+  assert.equal(volSliderRes.s35.vol, 0.35, 'Dragging .sound-vol-range to 35 must set volume=0.35');
+  assert.equal(volSliderRes.s35.muted, false, 'Setting volume=0.35 must remain unmuted');
+  assert.equal(volSliderRes.s35.txt, '35%', '.sound-vol-val must display 35%');
+  assert.equal(volSliderRes.s35.mode, 'volumeLow', 'Volume < 50% must switch icon to volumeLow');
+  assert.equal(volSliderRes.s0.vol, 0, 'Dragging .sound-vol-range to 0 must set volume=0');
+  assert.equal(volSliderRes.s0.muted, true, 'Volume 0% must report muted=true');
+  assert.equal(volSliderRes.s0.mode, 'volumeMute', 'Volume 0% must switch icon to volumeMute');
+
+  await page.keyboard.press('m');
+  const unmutedFromZero = await page.evaluate(() => window.__video.getSyncState());
+  assert.equal(unmutedFromZero.muted, false, 'Pressing M at 0% must unmute');
+  assert.equal(unmutedFromZero.volume, 0.35, 'Unmuting after dragging through 2%->0% must restore >=10% volume (0.35)');
+
+  await page.keyboard.press('Escape');
+  await page.mouse.move(200, 200);
+  await page.evaluate(() => {
+    window.__video.seek(window.V.scenes[1].start + 0.05);
+    window.__video.play();
+  });
+  await page.waitForTimeout(640);
+  await page.keyboard.press('ArrowUp');
+  const arrowVol = await page.evaluate(() => ({
+    vol: window.__video.getSyncState().volume,
+    osd: document.getElementById('osd').textContent,
+    uiActive: document.body.classList.contains('ui-active'),
+    opacity: Number(getComputedStyle(document.getElementById('controls')).opacity),
+  }));
+  assert.equal(arrowVol.vol, 0.4, 'ArrowUp must step volume +5% (0.35 -> 0.40)');
+  assert.equal(arrowVol.osd, '音量 40%', 'ArrowUp must flash #osd with updated volume percentage');
+  assert.equal(arrowVol.uiActive, false, 'ArrowUp volume step must NOT wake bottom #controls');
+  assert.ok(arrowVol.opacity < 0.05, 'Closing .sound-menu after focusing slider must allow #controls to auto-hide');
+
+  const wheelVol = await page.evaluate(() => {
+    window.__video.pause();
+    document.querySelector('[data-act="mute"]').dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true, cancelable: true }));
+    const afterWheel = window.__video.getSyncState().volume;
+    window.__video.setVolume(1);
+    window.__video.clearSavedState();
+    return afterWheel;
+  });
+  assert.equal(wheelVol, 0.45, 'Mouse wheel up on [data-act="mute"] must step volume +5% (0.40 -> 0.45)');
 }
 
 async function verifySearchAndDeepLinkContract(page) {
@@ -845,6 +919,23 @@ async function verifyRound3BrowserContracts(page, port) {
   assert.equal(twInfo.s2LineCount, 2, 'Locale array shorthand must expand scene line count');
   assert.equal(twInfo.s2SecondLine, '第二句陣列簡寫擴行。', 'Locale array shorthand extra line must apply');
   assert.equal(twInfo.voiceMatched, false, 'Unbuilt regional locale zh-TW must not reuse zh-CN V.voice');
+
+  await page.goto(`http://127.0.0.1:${port}/demo/?lang=zh-TW&volume=0.4`, { waitUntil: 'networkidle' });
+  await page.locator('[data-act="mute"]').click();
+  const singleStemMenu = await page.evaluate(() => ({
+    soundOpen: document.getElementById('controls').classList.contains('sound-open'),
+    hasBgm: window.__video.getSyncState().hasBgm,
+    vol: window.__video.getSyncState().volume,
+    valTxt: document.querySelector('.sound-vol-val').textContent,
+    bgmRowHidden: document.querySelector('.sound-menu [data-sound="bgm"]').hidden,
+    muteRowTxt: document.querySelector('.sound-menu [data-sound="mute"] span').textContent,
+  }));
+  assert.equal(singleStemMenu.soundOpen, true, 'Non-BGM video must still open .sound-menu for volume slider');
+  assert.equal(singleStemMenu.hasBgm, false, 'Unbuilt zh-TW locale must have hasBgm=false');
+  assert.equal(singleStemMenu.vol, 0.4, '?volume=0.4 query parameter must initialize volume to 40%');
+  assert.equal(singleStemMenu.valTxt, '40%', '.sound-vol-val must reflect ?volume=0.4');
+  assert.equal(singleStemMenu.bgmRowHidden, true, 'Non-BGM video must hide BGM row in .sound-menu');
+  assert.equal(singleStemMenu.muteRowTxt, '静音', 'Non-BGM video must label mute item as 静音');
 }
 
 function verifyRound3UnitRegressions() {
