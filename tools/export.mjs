@@ -121,6 +121,7 @@ const cuesPayload = {
   })),
   impacts,
   videoClips: buildVideoClipAudioList(dryClips, V.scenes),
+  bakedScenes: (V.voice && V.voice.bakedLayout && V.voice.bakedLayout.scenes) || null,
 };
 
 fs.mkdirSync(path.dirname(outLines), { recursive: true });

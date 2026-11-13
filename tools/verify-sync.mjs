@@ -80,7 +80,10 @@ export function stampBakedLayout(videoId, lang = '') {
     const fromLegacy = resolveVoiceSubCuesGrid(V.voice);
     V.voice.subCues = fromLegacy.length ? fromLegacy : computeSceneSubCuesGrid(V.scenes);
   }
-  const candBgm = V.voice.bgmSrc || bgmRel;
+  if (!bgmRel && V.voice.bgmSrc) {
+    fs.rmSync(path.join(videoDir, V.voice.bgmSrc), { force: true });
+  }
+  const candBgm = bgmRel ? (V.voice.bgmSrc || bgmRel) : null;
   if (candBgm && fs.existsSync(path.join(videoDir, candBgm))) V.voice.bgmSrc = candBgm;
   else delete V.voice.bgmSrc;
   V.voice.bakedLayout = bakedLayout;

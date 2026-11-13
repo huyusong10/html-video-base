@@ -93,6 +93,7 @@ function writeTestProjectFiles(videoDir) {
     'V.config = {',
     '  title: "微内核自检演示",',
     '  width: 640, height: 360, fps: 10,',
+    '  ui: { resumeMinSec: 0.5 },',
     '  tts: { provider: "custom", script: "./mock_tts.py" },',
     '  sceneScripts: ["js/s01.js", "js/s02.js"],',
     '};',
@@ -309,7 +310,85 @@ async function verifyPlayerBarContracts(page, port) {
 
   await verifySearchAndDeepLinkContract(page);
   await verifyDualStemBgmContract(page);
+  await verifyV26ExperienceContracts(page);
   await verifyIframeWebFullContract(page, port);
+}
+
+async function verifyV26ExperienceContracts(page) {
+  const kf = await page.evaluate(() => {
+    const stops = [
+      { at: 0, x: 100, scale: 1, pose: 'wave' },
+      { at: 1.0, x: 300, scale: 1.5, dur: 0.5, pose: 'point' },
+      { at: 2.2, x: 500, dur: 0.4, pose: 'nod' },
+    ];
+    return {
+      s0: window.V.u.keyframes(0.4, stops),
+      s1: window.V.u.keyframes(1.25, stops),
+      s2: window.V.u.keyframes(2.8, stops),
+    };
+  });
+  assert.equal(kf.s0.x, 100, 'keyframes() before stop 1 must hold initial numeric value');
+  assert.equal(kf.s0.pose, 'wave', 'keyframes() before stop 1 must hold initial string state');
+  assert.ok(kf.s1.x > 140 && kf.s1.x < 260, `keyframes() mid-transition must smoothly interpolate x, got ${kf.s1.x}`);
+  assert.equal(kf.s1.pose, 'point', 'keyframes() past midpoint must switch discrete string state');
+  assert.equal(kf.s2.x, 500, 'keyframes() after final stop must settle at target x');
+  assert.equal(kf.s2.scale, 1.5, 'keyframes() must inherit omitted numeric props from previous stops');
+
+  await page.evaluate(() => { window.__video.pause(); window.__video.seek(0.2); });
+  const trackBox = await page.locator('#controls .track').boundingBox();
+  await page.mouse.move(trackBox.x + trackBox.width * 0.78, trackBox.y + trackBox.height / 2);
+  const tipOn = await page.evaluate(() => {
+    const el = document.querySelector('#controls .track-tip');
+    return { show: el.classList.contains('is-show'), text: el.textContent };
+  });
+  assert.equal(tipOn.show, true, 'Hovering .track must show .track-tip pill');
+  assert.ok(tipOn.text.includes('02 · 纯函数校验'), `Expected .track-tip to show chapter 02 title, got "${tipOn.text}"`);
+  await page.mouse.move(200, 200);
+  const tipOff = await page.evaluate(() => document.querySelector('#controls .track-tip').classList.contains('is-show'));
+  assert.equal(tipOff, false, 'Leaving .track must hide .track-tip pill');
+
+  await page.evaluate(() => {
+    window.__video.seek(window.V.scenes[1].start + 0.05);
+    window.__video.play();
+  });
+  await page.waitForTimeout(480);
+  await page.keyboard.press('b');
+  const osdState = await page.evaluate(() => ({
+    osdShow: document.getElementById('osd').classList.contains('is-show'),
+    osdText: document.getElementById('osd').textContent,
+    uiActive: document.body.classList.contains('ui-active'),
+  }));
+  assert.equal(osdState.osdShow, true, 'Keyboard shortcut must trigger top-right #osd pill');
+  assert.ok(osdState.osdText.includes('背景音乐'), `Expected #osd to describe BGM toggle, got "${osdState.osdText}"`);
+  assert.equal(osdState.uiActive, false, 'Keyboard shortcut must NOT pop up bottom #controls while pointer is idle');
+  await page.keyboard.press('b');
+
+  await page.evaluate(() => {
+    window.__video.pause();
+    window.__video.setRate(1.25);
+    window.__video.setSubs(false);
+    window.__video.setBgm(false);
+    window.__video.seek(1.2);
+    window.V._prefsRuntime.flushProgress(1.2, false);
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+  const resumed = await page.evaluate(() => ({
+    sync: window.__video.getSyncState(),
+    osdText: document.getElementById('osd').textContent,
+  }));
+  assert.equal(resumed.sync.playbackRate, 1.25, 'Reload must restore persisted playbackRate');
+  assert.equal(resumed.sync.subsEnabled, false, 'Reload must restore persisted subtitle visibility');
+  assert.equal(resumed.sync.bgmEnabled, false, 'Reload must restore persisted BGM toggle');
+  assert.ok(Math.abs(resumed.sync.now - 1.2) < 0.15, `Reload must resume at saved timestamp (~1.2s), got ${resumed.sync.now}`);
+  assert.ok(resumed.osdText.includes('已续播'), `Reload resume must flash OSD indicator, got "${resumed.osdText}"`);
+
+  await page.evaluate(() => {
+    window.__video.clearSavedState();
+    window.__video.setRate(1);
+    window.__video.setSubs(true);
+    window.__video.setBgm(true);
+    window.__video.seek(0.2);
+  });
 }
 
 async function verifyDualStemBgmContract(page) {
@@ -435,8 +514,15 @@ async function main() {
     createSampleMp4(resolveFfmpeg(PKG_ROOT), path.join(videoDir, 'assets/clip.mp4'));
     writeTestProjectFiles(videoDir);
 
-    console.log('[SelfTest 2/5] Building default & localized (en) tracks + visual determinism audit...');
+    console.log('[SelfTest 2/5] Building default & localized (en) tracks + offline remix + visual audit...');
     runCliCmd(['build', 'demo', '--bitrate', '96k', '--visual']);
+    const mixWarm = runCliCmd(['mix', 'demo', '--bitrate', '96k']);
+    assert.ok(mixWarm.includes('2/2 dry clips hit'), `Expected warm offline mix to hit 2/2 cached clips, got:\n${mixWarm}`);
+    fs.rmSync(path.join(TEST_ROOT, '.runtime/voice-cache'), { recursive: true, force: true });
+    fs.renameSync(path.join(videoDir, 'mock_tts.py'), path.join(videoDir, 'mock_tts.py.bak'));
+    const mixCold = runCliCmd(['build', 'demo', '--mix-only', '--bitrate', '96k']);
+    assert.ok(mixCold.includes('2 fallback to stem'), `Expected cold offline mix to slice from stem without TTS, got:\n${mixCold}`);
+    fs.renameSync(path.join(videoDir, 'mock_tts.py.bak'), path.join(videoDir, 'mock_tts.py'));
     runCliCmd(['build', 'demo', '--lang', 'en']);
     const shotDir = path.join(TEST_ROOT, 'audit-shots');
     runCliCmd(['audit', 'demo', '--screenshots', shotDir]);
@@ -468,7 +554,7 @@ async function main() {
     assert.ok(fs.existsSync(path.join(singleDir, 'base/js/engine.js')), 'Single bundle base/js/engine.js should exist');
     assert.ok(fs.readFileSync(path.join(singleDir, 'index.html'), 'utf8').includes('./base/js/engine.js'), 'Single bundle index.html must rewrite ../base/ -> ./base/');
 
-    console.log('✅ All html-video-base v2.0 end-to-end self-tests PASSED.');
+    console.log('✅ All html-video-base v2.6 end-to-end self-tests PASSED.');
   } finally {
     fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   }

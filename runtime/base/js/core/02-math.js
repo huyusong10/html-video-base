@@ -22,5 +22,44 @@
     return appear(t, start + index * step, dur);
   }
 
-  V.u = Object.assign(V.u || {}, { clamp, lerp, prog, ease, appear, win, stagger });
+  const KF_META = new Set(['at', 'dur', 'ease', 'switchAt']);
+
+  function seedKeyframeState(stops, init) {
+    if (init) return Object.assign({}, init);
+    const state = {};
+    for (const [key, val] of Object.entries(stops[0] || {})) {
+      if (!KF_META.has(key) && val !== undefined) state[key] = val;
+    }
+    return state;
+  }
+
+  function blendKeyframeProp(state, key, val, k, snap) {
+    if (typeof val === 'number' && typeof state[key] === 'number') state[key] = lerp(state[key], val, k);
+    else if (snap || state[key] === undefined) state[key] = val;
+  }
+
+  function applyKeyframeStop(state, kf, t, defDur, defEase) {
+    const d = kf.dur === undefined ? defDur : kf.dur;
+    const rawK = d <= 0 ? (t >= kf.at ? 1 : 0) : prog(t, kf.at, kf.at + d);
+    if (rawK <= 0) return;
+    const fn = ease[kf.ease || defEase] || ease.io;
+    const k = fn(rawK);
+    const snap = d <= 0 || rawK >= (kf.switchAt === undefined ? 0.5 : kf.switchAt);
+    for (const [key, val] of Object.entries(kf)) {
+      if (!KF_META.has(key) && val != null) blendKeyframeProp(state, key, val, k, snap);
+    }
+  }
+
+  function keyframes(t, stops = [], opts = {}) {
+    if (!stops || !stops.length) return Object.assign({}, opts.init || {});
+    const state = seedKeyframeState(stops, opts.init);
+    const defDur = opts.dur === undefined ? 0.5 : opts.dur;
+    const defEase = opts.ease || 'io';
+    for (let i = opts.init ? 0 : 1; i < stops.length; i++) {
+      if (stops[i] && stops[i].at != null) applyKeyframeStop(state, stops[i], t, defDur, defEase);
+    }
+    return state;
+  }
+
+  V.u = Object.assign(V.u || {}, { clamp, lerp, prog, ease, appear, win, stagger, keyframes });
 })(globalThis.V = globalThis.V || {});

@@ -1,4 +1,4 @@
-/* core/10-search-deeplink.js · 台词与章节全文检索跳转（/ 或 Ctrl+K）及时间戳深链一键复制 */
+/* core/14-search-deeplink.js · 台词与章节全文检索跳转（/ 或 Ctrl+K）及时间戳深链一键复制 */
 (function (V) {
   if (typeof location === 'undefined') return;
   const { h } = V.u;
@@ -125,7 +125,7 @@
   function syncAddressBarOnSeek(t) {
     const cfg = V.getCfg();
     const uiCfg = (cfg && cfg.ui) || {};
-    if (uiCfg.syncUrl === false || window !== window.top) return;
+    if (!uiCfg.syncUrl || window !== window.top) return;
     if (!/^https?:$/i.test(location.protocol)) return;
     const nowTs = performance.now();
     if (nowTs - lastUrlSyncTs < 350) return;

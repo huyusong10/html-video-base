@@ -32,7 +32,8 @@ project-root/
 | :--- | :--- |
 | `npx html-video init <id> [--title "..."] [--skill]` | 初始化标准视频目录（`--skill` 同步导出本规范至 `.agents/skills/html-video/`） |
 | `npx html-video serve [port]` | 启动带 `206 Range` 与 SSE 保位热重载的本地预览服务 |
-| `npx html-video build <id> [--bitrate 128k]` | 合成 TTS（单句 SHA-256 缓存）、分离导出 `soundtrack.m4a`（解说+SFX）与 `bgm.m4a`（配乐）并写入 `bakedLayout` |
+| `npx html-video build <id> [--bitrate 128k] [--mix-only]` | 合成 TTS（单句 SHA-256 缓存）、分离导出 `soundtrack.m4a`（解说+SFX）与 `bgm.m4a`（配乐）并写入 `bakedLayout` |
+| `npx html-video mix <id> [--bitrate 128k]` | 台词未改时免联网快速重混：直接复用缓存干声或从现有 `soundtrack.m4a` 切片，秒级重混 `bgm`/`sfx`/停顿间隔 |
 | `npx html-video verify [id] [--stamp-baked]` | 校验语义词锚、字幕分段与物理双音轨时长零漂移 |
 | `npx html-video audit [id] [--screenshots .runtime/audit]` | 无头浏览器巡检破损图、越界、字幕遮挡、兄弟卡片压盖、小字号与 `f(t)` 幂等性 |
 | `npx html-video render <id> [out.mp4] [--scene K] [--no-bgm]` | 按幕增量缓存 + 静止帧复用导出 1080p MP4（`--no-bgm` 可导出纯解说无配乐版） |
@@ -41,7 +42,7 @@ project-root/
 ## 3. 纯函数分镜与时间轴契约
 
 1. **纯函数 `f(t)` 约束**：`update(t, x)` 必须仅由入参时间 `t` 决定 DOM/SVG 状态。严禁使用 `setTimeout`、`setInterval`、自建 `requestAnimationFrame` 或跨帧累加变量；CSS `@keyframes` 在 `?record=1` 录制态下会自动按 `--anim-t` 锁定相位。
-2. **语义词锚同步**：视觉动作一律用 `x.at(lineIdx, '关键词', offset)` 或 `x.cue(lineIdx)` 对齐口播重音，禁止硬编码拍脑袋秒数。
+2. **语义词锚与多段插值**：视觉动作一律用 `x.at(lineIdx, '关键词', offset)` 或 `x.cue(lineIdx)` 对齐口播重音，禁止硬编码拍脑袋秒数；角色走位、多段运镜或连续状态切换优先用 `V.u.keyframes(t, [{ at: 0, x: 960, pose: 'wave' }, { at: x.at(0, '核心'), x: 420, dur: 0.5, pose: 'point' }])`，避免手写多层 `lerp` 嵌套。
 3. **终章驻留与持续运动**：需要播放结束后继续交互或保持环境动画时，在 `V.config` 设 `interactiveEnd: true`，对应幕设 `live: true`，可点击控件标记 `data-interactive="1"`。`update(t, x)` 与 `onRender(e)` 中可用 `x.clock` / `e.clock` 驱动暂停态环境微动。
 4. **彩蛋沙盒试玩**：调用 `V.tryEgg(targetTime, '操作提示')` 跳入任意幕试玩并自动悬浮返回条，用户点返回或按 `Esc` 调 `V.exitSandbox()` 回到终章。
 
@@ -66,8 +67,8 @@ V.scene({
 
 - **字幕伴随插槽与避让**：通过 `V.subtitle({ lead: (h, V) => el, tail, position, modes, onUpdate(cue, info, dom) })` 挂载前置吉祥物或角标；单幕可设 `subLayout: 'left' | { pos: 'center', offsetX: 56, maxWidth: 1520 }` 动态避让角色。
 - **PotPlayer 式悬浮控制栏与配置项（`V.config.ui`）**：
-  - `controlsMode: 'overlay' | 'docked'`（默认为 `'overlay'`：画面铺满视口，播放时鼠标移入底部 `autoHideZone: 72` 热区立即浮出，移出底栏或窗口 `autoHideDelay: 300` 毫秒即刻收起；悬停底栏、展开菜单或暂停时保持可见，并自动推动字幕向上避让）
-  - `chapterMarks: true`、`hud: true`、`rate: true`、`webFull: true`、`iconPreset: 'default' | 'pixel'`
+  - `controlsMode: 'overlay' | 'docked'`（默认为 `'overlay'`：画面铺满视口，播放时鼠标移入底部 `autoHideZone: 72` 热区浮出，移出 `autoHideDelay: 300` 毫秒收起；悬停进度条实时跟随 `.track-tip` 预览章节与时间；按键盘快进/静音/切章仅在右上角闪出 `#osd` 胶囊，不弹底栏顶跳字幕）
+  - `persist: true`（按路径持久化倍速、字幕、双音轨开关及播放进度，超过 `resumeMinSec: 5` 秒刷新自动断点续播；嵌入弹窗若无需续播可设 `persist: false`）、`osd: true`、`chapterMarks: true`、`hud: true`、`rate: true`、`webFull: true`、`iconPreset: 'default' | 'pixel'`
 - **全图标控制栏与业务图标覆盖规范**：
   - 控制栏左右按钮默认统一使用 `32×30` 紧凑矢量图标（返回主界面 `home`、播放/暂停/重播 `play`/`pause`/`replay`、章节箭头 `chapCaret`、倍速 `rate` 在 `1.0x` 显示仪表图标并在非 `1.0x` 动态切换为紧凑数字、字幕 `subsOn`/`subsOff`、声音多态 `volumeOn`/`volumeVoice`/`volumeBgm`/`volumeMute`、全屏 `webEnter`/`webExit`/`fullEnter`/`fullExit`）。
   - **业务新增按钮建议一律用图标**：调用 `V.control({ id: 'xray', position: 'right', title: 'X-Ray 透视', icon: ['M...'], onClick(e, V) {} })`，不要塞多字中文撑宽工具栏。

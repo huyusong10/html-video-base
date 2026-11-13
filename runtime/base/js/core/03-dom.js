@@ -1,6 +1,6 @@
 /* core/03-dom.js · 轻量 DOM/SVG 构造、运镜、仿真光标与确定性受控 <video> 切片原语 */
 (function (V) {
-  const { clamp, lerp, prog, ease, appear } = V.u;
+  const { clamp, lerp, prog, ease, appear, keyframes } = V.u;
 
   function applyAttr(el, k, val) {
     if (k === 'class') el.className = val;
@@ -108,18 +108,6 @@
     });
   }
 
-  function stepCameraKeyframe(state, kf, t, defaultDur) {
-    const d = kf.dur === undefined ? defaultDur : kf.dur;
-    const rawK = d <= 0 ? (t >= kf.at ? 1 : 0) : prog(t, kf.at, kf.at + d);
-    if (rawK <= 0) return;
-    const fn = (kf.ease && ease[kf.ease]) || ease.io;
-    const k = fn(rawK);
-    if (kf.x != null) state.x = lerp(state.x, kf.x, k);
-    if (kf.y != null) state.y = lerp(state.y, kf.y, k);
-    if (kf.zoom != null) state.zoom = lerp(state.zoom, kf.zoom, k);
-    if (kf.r != null) state.r = lerp(state.r, kf.r, k);
-  }
-
   function initCameraState(opts, cx, cy) {
     return {
       x: opts.x0 === undefined ? cx : opts.x0,
@@ -138,14 +126,14 @@
     el.style.transform = `translate3d(${tx}px,${ty}px,0) scale(${st.zoom.toFixed(4)})${rot}`;
   }
 
-  function camera(el, t, keyframes = [], opts = {}) {
+  function camera(el, t, stops = [], opts = {}) {
     const cx = opts.cx === undefined ? (V.stageWidth || 1920) / 2 : opts.cx;
     const cy = opts.cy === undefined ? (V.stageHeight || 1080) / 2 : opts.cy;
-    const st = initCameraState(opts, cx, cy);
-    const defaultDur = opts.dur === undefined ? 0.55 : opts.dur;
-    for (const kf of keyframes) {
-      if (kf && kf.at != null) stepCameraKeyframe(st, kf, t, defaultDur);
-    }
+    const st = keyframes(t, stops, {
+      init: initCameraState(opts, cx, cy),
+      dur: opts.dur === undefined ? 0.55 : opts.dur,
+      ease: 'io',
+    });
     applyCameraDom(el, st, cx, cy);
     return st;
   }

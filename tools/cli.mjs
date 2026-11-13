@@ -151,7 +151,7 @@ function collectBuildTtsEnv(args) {
   return env;
 }
 
-function cmdBuild(args) {
+function resolveBuildTarget(args) {
   const pos = stripFlags(args, ['--provider', '--voice', '--model', '--speed', '--bitrate', '--lang']);
   const videoId = pos[0] || listVideoIds()[0];
   const lang = parseFlag(args, '--lang', '');
@@ -160,9 +160,67 @@ function cmdBuild(args) {
     console.error(`Error: Video directory not found for '${videoId || ''}' under ${VIDEOS_DIR}`);
     process.exit(1);
   }
-
   const ttsEnv = collectBuildTtsEnv(args);
   if (lang) ttsEnv.VIDEO_LANG = lang;
+  return { videoId, lang, videoDir, ttsEnv, langArgs: lang ? ['--lang', lang] : [] };
+}
+
+function assertMixReady(videoId, lang) {
+  const { sandbox, timingsPath, timingsRel, audioRel, bgmRel } = loadVideoSandbox(ROOT, videoId, {
+    ignoreBaked: true,
+    requireTimings: false,
+    lang,
+  });
+  if (!fs.existsSync(timingsPath) || !sandbox.V.voice) {
+    console.error(`Error: Missing timings (${timingsRel}) for '${videoId}'. Run "html-video build ${videoId}" first.`);
+    process.exit(1);
+  }
+  const durs = sandbox.V.voice.durations || [];
+  const mismatch = sandbox.V.scenes.length !== durs.length
+    || sandbox.V.scenes.some((sc, i) => !Array.isArray(durs[i]) || sc.lines.length !== durs[i].length);
+  if (mismatch) {
+    console.error(`Error: Spoken line count changed for '${videoId}'. Run "html-video build ${videoId}" instead of "mix".`);
+    process.exit(1);
+  }
+  return { timingsRel, audioRel, bgmRel };
+}
+
+function cmdMix(args) {
+  const { videoId, lang, videoDir, ttsEnv, langArgs } = resolveBuildTarget(args);
+  const { timingsRel, audioRel, bgmRel } = assertMixReady(videoId, lang);
+  const py = resolvePython(ROOT, true);
+  const rtDir = path.join(ROOT, '.runtime', `mix-${videoId}${lang ? '-' + lang : ''}`);
+  const linesJson = path.join(rtDir, 'lines.json');
+  const cuesJson = path.join(rtDir, 'cues.json');
+  const voiceDir = path.join(rtDir, 'voice');
+  const mixEnv = Object.assign({}, ttsEnv, { VOICE_CACHE_ONLY: '1' });
+
+  fs.rmSync(rtDir, { recursive: true, force: true });
+  fs.mkdirSync(rtDir, { recursive: true });
+
+  run(process.execPath, [path.join(TOOLS_DIR, 'export.mjs'), videoId, linesJson, cuesJson, ...langArgs],
+    `[1/3] Exporting timeline cues & subtitles for '${videoId}'...`, mixEnv);
+  if (audioRel) {
+    run(py, [path.join(TOOLS_DIR, 'voice.py'), linesJson, voiceDir, path.join(videoDir, timingsRel)],
+      `[2/3] Hydrating cached dry voices & remixing soundtrack + BGM stems...`, mixEnv);
+    const mixArgs = [path.join(TOOLS_DIR, 'mix.py'), cuesJson, voiceDir, path.join(videoDir, audioRel)];
+    if (bgmRel) mixArgs.push(path.join(videoDir, bgmRel));
+    run(py, mixArgs, null, mixEnv);
+  }
+  fs.rmSync(rtDir, { recursive: true, force: true });
+
+  const verifyArgs = [path.join(TOOLS_DIR, 'verify-sync.mjs'), videoId, '--stamp-baked', ...langArgs];
+  if (args.includes('--visual')) verifyArgs.push('--visual');
+  if (args.includes('--strict')) verifyArgs.push('--strict');
+  run(process.execPath, verifyArgs, `[3/3] Stamping bakedLayout & running audio-visual sync verification...`, mixEnv);
+
+  syncManifest();
+  console.log(`Offline remix complete for '${videoId}${lang ? ':' + lang : ''}'.`);
+}
+
+function cmdBuild(args) {
+  if (args.includes('--mix-only')) { cmdMix(args); return; }
+  const { videoId, lang, videoDir, ttsEnv, langArgs } = resolveBuildTarget(args);
   const py = resolvePython(ROOT, true);
   const rtDir = path.join(ROOT, '.runtime', `build-${videoId}${lang ? '-' + lang : ''}`);
   const linesJson = path.join(rtDir, 'lines.json');
@@ -171,7 +229,6 @@ function cmdBuild(args) {
 
   const { sandbox } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: false, lang });
   const { timingsRel, audioRel, bgmRel } = resolveLangMediaPaths(sandbox.V.config, lang);
-  const langArgs = lang ? ['--lang', lang] : [];
 
   fs.rmSync(rtDir, { recursive: true, force: true });
   fs.mkdirSync(rtDir, { recursive: true });
@@ -200,11 +257,12 @@ function cmdBuild(args) {
 
 function printHelp() {
   console.log([
-    'html-video CLI (v2.4)',
+    'html-video CLI (v2.6)',
     '  html-video init <id> [--title "..."] [--aspect 16:9|9:16|1:1] [--skill]',
     '  html-video skill [--out .agents/skills/html-video]',
     '  html-video serve [port] [host] [--no-watch]',
-    '  html-video build [video-id] [--lang en] [--provider edge|openai|elevenlabs|azure|http|command] [--voice ...] [--speed ...] [--bitrate 128k] [--visual]',
+    '  html-video build [video-id] [--lang en] [--provider edge|openai|elevenlabs|azure|http|command] [--voice ...] [--speed ...] [--bitrate 128k] [--mix-only] [--visual]',
+    '  html-video mix [video-id] [--lang en] [--bitrate 128k] [--visual]',
     '  html-video verify [video-id ...] [--stamp-baked] [--visual] [--strict] [--lang en]',
     '  html-video audit [video-id ...] [--strict] [--screenshots <dir>] [--lang en]',
     '  html-video storyboard [video-id] [out.html] [--per-cue] [--pdf] [--lang en]',
@@ -219,6 +277,7 @@ const COMMANDS = {
   new: cmdInit,
   skill: cmdSkill,
   build: cmdBuild,
+  mix: cmdMix,
   serve: r => run(process.execPath, [path.join(TOOLS_DIR, 'serve.mjs'), ...r]),
   verify: r => run(process.execPath, [path.join(TOOLS_DIR, 'verify-sync.mjs'), ...r]),
   audit: r => run(process.execPath, [path.join(TOOLS_DIR, 'audit-visual.mjs'), ...r]),

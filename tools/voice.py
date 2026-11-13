@@ -380,12 +380,32 @@ def _finalize_tts_defaults(tts_cfg: dict) -> str:
     return provider
 
 
+def hydrate_cached_voices(scenes, out_dir, base_cfg, rules):
+    os.makedirs(out_dir, exist_ok=True)
+    hits, total = 0, 0
+    for si, lines in enumerate(scenes):
+        for li, raw_item in enumerate(lines):
+            total += 1
+            text, line_cfg = normalize_line_item(raw_item, base_cfg)
+            spoken = speakable(text, rules)
+            digest = make_cache_key(line_cfg, spoken, compute_en_ratio(line_cfg))
+            c_wav = os.path.join(CACHE_DIR, f'{digest}.wav')
+            if os.path.exists(c_wav):
+                shutil.copyfile(c_wav, f'{out_dir}/{si:02d}_{li:02d}.wav')
+                hits += 1
+    print(f'  Cache-only voice lookup: {hits}/{total} dry clips hit ({total - hits} fallback to stem).')
+
+
 def main():
     lines_path, out_dir, timings_path = sys.argv[1:4]
     with open(lines_path, encoding='utf-8') as f:
         scenes, tts_cfg, audio_src, bgm_src, video_dir = _parse_cli_tts_config(json.load(f), sys.argv)
     provider = _finalize_tts_defaults(tts_cfg)
     rules = build_rules(tts_cfg.get('pronunciation', {}), enable_common=bool(tts_cfg.get('polyphoneFix', True)))
+
+    if os.environ.get('VOICE_CACHE_ONLY') == '1':
+        hydrate_cached_voices(scenes, out_dir, tts_cfg, rules)
+        return
 
     if not tts_cfg.get('enabled', True) or sum(len(s) for s in scenes) == 0:
         os.makedirs(out_dir, exist_ok=True)

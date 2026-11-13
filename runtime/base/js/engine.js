@@ -181,12 +181,51 @@
     return appear(t, start + index * step, dur);
   }
 
-  V.u = Object.assign(V.u || {}, { clamp, lerp, prog, ease, appear, win, stagger });
+  const KF_META = new Set(['at', 'dur', 'ease', 'switchAt']);
+
+  function seedKeyframeState(stops, init) {
+    if (init) return Object.assign({}, init);
+    const state = {};
+    for (const [key, val] of Object.entries(stops[0] || {})) {
+      if (!KF_META.has(key) && val !== undefined) state[key] = val;
+    }
+    return state;
+  }
+
+  function blendKeyframeProp(state, key, val, k, snap) {
+    if (typeof val === 'number' && typeof state[key] === 'number') state[key] = lerp(state[key], val, k);
+    else if (snap || state[key] === undefined) state[key] = val;
+  }
+
+  function applyKeyframeStop(state, kf, t, defDur, defEase) {
+    const d = kf.dur === undefined ? defDur : kf.dur;
+    const rawK = d <= 0 ? (t >= kf.at ? 1 : 0) : prog(t, kf.at, kf.at + d);
+    if (rawK <= 0) return;
+    const fn = ease[kf.ease || defEase] || ease.io;
+    const k = fn(rawK);
+    const snap = d <= 0 || rawK >= (kf.switchAt === undefined ? 0.5 : kf.switchAt);
+    for (const [key, val] of Object.entries(kf)) {
+      if (!KF_META.has(key) && val != null) blendKeyframeProp(state, key, val, k, snap);
+    }
+  }
+
+  function keyframes(t, stops = [], opts = {}) {
+    if (!stops || !stops.length) return Object.assign({}, opts.init || {});
+    const state = seedKeyframeState(stops, opts.init);
+    const defDur = opts.dur === undefined ? 0.5 : opts.dur;
+    const defEase = opts.ease || 'io';
+    for (let i = opts.init ? 0 : 1; i < stops.length; i++) {
+      if (stops[i] && stops[i].at != null) applyKeyframeStop(state, stops[i], t, defDur, defEase);
+    }
+    return state;
+  }
+
+  V.u = Object.assign(V.u || {}, { clamp, lerp, prog, ease, appear, win, stagger, keyframes });
 })(globalThis.V = globalThis.V || {});
 
 /* core/03-dom.js · 轻量 DOM/SVG 构造、运镜、仿真光标与确定性受控 <video> 切片原语 */
 (function (V) {
-  const { clamp, lerp, prog, ease, appear } = V.u;
+  const { clamp, lerp, prog, ease, appear, keyframes } = V.u;
 
   function applyAttr(el, k, val) {
     if (k === 'class') el.className = val;
@@ -294,18 +333,6 @@
     });
   }
 
-  function stepCameraKeyframe(state, kf, t, defaultDur) {
-    const d = kf.dur === undefined ? defaultDur : kf.dur;
-    const rawK = d <= 0 ? (t >= kf.at ? 1 : 0) : prog(t, kf.at, kf.at + d);
-    if (rawK <= 0) return;
-    const fn = (kf.ease && ease[kf.ease]) || ease.io;
-    const k = fn(rawK);
-    if (kf.x != null) state.x = lerp(state.x, kf.x, k);
-    if (kf.y != null) state.y = lerp(state.y, kf.y, k);
-    if (kf.zoom != null) state.zoom = lerp(state.zoom, kf.zoom, k);
-    if (kf.r != null) state.r = lerp(state.r, kf.r, k);
-  }
-
   function initCameraState(opts, cx, cy) {
     return {
       x: opts.x0 === undefined ? cx : opts.x0,
@@ -324,14 +351,14 @@
     el.style.transform = `translate3d(${tx}px,${ty}px,0) scale(${st.zoom.toFixed(4)})${rot}`;
   }
 
-  function camera(el, t, keyframes = [], opts = {}) {
+  function camera(el, t, stops = [], opts = {}) {
     const cx = opts.cx === undefined ? (V.stageWidth || 1920) / 2 : opts.cx;
     const cy = opts.cy === undefined ? (V.stageHeight || 1080) / 2 : opts.cy;
-    const st = initCameraState(opts, cx, cy);
-    const defaultDur = opts.dur === undefined ? 0.55 : opts.dur;
-    for (const kf of keyframes) {
-      if (kf && kf.at != null) stepCameraKeyframe(st, kf, t, defaultDur);
-    }
+    const st = keyframes(t, stops, {
+      init: initCameraState(opts, cx, cy),
+      dur: opts.dur === undefined ? 0.55 : opts.dur,
+      ease: 'io',
+    });
     applyCameraDom(el, st, cx, cy);
     return st;
   }
@@ -1245,10 +1272,10 @@
   });
 })(globalThis.V = globalThis.V || {});
 
-/* core/09-player.js · 舞台挂载、可主题化控制栏、章节分段、倍速上拉菜单、音频主时钟与 V.boot 启动器 */
+/* core/09-icons.js · 控制栏图标预设（现代线性 / 像素格）、UI 配置归一化与图标构造器 */
 (function (V) {
   if (typeof location === 'undefined') return;
-  const { clamp, prog, appear, h, svg, toggle, syncVideoClip } = V.u;
+  const { h, svg } = V.u;
 
   const CTRL_ICONS = {
     home: ['M2.25 7.2 8 2.5l5.75 4.7', 'M4 6.2v6.55a.75.75 0 0 0 .75.75h6.5a.75.75 0 0 0 .75-.75V6.2', 'M6.75 13.5V9.75h2.5v3.75'],
@@ -1292,22 +1319,6 @@
   V.iconPresets = { default: CTRL_ICONS, linear: CTRL_ICONS, pixel: PIXEL_ICONS };
   const DEFAULT_RATES = [2, 1.5, 1.25, 1, 0.75];
 
-  const params = new URLSearchParams(location.search);
-  const RECORD = params.has('record') || params.has('capture');
-  const DEV = params.has('dev') && !RECORD;
-  V._isRecord = RECORD;
-
-  let audio = null, bgmAudio = null, stage = null, subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
-  let current = null, now = 0, prevRenderNow = 0, playing = false, lastTs = 0, pauseBaseTs = 0, ended = false;
-  let showSubs = !params.has('nosubs'), playbackRate = 1, loopScene = false, muted = false;
-  let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm');
-  let scrubbing = false, targetSeekTime = null, lastSeekTarget = -1, lastSeekAt = 0;
-  let audioBlocked = false, playPending = false, bgmPlayPending = false, activeCueIdx = -1;
-  let webFull = false, savedFrameStyle = null, idleTimer = 0, inHotZone = false;
-  let wipeState = { name: '', handler: null, dom: null };
-  const sandboxState = { active: false, entering: false, returnTime: null, el: null, txtEl: null, backEl: null };
-  const ui = {};
-
   function canExpandParentFrame() {
     try {
       return Boolean(window.frameElement && window.parent === window.top);
@@ -1317,12 +1328,7 @@
   }
 
   function resolveWebFull(u) {
-    if (typeof u.webFull === 'boolean') return u.webFull;
-    return canExpandParentFrame();
-  }
-
-  function resolveControlsMode(u, cfg) {
-    return u.controlsMode || (cfg && cfg.controlsMode) || 'overlay';
+    return typeof u.webFull === 'boolean' ? u.webFull : canExpandParentFrame();
   }
 
   function resolveUiIcons(u) {
@@ -1330,15 +1336,30 @@
     return Object.assign({}, CTRL_ICONS, preset, u.icons || {}, V.customIcons || {});
   }
 
+  function resolveHudFlag(u, cfg) {
+    return u.hud !== undefined ? Boolean(u.hud) : (!cfg || cfg.hud !== false);
+  }
+
+  function resolveChapterMarks(u, cfg) {
+    return u.chapterMarks !== false && (!cfg || cfg.chapterMarks !== false);
+  }
+
+  function resolveResumeMinSec(u) {
+    return u.resumeMinSec === undefined ? 5 : Math.max(0, Number(u.resumeMinSec) || 0);
+  }
+
   function getUiCfg(cfg) {
     const u = (cfg && cfg.ui) || {};
     return {
-      controlsMode: resolveControlsMode(u, cfg),
+      controlsMode: u.controlsMode || (cfg && cfg.controlsMode) || 'overlay',
       autoHideZone: Number(u.autoHideZone) || 72,
       autoHideDelay: Number(u.autoHideDelay) || 300,
       actionWakeDelay: Number(u.actionWakeDelay) || 850,
-      chapterMarks: u.chapterMarks !== false && (!cfg || cfg.chapterMarks !== false),
-      hud: u.hud !== undefined ? Boolean(u.hud) : (!cfg || cfg.hud !== false),
+      persist: u.persist !== false,
+      resumeMinSec: resolveResumeMinSec(u),
+      osd: u.osd !== false,
+      chapterMarks: resolveChapterMarks(u, cfg),
+      hud: resolveHudFlag(u, cfg),
       rate: u.rate !== false,
       bgmDefault: u.bgmDefault !== false,
       webFull: resolveWebFull(u),
@@ -1373,10 +1394,6 @@
       'class="ctrl-ico" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
     );
   }
-  V.makeIcon = nameOrSpec => {
-    const icons = getUiCfg(V.getCfg()).icons;
-    return makeCtrlIcon(icons[nameOrSpec] || nameOrSpec);
-  };
 
   function swapBtnIcon(btn, cacheKey, spec, label) {
     if (!btn) return;
@@ -1388,6 +1405,522 @@
     btn._icoKey = cacheKey;
     btn.replaceChildren(makeCtrlIcon(spec));
   }
+
+  const fmtTime = s => {
+    const sec = Math.max(0, Math.floor(s));
+    return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+  };
+  const fmtRate = r => (Number.isInteger(r) ? `${r}.0x` : `${r}x`);
+
+  V.makeIcon = nameOrSpec => {
+    const icons = getUiCfg(V.getCfg()).icons;
+    return makeCtrlIcon(icons[nameOrSpec] || nameOrSpec);
+  };
+  V._getUiCfg = getUiCfg;
+  V._makeCtrlIcon = makeCtrlIcon;
+  V._swapBtnIcon = swapBtnIcon;
+  V._fmtTime = fmtTime;
+  V._fmtRate = fmtRate;
+})(globalThis.V = globalThis.V || {});
+
+/* core/10-subtitles.js · 字幕槽位挂载、多姿态布局避让与 30Hz 语音钩子 */
+(function (V) {
+  if (typeof location === 'undefined') return;
+  const { clamp, prog, appear, h } = V.u;
+
+  const SUB_VAR_MAP = [
+    ['left', '--sub-left'], ['right', '--sub-right'], ['top', '--sub-top'], ['bottom', '--sub-bottom'],
+    ['offsetX', '--sub-offset-x'], ['offsetY', '--sub-offset-y'], ['align', '--sub-align'],
+    ['maxWidth', '--sub-max-w'], ['padding', '--sub-padding'], ['gap', '--sub-gap'], ['zIndex', '--sub-z'],
+  ];
+
+  let subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
+
+  function getSubCfg() {
+    const cfg = V.getCfg();
+    return Object.assign({}, cfg.subtitles || {}, V.subtitles || {});
+  }
+
+  function resolveSubLayoutObj(spec, subCfg) {
+    if (!spec) return { pos: 'center' };
+    if (typeof spec === 'string') {
+      const m = subCfg && subCfg.modes && subCfg.modes[spec];
+      return m ? Object.assign({ pos: 'center' }, m) : { pos: spec };
+    }
+    return Object.assign({ pos: spec.pos || 'center' }, spec);
+  }
+
+  function applySubLayout(spec) {
+    if (!subs) return;
+    const obj = resolveSubLayoutObj(spec, getSubCfg());
+    subs.dataset.subPos = obj.pos || 'center';
+    for (const [prop, cssVar] of SUB_VAR_MAP) {
+      const val = obj[prop];
+      if (val == null || val === '') subs.style.removeProperty(cssVar);
+      else subs.style.setProperty(cssVar, typeof val === 'number' && prop !== 'zIndex' ? `${val}px` : String(val));
+    }
+  }
+  V.setSubLayout = applySubLayout;
+
+  function mountSubSlot(slotEl, factory) {
+    if (!slotEl || !factory) return;
+    slotEl.innerHTML = '';
+    const res = typeof factory === 'function' ? factory(h, V) : factory;
+    if (!res) return;
+    if (res.nodeType) slotEl.appendChild(res);
+    else slotEl.innerHTML = String(res);
+  }
+
+  function bindSubElements(subsEl) {
+    subs = subsEl;
+    if (!subs) return;
+    subLead = subs.querySelector('.sub-lead');
+    subTail = subs.querySelector('.sub-tail');
+    subSpeaker = subs.querySelector('.sub-speaker');
+    subText = subs.querySelector('.sub-text');
+    const subCfg = getSubCfg();
+    mountSubSlot(subLead, subCfg.lead);
+    mountSubSlot(subTail, subCfg.tail);
+    if (subCfg.layout || subCfg.position) applySubLayout(subCfg.layout || subCfg.position);
+  }
+
+  function syncSceneSubLayout(sc, lt) {
+    const spec = sc.subLayout || sc.subtitles;
+    if (!spec) return;
+    applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
+  }
+
+  function updateSubDomText(cue) {
+    if (subSpeaker && subSpeaker._sp !== (cue.speaker || '')) {
+      subSpeaker._sp = cue.speaker || '';
+      subSpeaker.textContent = subSpeaker._sp;
+      subSpeaker.classList.toggle('is-on', Boolean(subSpeaker._sp));
+    }
+    if (subText && subText._t !== cue.text) {
+      subText.firstChild.textContent = cue.text;
+      subText.lastChild.textContent = cue.text;
+      subText._t = cue.text;
+    }
+  }
+
+  function runSubHook(subCfg, cue, sc, idx, lt, now, clock, activeCueIdx) {
+    const fn = subCfg.onUpdate || subCfg.update;
+    if (typeof fn !== 'function') return;
+    const lineCue = activeCueIdx >= 0 ? sc.cues[activeCueIdx] : null;
+    const info = { t: now, clock, lt, scene: sc, sceneIndex: idx, lineCue, speaking: Boolean(cue), energy: V.getSceneEnergy(sc, idx, lt) };
+    fn(cue, info, { subs, lead: subLead, tail: subTail, speaker: subSpeaker, text: subText });
+  }
+
+  function updateSubs(sc, idx, lt, now, clock, showSubs) {
+    if (!subs) return -1;
+    const subCfg = getSubCfg();
+    syncSceneSubLayout(sc, lt);
+    const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
+    let cue = null;
+    let activeCueIdx = -1;
+    sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
+    list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
+    subs.style.visibility = cue && showSubs ? 'visible' : 'hidden';
+    if (cue) {
+      const a = Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
+      subs.style.opacity = String(clamp(a));
+      updateSubDomText(cue);
+    }
+    runSubHook(subCfg, cue, sc, idx, lt, now, clock, activeCueIdx);
+    return activeCueIdx;
+  }
+
+  V._subtitlesRuntime = { bindSubElements, applySubLayout, updateSubs };
+})(globalThis.V = globalThis.V || {});
+
+/* core/11-audio.js · 解说干声与背景音乐双轨独立加载、寻道防漂移同步与声音状态机 */
+(function (V) {
+  if (typeof location === 'undefined') return;
+
+  function resolveAudioSource(cfg, isRecord) {
+    if (cfg.audioSrc === false || isRecord) return null;
+    return (V.voice && V.voice.src) || cfg.audioSrc || null;
+  }
+
+  function resolveBgmSource(cfg, isRecord) {
+    if (cfg.audioSrc === false || cfg.bgm === false || cfg.bgmSrc === false || isRecord) return null;
+    return (V.voice && V.voice.bgmSrc) || cfg.bgmSrc || null;
+  }
+
+  V._createAudioRuntime = function (hooks) {
+    const { params, isRecord } = hooks;
+    let audio = null, bgmAudio = null, playbackRate = 1;
+    let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm'), muted = false;
+    let audioBlocked = false, playPending = false, bgmPlayPending = false, targetSeekTime = null;
+
+    function isAllMuted() {
+      return muted || (!voiceOn && (!bgmAudio || !bgmOn));
+    }
+
+    function safePlayAudio() {
+      if (!audio || !hooks.isPlaying() || !audio.paused || playPending) return;
+      playPending = true;
+      audio.playbackRate = playbackRate;
+      const p = audio.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => { playPending = false; audioBlocked = false; })
+         .catch(err => { playPending = false; if (err && err.name === 'NotAllowedError') audioBlocked = true; });
+      } else {
+        playPending = false;
+      }
+    }
+
+    function safePlayBgm() {
+      if (!bgmAudio || !hooks.isPlaying() || bgmAudio.muted || !bgmAudio.paused || bgmPlayPending) return;
+      bgmPlayPending = true;
+      bgmAudio.playbackRate = playbackRate;
+      const p = bgmAudio.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => { bgmPlayPending = false; }).catch(() => { bgmPlayPending = false; });
+      } else {
+        bgmPlayPending = false;
+      }
+    }
+
+    function syncBgmPlaybackNow() {
+      if (!bgmAudio) return;
+      bgmAudio.muted = isAllMuted() || !bgmOn;
+      bgmAudio.playbackRate = playbackRate;
+      if (!hooks.isPlaying() || bgmAudio.muted) { bgmAudio.pause(); return; }
+      const refT = audio && audio.readyState >= 1 ? audio.currentTime : hooks.getNow();
+      if (bgmAudio.readyState >= 1 && Math.abs(bgmAudio.currentTime - refT) > 0.18) {
+        try { bgmAudio.currentTime = refT; } catch {}
+      }
+      safePlayBgm();
+    }
+
+    function keepBgmInSync(masterTime) {
+      if (!bgmAudio || isAllMuted() || !bgmOn || bgmAudio.seeking) return;
+      if (bgmAudio.paused) { safePlayBgm(); return; }
+      if (bgmAudio.readyState >= 2 && Math.abs(bgmAudio.currentTime - masterTime) > 0.22) {
+        try { bgmAudio.currentTime = masterTime; } catch {}
+      }
+    }
+
+    function resolveSoundBtnSpec() {
+      const allOff = isAllMuted();
+      if (allOff) return ['volumeMute', '取消静音（M）'];
+      if (bgmAudio && !voiceOn && bgmOn) return ['volumeBgm', '声音设置：仅背景音乐（M 静音 / B 开关配乐）'];
+      if (bgmAudio && voiceOn && !bgmOn) return ['volumeVoice', '声音设置：已关背景乐（M 静音 / B 恢复配乐）'];
+      return ['volumeOn', bgmAudio ? '声音设置（M 静音 / B 开关配乐）' : '静音（M）'];
+    }
+
+    function emitAndSync() {
+      const allOff = isAllMuted();
+      if (audio) audio.muted = allOff || !voiceOn;
+      syncBgmPlaybackNow();
+      hooks.onSoundUI();
+      V.emit('onSoundChange', {
+        muted: allOff,
+        voiceOn: !allOff && voiceOn,
+        bgmOn: Boolean(bgmAudio) && !allOff && bgmOn,
+        rawMuted: muted,
+        rawVoiceOn: voiceOn,
+        rawBgmOn: bgmOn,
+      });
+    }
+
+    function setBgm(on) {
+      bgmOn = Boolean(on);
+      if (bgmOn && muted) muted = false;
+      emitAndSync();
+    }
+
+    function setVoice(on) {
+      voiceOn = Boolean(on);
+      if (voiceOn && muted) muted = false;
+      emitAndSync();
+    }
+
+    function setMuted(nextMuted) {
+      muted = Boolean(nextMuted);
+      if (!muted && !voiceOn && (!bgmAudio || !bgmOn)) voiceOn = true;
+      emitAndSync();
+    }
+
+    function toggleVoiceFromMenu() {
+      if (isAllMuted()) { muted = false; voiceOn = true; bgmOn = false; emitAndSync(); }
+      else setVoice(!voiceOn);
+    }
+
+    function toggleBgmFromMenu() {
+      if (isAllMuted()) { muted = false; voiceOn = false; bgmOn = true; emitAndSync(); }
+      else setBgm(!bgmOn);
+    }
+
+    function syncAudioBeforePlay() {
+      const target = targetSeekTime != null ? targetSeekTime : hooks.getNow();
+      if (Math.abs(audio.currentTime - target) > 0.15) {
+        try { audio.currentTime = target; targetSeekTime = null; hooks.markSeekApplied(target); }
+        catch { targetSeekTime = target; }
+      } else {
+        targetSeekTime = null;
+      }
+      safePlayAudio();
+    }
+
+    function startPlayback() {
+      if (audio && audio.error) audio = null;
+      if (bgmAudio && bgmAudio.error) bgmAudio = null;
+      audioBlocked = false;
+      if (audio) {
+        if (audio.readyState >= 1) syncAudioBeforePlay();
+        else audio.addEventListener('loadedmetadata', syncAudioBeforePlay, { once: true });
+      }
+      syncBgmPlaybackNow();
+    }
+
+    function pausePlayback() {
+      if (audio) audio.pause();
+      if (bgmAudio) bgmAudio.pause();
+    }
+
+    function seekTracks(nowVal) {
+      if (bgmAudio && bgmAudio.readyState >= 1) {
+        try { bgmAudio.currentTime = nowVal; } catch {}
+      }
+      if (!audio) return;
+      if (audio.readyState >= 1) {
+        try { audio.currentTime = nowVal; targetSeekTime = null; } catch { targetSeekTime = nowVal; }
+      } else {
+        targetSeekTime = nowVal;
+      }
+    }
+
+    function setRate(rate) {
+      playbackRate = rate;
+      if (audio) audio.playbackRate = rate;
+      if (bgmAudio) bgmAudio.playbackRate = rate;
+    }
+
+    function canUseMasterClock() {
+      return Boolean(audio && !audioBlocked);
+    }
+
+    function canSyncWhileScrubbing() {
+      if (!hooks.isPlaying() || !audio) return false;
+      return !audio.paused && !audio.seeking && audio.readyState >= 2 && targetSeekTime == null;
+    }
+
+    function tickMasterClock() {
+      if (targetSeekTime == null && !audio.paused && !audio.seeking && audio.readyState >= 2) {
+        keepBgmInSync(audio.currentTime);
+        return audio.currentTime;
+      }
+      if (audio.paused && audio.readyState >= 1 && !audio.seeking) safePlayAudio();
+      return null;
+    }
+
+    function createMasterAudio(src) {
+      const el = new Audio();
+      el.preload = 'auto';
+      el.addEventListener('loadedmetadata', () => {
+        el.playbackRate = playbackRate;
+        const nowVal = hooks.getNow();
+        const target = targetSeekTime != null ? targetSeekTime : (nowVal > 0.05 ? nowVal : null);
+        if (target != null) {
+          try { el.currentTime = target; targetSeekTime = null; hooks.markSeekApplied(target); } catch {}
+        }
+        if (hooks.isPlaying() && el.paused) safePlayAudio();
+      });
+      el.addEventListener('seeked', () => { if (hooks.isPlaying() && el.paused) safePlayAudio(); });
+      el.addEventListener('canplay', () => { if (hooks.isPlaying() && el.paused && !el.seeking) safePlayAudio(); });
+      el.addEventListener('ended', () => { if (hooks.isPlaying() && targetSeekTime == null) hooks.onEnded(); });
+      el.addEventListener('error', () => {
+        if (audio === el) { audio = null; if (!isRecord) hooks.onSoundUI(); }
+        audioBlocked = true;
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && hooks.isPlaying() && !el.paused && !el.seeking && targetSeekTime == null && el.readyState >= 2) hooks.onVisibilitySync(el.currentTime);
+      });
+      el.src = src;
+      el.load();
+      return el;
+    }
+
+    function createBgmAudio(src) {
+      const el = new Audio();
+      el.preload = 'auto';
+      el.muted = isAllMuted() || !bgmOn;
+      el.addEventListener('loadedmetadata', () => {
+        el.playbackRate = playbackRate;
+        const refT = audio && audio.readyState >= 1 ? audio.currentTime : hooks.getNow();
+        if (refT > 0.05) { try { el.currentTime = refT; } catch {} }
+        if (hooks.isPlaying() && !el.muted && el.paused) safePlayBgm();
+      });
+      el.addEventListener('error', () => {
+        if (bgmAudio !== el) return;
+        bgmAudio = null;
+        hooks.onBgmUnavailable();
+        hooks.onSoundUI();
+      });
+      el.src = src;
+      el.load();
+      return el;
+    }
+
+    function initTracks(cfg, uiCfg, savedPrefs) {
+      if (uiCfg.bgmDefault === false && !params.has('bgm')) bgmOn = false;
+      if (savedPrefs) {
+        if (typeof savedPrefs.muted === 'boolean') muted = savedPrefs.muted;
+        if (typeof savedPrefs.voice === 'boolean' && !params.has('novoice')) voiceOn = savedPrefs.voice;
+        if (typeof savedPrefs.bgm === 'boolean' && !params.has('nobgm') && !params.has('bgm')) bgmOn = savedPrefs.bgm;
+      }
+      const audioSrc = resolveAudioSource(cfg, isRecord);
+      if (audioSrc) {
+        audio = createMasterAudio(audioSrc);
+        audio.muted = isAllMuted() || !voiceOn;
+      }
+      const bgmSrc = resolveBgmSource(cfg, isRecord);
+      if (bgmSrc) bgmAudio = createBgmAudio(bgmSrc);
+    }
+
+    function getState(nowVal) {
+      const allOff = isAllMuted();
+      return {
+        hasAudio: Boolean(audio),
+        hasBgm: Boolean(bgmAudio),
+        muted: allOff,
+        voiceOn: !allOff && voiceOn,
+        bgmOn: Boolean(bgmAudio) && !allOff && bgmOn,
+        audioTime: audio ? audio.currentTime : null,
+        drift: audio && !audio.paused && targetSeekTime == null ? Math.abs(audio.currentTime - nowVal) : 0,
+        seeking: audio ? audio.seeking : false,
+        targetSeekTime,
+        readyState: audio ? audio.readyState : 0,
+        audioPaused: audio ? audio.paused : true,
+      };
+    }
+
+    return {
+      initTracks, startPlayback, pausePlayback, seekTracks, setRate,
+      setBgm, setVoice, setMuted, toggleVoiceFromMenu, toggleBgmFromMenu,
+      isAllMuted, resolveSoundBtnSpec, canUseMasterClock, canSyncWhileScrubbing,
+      tickMasterClock, hasBgm: () => Boolean(bgmAudio), getState,
+    };
+  };
+})(globalThis.V = globalThis.V || {});
+
+/* core/12-prefs-resume.js · 观看偏好（倍速/字幕/声音/配乐）与断点续播极简 localStorage 记忆 */
+(function (V) {
+  if (typeof location === 'undefined') return;
+
+  let lastFlushTs = 0;
+  let boundPageHide = false;
+
+  function getStorageKey() {
+    const normPath = (location.pathname || '/').replace(/\/index\.html$/i, '/').replace(/\/+$/, '') || '/';
+    const lang = V.getActiveLang ? V.getActiveLang() : '';
+    return 'hv:v1:' + normPath + (lang ? ':' + lang : '');
+  }
+
+  function canPersist(uiCfg) {
+    return !V._isRecord && Boolean(uiCfg && uiCfg.persist !== false);
+  }
+
+  function readSaved(uiCfg) {
+    if (!canPersist(uiCfg)) return null;
+    try {
+      const raw = localStorage.getItem(getStorageKey());
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeSaved(uiCfg, patch) {
+    if (!canPersist(uiCfg)) return;
+    try {
+      const cur = readSaved(uiCfg) || {};
+      localStorage.setItem(getStorageKey(), JSON.stringify(Object.assign(cur, patch)));
+    } catch {}
+  }
+
+  function clearSavedState() {
+    try { localStorage.removeItem(getStorageKey()); } catch {}
+  }
+
+  function resolveSavedResumeTime(params, uiCfg, duration) {
+    if (!canPersist(uiCfg) || params.has('from0')) return 0;
+    const saved = readSaved(uiCfg);
+    const t = saved && Number(saved.t);
+    if (!Number.isFinite(t)) return 0;
+    const minSec = uiCfg.resumeMinSec;
+    const maxSec = Math.max(0, duration - 2);
+    return t >= minSec && t < maxSec ? t : 0;
+  }
+
+  function flushProgress(curNow, isEnded) {
+    const uiCfg = V._getUiCfg ? V._getUiCfg(V.getCfg()) : null;
+    if (!canPersist(uiCfg) || !V.duration) return;
+    if (isEnded || curNow >= V.duration - 2) {
+      writeSaved(uiCfg, { t: 0 });
+    } else if (curNow >= uiCfg.resumeMinSec) {
+      writeSaved(uiCfg, { t: Math.round(curNow * 10) / 10 });
+    }
+  }
+
+  V.clearSavedState = clearSavedState;
+  V._prefsRuntime = { readSaved, writeSaved, clearSavedState, resolveSavedResumeTime, flushProgress };
+
+  V.use({
+    id: 'builtin-prefs-resume',
+    onStart(ctl) {
+      if (ctl.isRecord || boundPageHide) return;
+      boundPageHide = true;
+      addEventListener('pagehide', () => flushProgress(V._now || 0, false));
+    },
+    onRateChange(rate) {
+      writeSaved(V._getUiCfg(V.getCfg()), { rate });
+    },
+    onSoundChange(st) {
+      writeSaved(V._getUiCfg(V.getCfg()), { muted: st.rawMuted, voice: st.rawVoiceOn, bgm: st.rawBgmOn });
+    },
+    onSubsChange(subs) {
+      writeSaved(V._getUiCfg(V.getCfg()), { subs });
+    },
+    onEnded() {
+      writeSaved(V._getUiCfg(V.getCfg()), { t: 0 });
+    },
+    onRender(st) {
+      if (st.isRecord || st.sandbox) return;
+      const ts = performance.now();
+      if (ts - lastFlushTs < 2500) return;
+      lastFlushTs = ts;
+      flushProgress(st.now, st.ended);
+    },
+  });
+})(globalThis.V = globalThis.V || {});
+
+/* core/13-player.js · 舞台挂载、紧凑全图标控制栏、PotPlayer 热区速隐、实时进度浮窗、OSD 轻提示与 V.boot 启动器 */
+(function (V) {
+  if (typeof location === 'undefined') return;
+  const { clamp, h, toggle, syncVideoClip } = V.u;
+  const getUiCfg = V._getUiCfg;
+  const makeCtrlIcon = V._makeCtrlIcon;
+  const swapBtnIcon = V._swapBtnIcon;
+  const fmtTime = V._fmtTime;
+  const fmtRate = V._fmtRate;
+
+  const params = new URLSearchParams(location.search);
+  const RECORD = params.has('record') || params.has('capture');
+  const DEV = params.has('dev') && !RECORD;
+  V._isRecord = RECORD;
+
+  let stage = null, current = null, now = 0, prevRenderNow = 0, playing = false;
+  let lastTs = 0, pauseBaseTs = 0, ended = false, scrubbing = false;
+  let showSubs = !params.has('nosubs'), playbackRate = 1, loopScene = false;
+  let lastSeekTarget = -1, lastSeekAt = 0, activeCueIdx = -1;
+  let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0, inHotZone = false;
+  let wipeState = { name: '', handler: null, dom: null };
+  const sandboxState = { active: false, entering: false, returnTime: null, el: null, txtEl: null, backEl: null };
+  const ui = {};
+  let audioRt = null;
 
   function buildCustomControlBtn(c, pos, uiCfg) {
     if (typeof c.render === 'function') return c.render(h, V);
@@ -1426,7 +1959,7 @@
       h('button', { class: 'ctrl-icon-btn', 'data-act': 'play', 'data-state': 'paused', 'aria-pressed': 'false', title: '播放（空格）', 'aria-label': '播放（空格）' }, makeCtrlIcon(uiCfg.icons.play)),
       ...renderCustomControls('left', uiCfg),
       h('span', { class: 'time' }, '0:00'),
-      h('div', { class: 'track' }, h('div', { class: 'fill' }), h('i', { class: 'thumb' })),
+      h('div', { class: 'track' }, h('div', { class: 'fill' }), h('i', { class: 'thumb' }), h('div', { class: 'track-tip' })),
       h('div', { class: 'chap-wrap' },
         h('button', { class: 'chap-trigger', 'data-act': 'chap', title: '切换章节 / 搜索台词（/）' }, h('span', { class: 'chap-cur-txt' }), h('i', { class: 'chap-caret' }, makeCtrlIcon(uiCfg.icons.chapCaret))),
         h('div', { class: 'chap-menu' }, h('div', { class: 'chap-menu-hd' }, '章节导航 · CHAPTERS'), h('div', { class: 'chap-list' }))),
@@ -1454,9 +1987,11 @@
     const sbTxt = h('span', { class: 'v-sandbox-txt egg-ban-txt' }, '🎮 彩蛋试玩中');
     const sbBack = h('button', { class: 'v-sandbox-back egg-back-btn', 'data-interactive': '1', type: 'button' }, '↩ 返回终章');
     const sbBar = h('div', { class: 'v-sandbox-bar egg-banner', 'data-interactive': '1' }, sbTxt, sbBack);
+    const osdEl = h('div', { id: 'osd', 'aria-live': 'polite' });
     sandboxState.el = sbBar;
     sandboxState.txtEl = sbTxt;
     sandboxState.backEl = sbBack;
+    ui.osd = osdEl;
 
     const vp = h('div', { id: 'viewport' },
       h('div', { id: 'stage' },
@@ -1471,6 +2006,7 @@
         h('div', { id: 'checkpoint-overlay' }),
         h('div', { id: 'wipe' }),
         h('div', { id: 'safe-guide' }, h('div', { class: 'safe-action' }), h('div', { class: 'safe-sub' }, 'SUBTITLE SAFE ZONE'))),
+      osdEl,
       h('div', { id: 'start-hint' }, cfg.startHint || '▶ 点击画面开始播放'));
 
     document.body.prepend(vp, buildControlsBar(cfg, uiCfg));
@@ -1525,98 +2061,6 @@
     if (el && !el.classList.contains('is-off')) {
       el.querySelector('.hud-bar').style.width = clamp(now / V.duration) * 100 + '%';
     }
-  }
-
-  const SUB_VAR_MAP = [
-    ['left', '--sub-left'], ['right', '--sub-right'], ['top', '--sub-top'], ['bottom', '--sub-bottom'],
-    ['offsetX', '--sub-offset-x'], ['offsetY', '--sub-offset-y'], ['align', '--sub-align'],
-    ['maxWidth', '--sub-max-w'], ['padding', '--sub-padding'], ['gap', '--sub-gap'], ['zIndex', '--sub-z'],
-  ];
-
-  function getSubCfg() {
-    const cfg = V.getCfg();
-    return Object.assign({}, cfg.subtitles || {}, V.subtitles || {});
-  }
-
-  function resolveSubLayoutObj(spec, subCfg) {
-    if (!spec) return { pos: 'center' };
-    if (typeof spec === 'string') {
-      const m = subCfg && subCfg.modes && subCfg.modes[spec];
-      return m ? Object.assign({ pos: 'center' }, m) : { pos: spec };
-    }
-    return Object.assign({ pos: spec.pos || 'center' }, spec);
-  }
-
-  function applySubLayout(spec) {
-    if (!subs) return;
-    const obj = resolveSubLayoutObj(spec, getSubCfg());
-    subs.dataset.subPos = obj.pos || 'center';
-    for (const [prop, cssVar] of SUB_VAR_MAP) {
-      const val = obj[prop];
-      if (val == null || val === '') subs.style.removeProperty(cssVar);
-      else subs.style.setProperty(cssVar, typeof val === 'number' && prop !== 'zIndex' ? `${val}px` : String(val));
-    }
-  }
-  V.setSubLayout = applySubLayout;
-
-  function mountSubSlot(slotEl, factory) {
-    if (!slotEl || !factory) return;
-    slotEl.innerHTML = '';
-    const res = typeof factory === 'function' ? factory(h, V) : factory;
-    if (!res) return;
-    if (res.nodeType) slotEl.appendChild(res);
-    else slotEl.innerHTML = String(res);
-  }
-
-  function mountSubSlots() {
-    const subCfg = getSubCfg();
-    mountSubSlot(subLead, subCfg.lead);
-    mountSubSlot(subTail, subCfg.tail);
-    if (subCfg.layout || subCfg.position) applySubLayout(subCfg.layout || subCfg.position);
-  }
-
-  function runSubHook(subCfg, cue, sc, idx, lt, clock) {
-    const fn = subCfg.onUpdate || subCfg.update;
-    if (typeof fn !== 'function') return;
-    const lineCue = activeCueIdx >= 0 ? sc.cues[activeCueIdx] : null;
-    const info = { t: now, clock, lt, scene: sc, sceneIndex: idx, lineCue, speaking: Boolean(cue), energy: V.getSceneEnergy(sc, idx, lt) };
-    fn(cue, info, { subs, lead: subLead, tail: subTail, speaker: subSpeaker, text: subText });
-  }
-
-  function syncSceneSubLayout(sc, lt) {
-    const spec = sc.subLayout || sc.subtitles;
-    if (!spec) return;
-    applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
-  }
-
-  function updateSubDomText(cue) {
-    if (subSpeaker && subSpeaker._sp !== (cue.speaker || '')) {
-      subSpeaker._sp = cue.speaker || '';
-      subSpeaker.textContent = subSpeaker._sp;
-      subSpeaker.classList.toggle('is-on', Boolean(subSpeaker._sp));
-    }
-    if (subText._t !== cue.text) {
-      subText.firstChild.textContent = cue.text;
-      subText.lastChild.textContent = cue.text;
-      subText._t = cue.text;
-    }
-  }
-
-  function updateSubs(sc, idx, lt, clock) {
-    const subCfg = getSubCfg();
-    syncSceneSubLayout(sc, lt);
-    const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
-    let cue = null;
-    activeCueIdx = -1;
-    sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
-    list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
-    subs.style.visibility = cue && showSubs ? 'visible' : 'hidden';
-    if (cue) {
-      const a = Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
-      subs.style.opacity = String(clamp(a));
-      updateSubDomText(cue);
-    }
-    runSubHook(subCfg, cue, sc, idx, lt, clock);
   }
 
   function syncSceneVideoClips(lt) {
@@ -1720,60 +2164,16 @@
     document.body.classList.toggle('started', now > 0.05);
     sc.update(shouldContinueSceneAtEnd(sc, idle) ? lt + idle : lt, sc.ctx);
     syncSceneVideoClips(lt);
-    updateSubs(sc, idx, lt, clock);
+    activeCueIdx = V._subtitlesRuntime.updateSubs(sc, idx, lt, now, clock, showSubs);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
     V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: RECORD, playing, scrubbing, pause, play });
-    V.emit('onRender', { now, clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx, playing, scrubbing, hasAudio: Boolean(audio), isRecord: RECORD, muted });
+    const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false };
+    V.emit('onRender', {
+      now, clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
+      playing, scrubbing, sandbox: sandboxState.active,
+      hasAudio: aState.hasAudio, isRecord: RECORD, muted: aState.muted,
+    });
     if (!RECORD) updateUI();
-  }
-
-  function safePlayAudio() {
-    if (!audio || !playing || !audio.paused || playPending) return;
-    playPending = true;
-    audio.playbackRate = playbackRate;
-    const p = audio.play();
-    if (p && typeof p.then === 'function') {
-      p.then(() => { playPending = false; audioBlocked = false; })
-       .catch(err => { playPending = false; if (err && err.name === 'NotAllowedError') audioBlocked = true; });
-    } else {
-      playPending = false;
-    }
-  }
-
-  function safePlayBgm() {
-    if (!bgmAudio || !playing || bgmAudio.muted || !bgmAudio.paused || bgmPlayPending) return;
-    bgmPlayPending = true;
-    bgmAudio.playbackRate = playbackRate;
-    const p = bgmAudio.play();
-    if (p && typeof p.then === 'function') {
-      p.then(() => { bgmPlayPending = false; }).catch(() => { bgmPlayPending = false; });
-    } else {
-      bgmPlayPending = false;
-    }
-  }
-
-  function isAllMuted() {
-    return muted || (!voiceOn && (!bgmAudio || !bgmOn));
-  }
-
-  function syncBgmPlaybackNow() {
-    if (!bgmAudio) return;
-    bgmAudio.muted = isAllMuted() || !bgmOn;
-    bgmAudio.playbackRate = playbackRate;
-    if (!playing || bgmAudio.muted) { bgmAudio.pause(); return; }
-    const refT = audio && audio.readyState >= 1 ? audio.currentTime : now;
-    if (bgmAudio.readyState >= 1 && Math.abs(bgmAudio.currentTime - refT) > 0.18) {
-      try { bgmAudio.currentTime = refT; } catch {}
-    }
-    safePlayBgm();
-  }
-
-  function keepBgmInSync(masterTime) {
-    if (!bgmAudio || isAllMuted() || !bgmOn || bgmAudio.seeking) return;
-    if (bgmAudio.paused) { safePlayBgm(); return; }
-    if (bgmAudio.readyState >= 2 && Math.abs(bgmAudio.currentTime - masterTime) > 0.22) {
-      try { bgmAudio.currentTime = masterTime; } catch {}
-    }
   }
 
   function showUiHold() {
@@ -1794,51 +2194,29 @@
     if (!inHotZone) scheduleUiHide(ms);
   }
 
-  function resolveSoundBtnSpec(allOff) {
-    if (allOff) return ['volumeMute', '取消静音（M）'];
-    if (bgmAudio && !voiceOn && bgmOn) return ['volumeBgm', '声音设置：仅背景音乐（M 静音 / B 开关配乐）'];
-    if (bgmAudio && voiceOn && !bgmOn) return ['volumeVoice', '声音设置：已关背景乐（M 静音 / B 恢复配乐）'];
-    return ['volumeOn', bgmAudio ? '声音设置（M 静音 / B 开关配乐）' : '静音（M）'];
+  function flashOsd(text, ms = 680) {
+    const uiCfg = getUiCfg(V.getCfg());
+    if (RECORD || !uiCfg.osd || !ui.osd || !text) return;
+    ui.osd.textContent = text;
+    ui.osd.classList.add('is-show');
+    clearTimeout(osdTimer);
+    osdTimer = setTimeout(() => { if (ui.osd) ui.osd.classList.remove('is-show'); }, ms);
   }
+  V.flashOsd = flashOsd;
 
   function syncSoundMenuUI() {
-    const allOff = isAllMuted();
+    if (!audioRt) return;
+    const st = audioRt.getState(now);
     if (ui.mute) {
       const icons = getUiCfg(V.getCfg()).icons;
-      const [key, label] = resolveSoundBtnSpec(allOff);
-      ui.mute.classList.toggle('is-off', allOff);
+      const [key, label] = audioRt.resolveSoundBtnSpec();
+      ui.mute.classList.toggle('is-off', st.muted);
       ui.mute.dataset.soundMode = key;
       swapBtnIcon(ui.mute, key, icons[key], label);
     }
-    if (ui.soundVoice) toggle(ui.soundVoice, 'on', !allOff && voiceOn);
-    if (ui.soundBgm) toggle(ui.soundBgm, 'on', !allOff && bgmOn);
-    if (ui.soundAllMute) toggle(ui.soundAllMute, 'on', allOff);
-  }
-
-  function applySoundState() {
-    const allOff = isAllMuted();
-    if (audio) audio.muted = allOff || !voiceOn;
-    syncBgmPlaybackNow();
-    syncSoundMenuUI();
-    V.emit('onSoundChange', { muted: allOff, voiceOn: !allOff && voiceOn, bgmOn: Boolean(bgmAudio) && !allOff && bgmOn });
-  }
-
-  function setBgm(on) {
-    bgmOn = Boolean(on);
-    if (bgmOn && muted) muted = false;
-    applySoundState();
-  }
-
-  function setVoice(on) {
-    voiceOn = Boolean(on);
-    if (voiceOn && muted) muted = false;
-    applySoundState();
-  }
-
-  function setMuted(nextMuted) {
-    muted = Boolean(nextMuted);
-    if (!muted && !voiceOn && (!bgmAudio || !bgmOn)) voiceOn = true;
-    applySoundState();
+    if (ui.soundVoice) toggle(ui.soundVoice, 'on', st.voiceOn);
+    if (ui.soundBgm) toggle(ui.soundBgm, 'on', st.bgmOn);
+    if (ui.soundAllMute) toggle(ui.soundAllMute, 'on', st.muted);
   }
 
   function checkSceneLoop(nextT) {
@@ -1857,14 +2235,13 @@
 
   function advanceAudioClock(ts) {
     lastTs = ts;
-    if (targetSeekTime == null && !audio.paused && !audio.seeking && audio.readyState >= 2) {
-      keepBgmInSync(audio.currentTime);
-      if (checkSceneLoop(audio.currentTime)) return;
-      if (audio.ended || audio.currentTime >= V.duration - 0.01) finishPlayback();
-      else render(audio.currentTime, 0);
+    const mTime = audioRt.tickMasterClock();
+    if (mTime != null) {
+      if (checkSceneLoop(mTime)) return;
+      if (mTime >= V.duration - 0.01) finishPlayback();
+      else render(mTime, 0);
       return;
     }
-    if (audio.paused && audio.readyState >= 1 && !audio.seeking) safePlayAudio();
     if (current && current.live) render(now, 0);
   }
 
@@ -1876,36 +2253,22 @@
     else render(now + dt, 0);
   }
 
-  function canSyncAudioWhileScrubbing() {
-    if (!playing || !audio) return false;
-    return !audio.paused && !audio.seeking && audio.readyState >= 2 && targetSeekTime == null;
-  }
-
   function frame(ts) {
     if (scrubbing) {
       lastTs = ts;
       pauseBaseTs = ts;
-      if (canSyncAudioWhileScrubbing()) render(audio.currentTime, 0);
-      else if (current && current.live) render(now, 0);
+      if (audioRt && audioRt.canSyncWhileScrubbing()) {
+        const st = audioRt.getState(now);
+        if (st.audioTime != null) render(st.audioTime, 0);
+      } else if (current && current.live) render(now, 0);
     } else if (playing) {
-      if (audio && !audioBlocked) advanceAudioClock(ts);
+      if (audioRt && audioRt.canUseMasterClock()) advanceAudioClock(ts);
       else advanceWallClock(ts);
     } else if (current && current.live && !RECORD) {
       const idleSec = pauseBaseTs > 0 ? Math.max(0, (ts - pauseBaseTs) / 1000) : 0;
       render(now, idleSec);
     }
     requestAnimationFrame(frame);
-  }
-
-  function syncAudioBeforePlay() {
-    const target = targetSeekTime != null ? targetSeekTime : now;
-    if (Math.abs(audio.currentTime - target) > 0.15) {
-      try { audio.currentTime = target; lastSeekTarget = target; lastSeekAt = performance.now(); targetSeekTime = null; }
-      catch { targetSeekTime = target; }
-    } else {
-      targetSeekTime = null;
-    }
-    safePlayAudio();
   }
 
   function positionSoundMenu(bar) {
@@ -1941,15 +2304,8 @@
     V._checkpointsRuntime.closeCheckpointOverlay();
     setOpenMenu(document.getElementById('controls'), '');
     playing = true;
-    if (audio && audio.error) audio = null;
-    if (bgmAudio && bgmAudio.error) bgmAudio = null;
-    audioBlocked = false;
     lastTs = performance.now();
-    if (audio) {
-      if (audio.readyState >= 1) syncAudioBeforePlay();
-      else audio.addEventListener('loadedmetadata', syncAudioBeforePlay, { once: true });
-    }
-    syncBgmPlaybackNow();
+    if (audioRt) audioRt.startPlayback();
     document.body.classList.add('playing');
     if (!RECORD) updateUI();
   }
@@ -1960,13 +2316,10 @@
     ended = now >= V.duration - 0.01;
     document.body.classList.remove('playing');
     document.body.classList.toggle('is-ended', ended);
-    if (audio) audio.pause();
-    if (bgmAudio) bgmAudio.pause();
+    if (audioRt) audioRt.pausePlayback();
     for (const clip of V._videoClips) if (clip.pause) clip.pause();
     if (!RECORD) updateUI();
   }
-
-  function fmtRate(r) { return Number.isInteger(r) ? `${r}.0x` : `${r}x`; }
 
   function syncRateMenuSelection() {
     if (!ui.rateItems) return;
@@ -1995,11 +2348,18 @@
   function setRate(rate) {
     playbackRate = clamp(Number(rate) || 1, 0.25, 4);
     V._playbackRate = playbackRate;
-    if (audio) audio.playbackRate = playbackRate;
-    if (bgmAudio) bgmAudio.playbackRate = playbackRate;
+    if (audioRt) audioRt.setRate(playbackRate);
     syncRateBtnUI();
     syncRateMenuSelection();
     V.emit('onRateChange', playbackRate);
+  }
+
+  function setSubs(nextOn) {
+    showSubs = Boolean(nextOn);
+    document.body.classList.toggle('nosubs', !showSubs);
+    syncSubsBtnUI();
+    render(now);
+    V.emit('onSubsChange', showSubs);
   }
 
   function seek(t) {
@@ -2013,18 +2373,8 @@
     lastSeekAt = ts;
     render(target, 0);
     V.emit('onSeek', target);
-    if (bgmAudio && bgmAudio.readyState >= 1) {
-      try { bgmAudio.currentTime = now; } catch {}
-    }
-    if (!audio) return;
-    if (audio.readyState >= 1) {
-      try { audio.currentTime = now; targetSeekTime = null; } catch { targetSeekTime = now; }
-    } else {
-      targetSeekTime = now;
-    }
+    if (audioRt) audioRt.seekTracks(now);
   }
-
-  const fmtTime = s => { s = Math.max(0, Math.floor(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
 
   function mountHudTicks(uiCfg) {
     const hudTrack = document.querySelector('#hud .hud-track');
@@ -2050,14 +2400,23 @@
 
   function bindTrackHoverHint(track) {
     if (!track) return;
+    const tip = track.querySelector('.track-tip');
     track.addEventListener('pointermove', e => {
-      if (V.duration <= 0) return;
+      if (!tip || V.duration <= 0) return;
       const rect = track.getBoundingClientRect();
-      const t = clamp((e.clientX - rect.left) / Math.max(1, rect.width)) * V.duration;
+      const ratio = clamp((e.clientX - rect.left) / Math.max(1, rect.width));
+      const t = ratio * V.duration;
       const sc = sceneAt(t);
       const idx = V.scenes.indexOf(sc);
-      track.title = sc ? `${String(idx + 1).padStart(2, '0')} · ${sc.title} · ${fmtTime(t)}` : fmtTime(t);
+      tip.textContent = sc ? `${String(idx + 1).padStart(2, '0')} · ${sc.title} · ${fmtTime(t)}` : fmtTime(t);
+      const half = (tip.offsetWidth || 96) / 2;
+      const x = clamp(ratio * rect.width, half, Math.max(half, rect.width - half));
+      tip.style.left = `${Math.round(x)}px`;
+      tip.classList.add('is-show');
     });
+    const hideTip = () => { if (tip) tip.classList.remove('is-show'); };
+    track.addEventListener('pointerleave', hideTip);
+    track.addEventListener('pointercancel', hideTip);
   }
 
   function buildChapters(bar) {
@@ -2102,17 +2461,9 @@
     ui.soundVoice = h('div', { class: 'sound-item', 'data-sound': 'voice' }, h('span', null, '解说声音'), h('i', null, '✓'));
     ui.soundBgm = h('div', { class: 'sound-item', 'data-sound': 'bgm' }, h('span', null, '背景音乐'), h('i', null, '✓'));
     ui.soundAllMute = h('div', { class: 'sound-item', 'data-sound': 'mute' }, h('span', null, '全部静音'), h('i', null, '✓'));
-    ui.soundVoice.onclick = e => {
-      e.stopPropagation();
-      if (isAllMuted()) { muted = false; voiceOn = true; bgmOn = false; applySoundState(); }
-      else setVoice(!voiceOn);
-    };
-    ui.soundBgm.onclick = e => {
-      e.stopPropagation();
-      if (isAllMuted()) { muted = false; voiceOn = false; bgmOn = true; applySoundState(); }
-      else setBgm(!bgmOn);
-    };
-    ui.soundAllMute.onclick = e => { e.stopPropagation(); setMuted(!isAllMuted()); };
+    ui.soundVoice.onclick = e => { e.stopPropagation(); audioRt.toggleVoiceFromMenu(); };
+    ui.soundBgm.onclick = e => { e.stopPropagation(); audioRt.toggleBgmFromMenu(); };
+    ui.soundAllMute.onclick = e => { e.stopPropagation(); audioRt.setMuted(!audioRt.isAllMuted()); };
     menu.append(ui.soundVoice, ui.soundBgm, h('div', { class: 'sound-sep' }), ui.soundAllMute);
     syncSoundMenuUI();
   }
@@ -2198,8 +2549,8 @@
     try { window.parent.postMessage({ type: 'video:webfull', active: webFull }, '*'); } catch {}
   }
 
-  function fallbackWebFull(toggle) {
-    if (ui.webfull) setWebFull(toggle ? !webFull : true);
+  function fallbackWebFull(toggleMode) {
+    if (ui.webfull) setWebFull(toggleMode ? !webFull : true);
   }
 
   function toggleOsFull() {
@@ -2217,6 +2568,7 @@
     const idx = V.scenes.indexOf(current);
     if (delta > 0 && idx < V.scenes.length - 1) seek(V.scenes[idx + 1].start + 0.01);
     if (delta < 0) seek(V.scenes[Math.max(0, now - current.start < 1.5 ? idx - 1 : idx)].start + 0.01);
+    if (current) flashOsd(`${String(V.scenes.indexOf(current) + 1).padStart(2, '0')} · ${current.title}`);
   }
 
   function isEditableTarget(target) {
@@ -2234,24 +2586,42 @@
     else if (!isOsFull() && webFull) { setWebFull(false); e.preventDefault(); }
   }
 
+  function toggleMuteShortcut() {
+    const next = !audioRt.isAllMuted();
+    audioRt.setMuted(next);
+    flashOsd(next ? '已静音' : '声音已开启');
+  }
+
+  function toggleBgmShortcut() {
+    if (!audioRt.hasBgm()) return;
+    const next = !audioRt.getState(now).bgmOn;
+    audioRt.setBgm(next);
+    flashOsd(next ? '背景音乐已开' : '背景音乐已关');
+  }
+
+  function seekDeltaShortcut(stepSec) {
+    seek(now + stepSec);
+    flashOsd(`${stepSec > 0 ? '+' : ''}${stepSec}s · ${fmtTime(now)}`);
+  }
+
   function bindKeyboard(bar) {
     const keyMap = {
       '.': () => { pause(); seek(now + 1 / 30); },
       ',': () => { pause(); seek(now - 1 / 30); },
-      ']': () => { jumpChapterDelta(1); flashUi(); },
-      PageDown: () => { jumpChapterDelta(1); flashUi(); },
-      '[': () => { jumpChapterDelta(-1); flashUi(); },
-      PageUp: () => { jumpChapterDelta(-1); flashUi(); },
+      ']': () => jumpChapterDelta(1),
+      PageDown: () => jumpChapterDelta(1),
+      '[': () => jumpChapterDelta(-1),
+      PageUp: () => jumpChapterDelta(-1),
       w: () => fallbackWebFull(true),
       W: () => fallbackWebFull(true),
       f: toggleOsFull,
       F: toggleOsFull,
-      m: () => { setMuted(!isAllMuted()); flashUi(); },
-      M: () => { setMuted(!isAllMuted()); flashUi(); },
-      b: () => { if (bgmAudio) { setBgm(!(!isAllMuted() && bgmOn)); flashUi(); } },
-      B: () => { if (bgmAudio) { setBgm(!(!isAllMuted() && bgmOn)); flashUi(); } },
-      ArrowRight: e => { seek(now + (e.shiftKey ? 1 : 5)); flashUi(); },
-      ArrowLeft: e => { seek(now - (e.shiftKey ? 1 : 5)); flashUi(); },
+      m: toggleMuteShortcut,
+      M: toggleMuteShortcut,
+      b: toggleBgmShortcut,
+      B: toggleBgmShortcut,
+      ArrowRight: e => seekDeltaShortcut(e.shiftKey ? 1 : 5),
+      ArrowLeft: e => seekDeltaShortcut(e.shiftKey ? -1 : -5),
     };
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') { handleEscapeKey(bar, e); return; }
@@ -2334,17 +2704,12 @@
 
     syncRateBtnUI();
     syncSubsBtnUI();
-    ui.subs.onclick = () => {
-      showSubs = !showSubs;
-      document.body.classList.toggle('nosubs', !showSubs);
-      syncSubsBtnUI();
-      render(now);
-    };
+    ui.subs.onclick = () => setSubs(!showSubs);
     syncSoundMenuUI();
     ui.mute.onclick = e => {
       e.stopPropagation();
-      if (bgmAudio) setOpenMenu(bar, bar.dataset.menu === 'sound' ? '' : 'sound');
-      else setMuted(!isAllMuted());
+      if (audioRt.hasBgm()) setOpenMenu(bar, bar.dataset.menu === 'sound' ? '' : 'sound');
+      else audioRt.setMuted(!audioRt.isAllMuted());
     };
     if (ui.webfull) ui.webfull.onclick = () => setWebFull(!webFull);
     ui.full.onclick = toggleOsFull;
@@ -2385,32 +2750,6 @@
     if (vp) vp.style.setProperty('--k', k);
   }
 
-  function initAudio(src) {
-    const el = new Audio();
-    el.preload = 'auto';
-    el.addEventListener('loadedmetadata', () => {
-      el.playbackRate = playbackRate;
-      const target = targetSeekTime != null ? targetSeekTime : (now > 0.05 ? now : null);
-      if (target != null) {
-        try { el.currentTime = target; lastSeekTarget = target; lastSeekAt = performance.now(); targetSeekTime = null; } catch {}
-      }
-      if (playing && el.paused) safePlayAudio();
-    });
-    el.addEventListener('seeked', () => { if (playing && el.paused) safePlayAudio(); });
-    el.addEventListener('canplay', () => { if (playing && el.paused && !el.seeking) safePlayAudio(); });
-    el.addEventListener('ended', () => { if (playing && targetSeekTime == null) finishPlayback(); });
-    el.addEventListener('error', () => {
-      if (audio === el) { audio = null; if (!RECORD) syncSoundMenuUI(); }
-      audioBlocked = true;
-    });
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && playing && !el.paused && !el.seeking && targetSeekTime == null && el.readyState >= 2) render(el.currentTime);
-    });
-    el.src = src;
-    el.load();
-    return el;
-  }
-
   function seekVideoElementAsync(vid, targetSec) {
     return new Promise(resolve => {
       if (vid.readyState === 0) {
@@ -2440,49 +2779,30 @@
     if (tasks.length) await Promise.all(tasks);
   }
 
-  function resolveInitialTime() {
-    if (params.has('t')) return parseFloat(params.get('t')) || 0;
+  function resolveInitialTime(uiCfg) {
+    if (params.has('t')) return { t: parseFloat(params.get('t')) || 0, resumed: false };
     if (params.has('scene')) {
       const sIdx = clamp(+params.get('scene') || 0, 0, Math.max(0, V.scenes.length - 1));
-      return V.scenes[sIdx] ? V.scenes[sIdx].start + 0.01 : 0;
+      return { t: V.scenes[sIdx] ? V.scenes[sIdx].start + 0.01 : 0, resumed: false };
     }
     try {
       const hmrT = sessionStorage.getItem('__video_hmr_t');
-      if (hmrT != null) { sessionStorage.removeItem('__video_hmr_t'); return parseFloat(hmrT) || 0; }
+      if (hmrT != null) { sessionStorage.removeItem('__video_hmr_t'); return { t: parseFloat(hmrT) || 0, resumed: false }; }
     } catch {}
-    return 0;
+    const savedT = V._prefsRuntime ? V._prefsRuntime.resolveSavedResumeTime(params, uiCfg, V.duration) : 0;
+    return { t: savedT, resumed: savedT > 0 };
   }
 
-  function initBgmAudio(src) {
-    const el = new Audio();
-    el.preload = 'auto';
-    el.muted = isAllMuted() || !bgmOn;
-    el.addEventListener('loadedmetadata', () => {
-      el.playbackRate = playbackRate;
-      const refT = audio && audio.readyState >= 1 ? audio.currentTime : now;
-      if (refT > 0.05) { try { el.currentTime = refT; } catch {} }
-      if (playing && !el.muted && el.paused) safePlayBgm();
-    });
-    el.addEventListener('error', () => {
-      if (bgmAudio !== el) return;
-      bgmAudio = null;
-      const bar = document.getElementById('controls');
-      if (bar && bar.dataset.menu === 'sound') setOpenMenu(bar, '');
-      syncSoundMenuUI();
-    });
-    el.src = src;
-    el.load();
-    return el;
-  }
-
-  function resolveAudioSource(cfg) {
-    if (cfg.audioSrc === false || RECORD) return null;
-    return (V.voice && V.voice.src) || cfg.audioSrc || null;
-  }
-
-  function resolveBgmSource(cfg) {
-    if (cfg.audioSrc === false || cfg.bgm === false || cfg.bgmSrc === false || RECORD) return null;
-    return (V.voice && V.voice.bgmSrc) || cfg.bgmSrc || null;
+  function applySavedPrefs(saved) {
+    if (!saved) return;
+    if (typeof saved.subs === 'boolean' && !params.has('nosubs')) {
+      showSubs = saved.subs;
+      document.body.classList.toggle('nosubs', !showSubs);
+    }
+    if (typeof saved.rate === 'number' && Number.isFinite(saved.rate)) {
+      playbackRate = clamp(saved.rate, 0.25, 4);
+      V._playbackRate = playbackRate;
+    }
   }
 
   function exposeBridge(cfg) {
@@ -2495,9 +2815,12 @@
       seekVisual: t => render(t, 0),
       seekAsync: V.seekToAsync,
       setRate,
-      setBgm,
-      setVoice,
-      setMuted,
+      setSubs,
+      setBgm: on => audioRt.setBgm(on),
+      setVoice: on => audioRt.setVoice(on),
+      setMuted: on => audioRt.setMuted(on),
+      clearSavedState: V.clearSavedState,
+      flashOsd,
       play,
       pause,
       replay,
@@ -2508,24 +2831,28 @@
       openSearch: q => (V.openSearch ? V.openSearch(q) : undefined),
       getDeepLink: t => (V.getDeepLink ? V.getDeepLink(t) : ''),
       resume: V.resume,
-      getSyncState: () => ({
-        now,
-        clock: V._clock || now,
-        ended,
-        sandbox: sandboxState.active,
-        playing,
-        playbackRate,
-        muted: isAllMuted(),
-        hasBgm: Boolean(bgmAudio),
-        bgmEnabled: Boolean(bgmAudio) && !isAllMuted() && bgmOn,
-        voiceEnabled: Boolean(audio) && !isAllMuted() && voiceOn,
-        audioTime: audio ? audio.currentTime : null,
-        drift: audio && !audio.paused && targetSeekTime == null ? Math.abs(audio.currentTime - now) : 0,
-        seeking: audio ? audio.seeking : false,
-        targetSeekTime,
-        readyState: audio ? audio.readyState : 0,
-        audioPaused: audio ? audio.paused : true,
-      }),
+      getSyncState: () => {
+        const a = audioRt.getState(now);
+        return {
+          now,
+          clock: V._clock || now,
+          ended,
+          sandbox: sandboxState.active,
+          playing,
+          playbackRate,
+          subsEnabled: showSubs,
+          muted: a.muted,
+          hasBgm: a.hasBgm,
+          bgmEnabled: a.bgmOn,
+          voiceEnabled: a.voiceOn,
+          audioTime: a.audioTime,
+          drift: a.drift,
+          seeking: a.seeking,
+          targetSeekTime: a.targetSeekTime,
+          readyState: a.readyState,
+          audioPaused: a.audioPaused,
+        };
+      },
       scenes: V.scenes.map(s => ({ title: s.title, start: s.start, duration: s.duration, cues: s.cues })),
     };
   }
@@ -2534,40 +2861,48 @@
     V.mountStage();
     const cfg = V.getCfg();
     const uiCfg = getUiCfg(cfg);
-    if (uiCfg.bgmDefault === false && !params.has('bgm')) bgmOn = false;
     if (cfg.title) document.title = cfg.title;
     stage = document.getElementById('stage');
-    subs = document.getElementById('subs');
-    subLead = subs.querySelector('.sub-lead');
-    subTail = subs.querySelector('.sub-tail');
-    subSpeaker = subs.querySelector('.sub-speaker');
-    subText = subs.querySelector('.sub-text');
-    mountSubSlots();
+    V._subtitlesRuntime.bindSubElements(document.getElementById('subs'));
     V.layout();
     mountHudTicks(uiCfg);
-    V._layersRuntime.mountLayers(stage, subs);
+    V._layersRuntime.mountLayers(stage, document.getElementById('subs'));
 
-    const audioSrc = resolveAudioSource(cfg);
-    if (audioSrc) {
-      audio = initAudio(audioSrc);
-      audio.muted = isAllMuted() || !voiceOn;
-    }
-    const bgmSrc = resolveBgmSource(cfg);
-    if (bgmSrc) bgmAudio = initBgmAudio(bgmSrc);
+    const savedPrefs = V._prefsRuntime ? V._prefsRuntime.readSaved(uiCfg) : null;
+    applySavedPrefs(savedPrefs);
+
+    audioRt = V._createAudioRuntime({
+      params,
+      isRecord: RECORD,
+      isPlaying: () => playing,
+      getNow: () => now,
+      markSeekApplied: target => { lastSeekTarget = target; lastSeekAt = performance.now(); },
+      onSoundUI: syncSoundMenuUI,
+      onEnded: finishPlayback,
+      onVisibilitySync: t => render(t, 0),
+      onBgmUnavailable: () => {
+        const bar = document.getElementById('controls');
+        if (bar && bar.dataset.menu === 'sound') setOpenMenu(bar, '');
+      },
+    });
+    audioRt.setRate(playbackRate);
+    audioRt.initTracks(cfg, uiCfg, savedPrefs);
 
     V.seekTo = t => render(t, 0);
     V.seekToAsync = async t => { render(t, 0); await waitStageAssets(); };
-    V.setBgm = setBgm;
-    V.setVoice = setVoice;
-    V.setMuted = setMuted;
+    V.setSubs = setSubs;
+    V.setBgm = on => audioRt.setBgm(on);
+    V.setVoice = on => audioRt.setVoice(on);
+    V.setMuted = on => audioRt.setMuted(on);
     V.enterSandbox = enterSandbox;
     V.exitSandbox = exitSandbox;
     V.tryEgg = tryEgg;
     V.replay = replay;
     V._playerCtl = {
-      play, pause, replay, seek, setRate, setBgm, setVoice, setMuted,
+      play, pause, replay, seek, setRate, setSubs,
+      setBgm: V.setBgm, setVoice: V.setVoice, setMuted: V.setMuted,
       enterSandbox, exitSandbox, tryEgg,
-      fmtTime, updateUI, flashUi,
+      fmtTime, updateUI, flashUi, flashOsd,
       setOpenMenu: m => setOpenMenu(document.getElementById('controls'), m),
       getRate: () => playbackRate,
       toggleLoopScene: () => (loopScene = !loopScene),
@@ -2582,9 +2917,13 @@
     fit();
     addEventListener('resize', fit);
     pauseBaseTs = performance.now();
-    const t0 = resolveInitialTime();
-    if (t0 > 0) seek(t0);
-    else render(0, 0);
+    const initPos = resolveInitialTime(uiCfg);
+    if (initPos.t > 0) {
+      seek(initPos.t);
+      if (initPos.resumed) flashOsd(`已续播 ${fmtTime(initPos.t)}`, 1200);
+    } else {
+      render(0, 0);
+    }
     requestAnimationFrame(frame);
     if (params.has('autoplay')) play();
     exposeBridge(cfg);
@@ -2626,7 +2965,7 @@
   };
 })(globalThis.V = globalThis.V || {});
 
-/* core/10-search-deeplink.js · 台词与章节全文检索跳转（/ 或 Ctrl+K）及时间戳深链一键复制 */
+/* core/14-search-deeplink.js · 台词与章节全文检索跳转（/ 或 Ctrl+K）及时间戳深链一键复制 */
 (function (V) {
   if (typeof location === 'undefined') return;
   const { h } = V.u;
@@ -2753,7 +3092,7 @@
   function syncAddressBarOnSeek(t) {
     const cfg = V.getCfg();
     const uiCfg = (cfg && cfg.ui) || {};
-    if (uiCfg.syncUrl === false || window !== window.top) return;
+    if (!uiCfg.syncUrl || window !== window.top) return;
     if (!/^https?:$/i.test(location.protocol)) return;
     const nowTs = performance.now();
     if (nowTs - lastUrlSyncTs < 350) return;

@@ -320,18 +320,49 @@ def resolve_asset(video_dir, rel_or_abs):
     return rel_or_abs if os.path.isabs(rel_or_abs) else os.path.join(video_dir, rel_or_abs)
 
 
-def mix_voice_track(scenes, vdir, n):
+def _slice_stem_cue(stem_mono, baked_scenes, si, sc, li, c):
+    if stem_mono is None or len(stem_mono) == 0:
+        return None
+    b_sc = baked_scenes[si] if isinstance(baked_scenes, list) and si < len(baked_scenes) else None
+    b_cues = b_sc.get('cues') if isinstance(b_sc, dict) else None
+    if isinstance(b_cues, list) and li < len(b_cues) and len(b_cues[li]) >= 2:
+        t0 = float(b_sc.get('start', sc['start'])) + float(b_cues[li][0])
+        t1 = float(b_sc.get('start', sc['start'])) + float(b_cues[li][1])
+    else:
+        t0, t1 = float(sc['start']) + float(c['start']), float(sc['start']) + float(c['end'])
+    i0, i1 = max(0, int(round(t0 * SR))), min(len(stem_mono), int(round(t1 * SR)))
+    if i1 <= i0:
+        return None
+    seg = stem_mono[i0:i1].copy()
+    edge = min(len(seg) // 4, int(0.006 * SR))
+    if edge > 1:
+        ramp = np.linspace(0.0, 1.0, edge, dtype=np.float32)
+        seg[:edge] *= ramp
+        seg[-edge:] *= ramp[::-1]
+    return seg
+
+
+def mix_voice_track(scenes, vdir, n, fallback_stem_path=None, baked_scenes=None):
     voice, active, has_voice = np.zeros(n), np.zeros(n), False
+    stem_mono, stem_loaded = None, False
     for si, sc in enumerate(scenes):
         for li, c in enumerate(sc.get('cues', [])):
             wav_path = f'{vdir}/{si:02d}_{li:02d}.wav'
-            if not os.path.exists(wav_path):
+            y = None
+            if os.path.exists(wav_path):
+                raw_y, sr = sf.read(wav_path)
+                raw_y = raw_y.mean(axis=1) if raw_y.ndim > 1 else raw_y
+                g = math.gcd(SR, sr)
+                y = resample_poly(raw_y, SR // g, sr // g)
+            else:
+                if not stem_loaded:
+                    stem_loaded = True
+                    if fallback_stem_path and os.path.exists(fallback_stem_path):
+                        stem_mono = decode_audio_file(fallback_stem_path, channels=1)
+                y = _slice_stem_cue(stem_mono, baked_scenes, si, sc, li, c)
+            if y is None or len(y) == 0:
                 continue
             has_voice = True
-            y, sr = sf.read(wav_path)
-            y = y.mean(axis=1) if y.ndim > 1 else y
-            g = math.gcd(SR, sr)
-            y = resample_poly(y, SR // g, sr // g)
             at = sc['start'] + c['start']
             place(voice, y, at)
             a, b = max(0, int(at * SR)), min(n, int((at + len(y) / SR) * SR))
@@ -481,7 +512,7 @@ def main():
     def_e = [0.45, 0.55, 0.62, 0.68, 0.65]
     secs = [dict(s, energy=s.get('energy', def_e[i] if i < len(def_e) else 0.58)) for i, s in enumerate(data['scenes'])]
 
-    voice, active, has_voice = mix_voice_track(data['scenes'], vdir, n)
+    voice, active, has_voice = mix_voice_track(data['scenes'], vdir, n, fallback_stem_path=out, baked_scenes=data.get('bakedScenes'))
     m = build_bgm_track(parse_bgm_cfg(data.get('bgm')), video_dir, dur, n, secs, active, has_voice)
     f = mix_sfx_bus(data, parse_sfx_cfg(data.get('sfx')), video_dir, n)
     vc = mix_video_clip_tracks(data, video_dir, n)
