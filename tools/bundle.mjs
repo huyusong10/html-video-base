@@ -4,10 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   ROOT, PKG_ROOT, VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR,
-  listVideoIds, loadVideoSandbox, getSandboxCfg,
+  listVideoIds, normalizeCliArgs, buildVideoManifestItem,
 } from './lib/paths.mjs';
 
-function parseBundleArgs(argv) {
+function parseBundleArgs(rawArgv) {
+  const argv = normalizeCliArgs(rawArgv);
   let outDir = '';
   let single = false;
   const ids = [];
@@ -172,26 +173,6 @@ export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
   return targetOut;
 }
 
-function buildManifestEntry(id) {
-  try {
-    const { sandbox } = loadVideoSandbox(ROOT, id, { ignoreBaked: false, requireTimings: false });
-    const cfg = getSandboxCfg(sandbox.V);
-    return {
-      id,
-      title: cfg.title || id,
-      subtitle: cfg.subtitle || cfg.description || '',
-      description: cfg.description || cfg.subtitle || '',
-      duration: Math.round((sandbox.V.duration || 0) * 10) / 10,
-      scenes: (sandbox.V.scenes || []).length,
-      width: cfg.width || 1920,
-      height: cfg.height || 1080,
-      path: `./${id}/index.html`,
-    };
-  } catch {
-    return { id, title: id, subtitle: '', description: '', duration: 0, scenes: 0, width: 1920, height: 1080, path: `./${id}/index.html` };
-  }
-}
-
 export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
   const targets = videoIds && videoIds.length ? videoIds : listVideoIds();
   if (!targets.length) throw new Error('No videos found under videos/ to bundle.');
@@ -215,7 +196,7 @@ export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
   const hubSrc = fs.existsSync(localHub) ? localHub : path.join(TEMPLATES_DIR, 'hub/index.html');
   copyIfExists(hubSrc, path.join(outDir, 'index.html'));
 
-  const manifestItems = targets.map(buildManifestEntry);
+  const manifestItems = targets.map(id => buildVideoManifestItem(ROOT, id));
   const manifestCode = `/* 由 html-video bundle 自动生成 */\nwindow.VIDEO_MANIFEST = ${JSON.stringify(manifestCodeSafe(manifestItems), null, 2)};\n`;
   fs.writeFileSync(path.join(outDir, 'manifest.js'), manifestCode, 'utf8');
 

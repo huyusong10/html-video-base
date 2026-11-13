@@ -240,10 +240,16 @@ function valOr(v, fallback) {
   return v === undefined ? fallback : v;
 }
 
+function computeKeyMix(a, b, now) {
+  if (a === b) return 1;
+  const dur = b.dur === undefined ? 1.1 : Number(b.dur);
+  return dur > 0 ? smooth(clamp((now - b.t) / dur)) : 1;
+}
+
 function render(now, clock = now) {
   if (!renderer || !V.glKeys || !V.glKeys.length) return;
   const [a, b] = keysAt(now);
-  const mix = a === b ? 1 : smooth(clamp((now - b.t) / (b.dur || 1.1)));
+  const mix = computeKeyMix(a, b, now);
   const cnt = (a.shape === 'text' || b.shape === 'text') ? N : 850;
   geo.setDrawRange(0, cnt);
   stepParticles(clock, a, b, mix, cnt, now);
@@ -278,8 +284,13 @@ V.gl = {
       try { await document.fonts.load(cfg.glFontLoad); } catch {}
     }
     sampleText(defaultText);
-    build(canvas, cfg);
-    this.ready = true;
+    try {
+      build(canvas, cfg);
+      this.ready = true;
+    } catch {
+      this.ready = false;
+      if (canvas && canvas.classList) canvas.classList.add('is-off');
+    }
   },
   render,
   registerShape(name, shapeFn, colorFn) {

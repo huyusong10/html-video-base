@@ -95,6 +95,10 @@
     return curT > prevT && curT - prevT <= 0.3;
   }
 
+  function didCrossTime(prevT, curT, gAt) {
+    return gAt <= 0 ? prevT <= 0 && curT > 0 : prevT < gAt && curT >= gAt;
+  }
+
   function checkSceneCheckpoints(sc, si, prevT, curT, ctl) {
     if (ctl.isRecord) { syncRecordCheckpoints(curT); return; }
     const list = resolveSceneCheckpoints(sc, si);
@@ -104,7 +108,7 @@
       if (!cp || cp.at == null) continue;
       const gAt = sc.start + Number(cp.at);
       const key = `${si}:${cp.id || i}`;
-      if (!triggeredKeys.has(key) && prevT < gAt && curT >= gAt) {
+      if (!triggeredKeys.has(key) && didCrossTime(prevT, curT, gAt)) {
         triggeredKeys.set(key, gAt);
         triggerCheckpoint(cp, ctl.pause, ctl.play);
         return;

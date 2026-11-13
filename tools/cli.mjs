@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import {
   ROOT, PKG_ROOT, TOOLS_DIR, VIDEOS_DIR, TEMPLATES_DIR,
   listVideoIds, resolvePython, loadVideoSandbox, resolveLangMediaPaths, getSandboxCfg,
+  normalizeCliArgs, buildVideoManifestItem,
 } from './lib/paths.mjs';
 
 function run(bin, args, label, extraEnv = {}) {
@@ -60,30 +61,10 @@ function copyTemplateDir(src, dest, replacements) {
   }
 }
 
-function buildManifestItem(id) {
-  try {
-    const { sandbox } = loadVideoSandbox(ROOT, id, { ignoreBaked: false, requireTimings: false });
-    const cfg = getSandboxCfg(sandbox.V);
-    return {
-      id,
-      title: cfg.title || id,
-      subtitle: cfg.subtitle || '',
-      description: cfg.description || cfg.subtitle || '',
-      width: cfg.width || 1920,
-      height: cfg.height || 1080,
-      duration: Math.round(sandbox.V.duration || 0),
-      scenes: sandbox.V.scenes.length,
-      path: `./${id}/index.html`,
-    };
-  } catch {
-    return { id, title: id, subtitle: '', description: '', width: 1920, height: 1080, duration: 0, scenes: 0, path: `./${id}/index.html` };
-  }
-}
-
 function syncManifest() {
   const manifestPath = path.join(VIDEOS_DIR, 'manifest.js');
   if (!fs.existsSync(manifestPath)) return;
-  const items = listVideoIds().map(buildManifestItem);
+  const items = listVideoIds().map(id => buildVideoManifestItem(ROOT, id));
   const content = [
     '/* 视频中心清单（由 html-video 自动同步，也可手动编辑） */',
     'window.VIDEO_MANIFEST = ' + JSON.stringify(items, null, 2) + ';',
@@ -304,7 +285,7 @@ const COMMANDS = {
 };
 
 export function runCli(argv = process.argv.slice(2)) {
-  const [cmd = 'help', ...rest] = argv;
+  const [cmd = 'help', ...rest] = normalizeCliArgs(argv);
   const handler = COMMANDS[cmd];
   if (handler) handler(rest);
   else printHelp();

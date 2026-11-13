@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable, getSandboxCfg } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable, getSandboxCfg, normalizeCliArgs } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
 
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -15,7 +15,8 @@ function fmtTime(s) {
   return `${m}:${rem}`;
 }
 
-function parseStoryboardArgs(rawArgs) {
+function parseStoryboardArgs(rawInput) {
+  const rawArgs = normalizeCliArgs(rawInput);
   const langIdx = rawArgs.indexOf('--lang');
   const lang = langIdx >= 0 && rawArgs[langIdx + 1] ? rawArgs[langIdx + 1] : '';
   const pos = rawArgs.filter((a, i) => !a.startsWith('--') && (langIdx < 0 || i !== langIdx + 1));
@@ -32,26 +33,33 @@ async function captureShot(page, sampleT, quality) {
   return `data:image/jpeg;base64,${jpg.toString('base64')}`;
 }
 
+function clampShotInScene(sc, rawT) {
+  const maxT = Math.max(sc.start, sc.start + sc.duration - 0.02);
+  return Math.max(sc.start, Math.min(maxT, rawT));
+}
+
 async function captureSceneCards(page, sc, si, perCue) {
   const cues = sc.cues || [];
   if (perCue && cues.length > 0) {
     const out = [];
     for (let li = 0; li < cues.length; li++) {
       const c = cues[li];
-      const sampleT = sc.start + c.start + Math.min((c.end - c.start) * 0.72, Math.max(0.2, c.end - c.start - 0.1));
+      const cueDur = Math.max(0, c.end - c.start);
+      const rawT = sc.start + c.start + Math.min(cueDur * 0.72, Math.max(0, cueDur - 0.1));
       out.push({
         idxLabel: `${String(si + 1).padStart(2, '0')}-${li + 1}`,
         title: sc.title,
         timeRange: `${fmtTime(sc.start + c.start)} – ${fmtTime(sc.start + c.end)}`,
-        dur: `${(c.end - c.start).toFixed(1)}s`,
-        imgData: await captureShot(page, sampleT, 82),
+        dur: `${cueDur.toFixed(1)}s`,
+        imgData: await captureShot(page, clampShotInScene(sc, rawT), 82),
         lines: [{ idx: li, speaker: c.speaker, text: c.text }],
       });
     }
     return out;
   }
   const lastCue = cues.length ? cues[cues.length - 1] : null;
-  const sampleT = lastCue ? sc.start + Math.min(sc.duration - 0.15, lastCue.end - 0.08) : sc.start + sc.duration * 0.6;
+  const rawT = lastCue ? sc.start + Math.min(sc.duration - 0.15, lastCue.end - 0.08) : sc.start + sc.duration * 0.6;
+  const sampleT = clampShotInScene(sc, rawT);
   return [{
     idxLabel: String(si + 1).padStart(2, '0'),
     title: sc.title,

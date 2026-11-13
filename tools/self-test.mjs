@@ -565,6 +565,53 @@ async function verifyBugfixRegressions(page, port) {
   await verifyInteractiveRegressions(page);
   await verifyHookAndLocaleVoiceRegressions(page);
   await verifyRound2EngineRegressions(page, port);
+  await verifyRound4BrowserRegressions(page);
+}
+
+async function verifyRound4BrowserRegressions(page) {
+  const res = await page.evaluate(async () => {
+    const bar = document.getElementById('controls');
+    const subs = document.getElementById('subs');
+    const sc1 = window.V.scenes[1];
+    const origUpdate = sc1.update;
+    sc1.update = (t, x) => {
+      origUpdate.call(sc1, t, x);
+      if (t > 0.35) window.V.setSubLayout('mascotLeft');
+    };
+    window.__video.seek(sc1.start + 0.55);
+    const subLate = subs.dataset.subPos;
+    window.__video.seek(sc1.start + 0.1);
+    const subEarly = subs.dataset.subPos;
+    sc1.update = origUpdate;
+
+    window.__video.seek(0.2);
+    window.__video.play();
+    document.body.classList.remove('ui-active');
+    const track = bar.querySelector('.track');
+    const tr = track.getBoundingClientRect();
+    const beforeNow = window.__video.getSyncState().now;
+    track.dispatchEvent(new PointerEvent('pointerdown', {
+      clientX: tr.left + tr.width * 0.9,
+      clientY: tr.top + tr.height * 0.5,
+      pointerType: 'touch',
+      bubbles: true,
+      cancelable: true,
+    }));
+    track.dispatchEvent(new MouseEvent('click', {
+      clientX: tr.left + tr.width * 0.9,
+      clientY: tr.top + tr.height * 0.5,
+      bubbles: true,
+      cancelable: true,
+    }));
+    const afterBlindTapNow = window.__video.getSyncState().now;
+    const wokeFromBlindTap = document.body.classList.contains('ui-active');
+    window.__video.pause();
+    return { subLate, subEarly, notScrubbed: Math.abs(afterBlindTapNow - beforeNow) < 0.15, wokeFromBlindTap };
+  });
+  assert.equal(res.subLate, 'left', 'Conditional intra-scene V.setSubLayout must apply when condition holds');
+  assert.equal(res.subEarly, 'center', 'Scrubbing backward in same scene must reset conditional V.setSubLayout');
+  assert.equal(res.notScrubbed, true, 'Blind tap on hidden overlay #controls .track must not accidentally scrub');
+  assert.equal(res.wokeFromBlindTap, true, 'Blind tap on hidden overlay #controls must wake ui-active');
 }
 
 async function verifyV26ExperienceContracts(page) {
@@ -937,6 +984,43 @@ function verifyBundleSafetyAndDepth(videoDir, colDir) {
   assert.equal(fs.existsSync(path.join(videoDir, 'index.html')), true, 'Rejected bundle --out must leave videos/demo untouched');
 }
 
+function verifyRound4PipelineRegressions(videoDir) {
+  const enLocalePath = path.join(videoDir, 'locales/en.js');
+  const origEn = fs.readFileSync(enLocalePath, 'utf8');
+  const editedEn = origEn.replace(
+    'Every pure function stays deterministic.',
+    'Every pure function, stays deterministic.'
+  );
+  assert.notEqual(editedEn, origEn, 'locales/en.js test target string must match');
+  fs.writeFileSync(enLocalePath, editedEn, 'utf8');
+  runCliCmd(['mix', 'demo', '--lang=en', '--bitrate=96k']);
+  const enTimings = fs.readFileSync(path.join(videoDir, 'assets/voice/timings.en.js'), 'utf8');
+  assert.ok(
+    enTimings.includes('"Every pure function"') && enTimings.includes('"stays deterministic"'),
+    'mix --lang=en must refresh V.voice.subCues clause splits after punctuation edits'
+  );
+  fs.writeFileSync(enLocalePath, origEn, 'utf8');
+  runCliCmd(['mix', 'demo', '--lang=en', '--bitrate=96k']);
+
+  const py = resolvePython(PKG_ROOT, true);
+  const bgmCheckDir = path.join(TEST_ROOT, 'bgm-vol-check');
+  fs.mkdirSync(bgmCheckDir, { recursive: true });
+  const cuesJson = path.join(bgmCheckDir, 'cues.json');
+  const bgmWav = path.join(bgmCheckDir, 'bgm.wav');
+  fs.writeFileSync(cuesJson, JSON.stringify({
+    duration: 1.5,
+    videoDir: bgmCheckDir,
+    bgm: { preset: 'ambient', volume: 0.12 },
+    sfx: false,
+    scenes: [{ title: 'S1', start: 0, duration: 1.5, cues: [] }],
+  }), 'utf8');
+  const r = spawnSync(py, [path.join(PKG_ROOT, 'tools/mix.py'), cuesJson, bgmCheckDir, '', bgmWav], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `BGM-only mix.py failed: ${r.stderr}`);
+  const peakRes = spawnSync(py, ['-c', `import soundfile as sf, numpy as np; y,_=sf.read(${JSON.stringify(bgmWav)}); print(float(np.abs(y).max()))`], { encoding: 'utf8' });
+  const bgmPeak = parseFloat((peakRes.stdout || '').trim());
+  assert.ok(bgmPeak > 0.03 && bgmPeak < 0.35, `BGM-only volume=0.12 must preserve configured gain (got peak=${bgmPeak})`);
+}
+
 async function main() {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(path.join(TEST_ROOT, 'videos'), { recursive: true });
@@ -963,6 +1047,7 @@ async function main() {
     fs.renameSync(path.join(videoDir, 'mock_tts.py.bak'), path.join(videoDir, 'mock_tts.py'));
     runCliCmd(['audit', 'demo', '--lang', 'en']);
     runCliCmd(['build', 'demo', '--lang', 'en']);
+    verifyRound4PipelineRegressions(videoDir);
     const shotDir = path.join(TEST_ROOT, 'audit-shots');
     runCliCmd(['audit', 'demo', '--screenshots', shotDir]);
     verifyFreshUnbuiltAudit();

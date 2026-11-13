@@ -540,12 +540,20 @@ def _clip_preserving_stem(sig, stem_mask):
     return _soft_clip(sig)
 
 
-def _write_dual_stems(fg, m, out, bgm_out, dur, bitrate, bgm_bitrate, stem_mask=None):
+def _compute_master_scale(ref_peak: float, has_voice: bool) -> float:
+    if ref_peak <= 1e-6:
+        return 1.0
+    raw = 0.95 / ref_peak
+    return min(2.5, raw) if has_voice else min(1.0, raw)
+
+
+def _write_dual_stems(fg, m, out, bgm_out, dur, bitrate, bgm_bitrate, stem_mask=None, has_voice=True):
     fg_s, m_s = _clip_preserving_stem(fg, stem_mask), _soft_clip(m)
     has_fg = bool(out)
-    ref_sig = (fg_s + m_s) if has_fg else m_s
-    ref_peak = float(np.abs(ref_sig).max())
-    scale = (0.95 / ref_peak) if ref_peak > 1e-6 else 1.0
+    mix_peak = float(np.abs(fg_s + m_s).max()) if has_fg else float(np.abs(m_s).max())
+    fg_peak = float(np.abs(fg_s).max()) if has_fg else 0.0
+    ref_peak = max(mix_peak, fg_peak, float(np.abs(m_s).max()))
+    scale = _compute_master_scale(ref_peak, has_voice)
     if has_fg:
         write_master_output(fg_s * scale, out, bitrate)
     bgm_written = False
@@ -582,7 +590,10 @@ def main():
     fg = _compose_foreground_bus(voice, f, vc, stem_mask)
 
     if bgm_out:
-        _write_dual_stems(fg, m, out, bgm_out, dur, data.get('audioBitrate'), data.get('bgmBitrate'), stem_mask=stem_mask)
+        _write_dual_stems(
+            fg, m, out, bgm_out, dur, data.get('audioBitrate'), data.get('bgmBitrate'),
+            stem_mask=stem_mask, has_voice=has_voice,
+        )
         return
 
     bgm_masked = m
@@ -590,9 +601,8 @@ def main():
         bgm_masked = m.copy()
         bgm_masked[stem_mask] = 0.0
     mix = _clip_preserving_stem(bgm_masked + fg, stem_mask)
-    peak = np.abs(mix).max()
-    if peak > 1e-6:
-        mix = mix / peak * 0.95
+    peak = float(np.abs(mix).max())
+    mix = mix * _compute_master_scale(peak, has_voice)
 
     write_master_output(mix, out, data.get('audioBitrate'))
     print('written', out, round(dur, 1), 's')

@@ -2,7 +2,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR, listVideoIds, loadVideoSandbox, getSandboxCfg } from './paths.mjs';
+import { VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR, listVideoIds, buildVideoManifestItem } from './paths.mjs';
 
 export const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -47,29 +47,9 @@ function pipeFileSafe(res, fp, opts) {
   stream.pipe(res);
 }
 
-function buildLiveManifestItem(projectRoot, id) {
-  try {
-    const { sandbox } = loadVideoSandbox(projectRoot, id, { ignoreBaked: false, requireTimings: false });
-    const cfg = getSandboxCfg(sandbox.V);
-    return {
-      id,
-      title: cfg.title || id,
-      subtitle: cfg.subtitle || cfg.description || '',
-      description: cfg.description || cfg.subtitle || '',
-      duration: Math.round((sandbox.V.duration || 0) * 10) / 10,
-      scenes: (sandbox.V.scenes || []).length,
-      width: cfg.width || 1920,
-      height: cfg.height || 1080,
-      path: `./${id}/index.html`,
-    };
-  } catch {
-    return { id, title: id, subtitle: '', description: '', duration: 0, scenes: 0, width: 1920, height: 1080, path: `./${id}/index.html` };
-  }
-}
-
 function serveVirtualManifest(res, videosDir) {
   const projectRoot = path.dirname(path.resolve(videosDir));
-  const items = listVideoIds(videosDir).map(id => buildLiveManifestItem(projectRoot, id));
+  const items = listVideoIds(videosDir).map(id => buildVideoManifestItem(projectRoot, id));
   const body = `window.VIDEO_MANIFEST = ${JSON.stringify(items, null, 2)};\n`;
   res.writeHead(200, { 'Content-Type': MIME['.js'], 'Cache-Control': 'no-cache' });
   res.end(body);

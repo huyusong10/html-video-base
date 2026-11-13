@@ -2,10 +2,11 @@
 // 用法：node tools/export.mjs <video-id> <out-lines.json> <out-cues.json> [--lang en]
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, listVideoIds, loadVideoSandbox, probeSceneAnchors, getSandboxCfg } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, probeSceneAnchors, getSandboxCfg, normalizeCliArgs } from './lib/paths.mjs';
 import { writeSubtitleFiles } from './lib/subtitles.mjs';
 
-function parseExportArgs(argv) {
+function parseExportArgs(rawArgv) {
+  const argv = normalizeCliArgs(rawArgv);
   const langIdx = argv.indexOf('--lang');
   const lang = langIdx >= 0 && argv[langIdx + 1] ? argv[langIdx + 1] : (process.env.VIDEO_LANG || '');
   const pos = argv.filter((a, i) => !a.startsWith('--') && (langIdx < 0 || i !== langIdx + 1));

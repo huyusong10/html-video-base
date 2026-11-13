@@ -272,9 +272,21 @@
     return [lt, lt + d];
   }
 
+  function isExactSubsTextMatch(exactSubs, lineText) {
+    const subJoined = exactSubs.map(x => (Array.isArray(x) ? x[2] : '') || '').join('');
+    return normKey(subJoined) === normKey(lineText);
+  }
+
+  function shouldUseExactSubs(exactSubs, lineObj, lineWords) {
+    if (!exactSubs || !exactSubs.length) return false;
+    if (!V.__ignoreBakedLayout) return true;
+    if (lineWords && lineWords.length) return false;
+    return isExactSubsTextMatch(exactSubs, lineObj.text);
+  }
+
   function appendLineSubCues(sc, lineObj, cueStart, cueEnd, exactSubs, lineWords) {
     const speaker = lineObj.speaker || null;
-    if (exactSubs && exactSubs.length) {
+    if (shouldUseExactSubs(exactSubs, lineObj, lineWords)) {
       sc.subCues.push(...exactSubs.map(([s0, s1, txt]) => ({ start: cueStart + s0, end: cueStart + s1, text: txt, speaker })));
     } else {
       sc.subCues.push(...splitSubCues(lineObj.text, cueStart, cueEnd, lineWords).map(s => ({ ...s, speaker })));

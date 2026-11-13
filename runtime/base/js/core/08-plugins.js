@@ -37,17 +37,33 @@
     } catch {}
   }
 
+  function resolveDraftSfxGain() {
+    const s = V.getCfg().sfx;
+    if (s === false || s === 'none') return 0;
+    if (s && typeof s === 'object') {
+      if (s.enabled === false || s.preset === 'none') return 0;
+      if (s.volume !== undefined) return Math.max(0, Number(s.volume) || 0);
+    }
+    return 1;
+  }
+
   function canPlayDraftSfx(st) {
-    if (!st.playing || st.scrubbing || st.hasAudio || st.isRecord || st.muted) return false;
+    if (!st.playing || st.scrubbing || st.hasAudio || st.isRecord || st.muted || st.voiceOn === false) return false;
+    if (resolveDraftSfxGain() <= 0) return false;
     return st.now > st.prevT && st.now - st.prevT <= 0.25;
   }
 
-  function resolveSceneSfxList(sc) {
+  function resolveSceneSfxList(sc, si) {
     if (!sc._resolvedSfx) {
-      const raw = typeof sc.sfx === 'function' ? sc.sfx(sc.ctx) : sc.sfx;
+      const ctx = sc.ctx || (V.makeCtx ? V.makeCtx(sc, si) : null);
+      const raw = typeof sc.sfx === 'function' ? sc.sfx(ctx) : sc.sfx;
       sc._resolvedSfx = Array.isArray(raw) ? raw : [];
     }
     return sc._resolvedSfx;
+  }
+
+  function didCrossSfxAt(prevT, curT, gAt) {
+    return gAt <= 0 ? prevT <= 0 && curT > 0 : prevT < gAt && curT >= gAt;
   }
 
   V.use({
@@ -55,11 +71,13 @@
     onRender(st) {
       if (!canPlayDraftSfx(st)) return;
       const sc = st.scene;
-      for (const ev of resolveSceneSfxList(sc)) {
+      const masterGain = resolveDraftSfxGain();
+      for (const ev of resolveSceneSfxList(sc, st.sceneIndex)) {
         if (!ev || ev.at == null) continue;
         const gAt = sc.start + Number(ev.at);
-        if (st.prevT < gAt && st.now >= gAt) {
-          playDraftSfx(ev.type || ev.preset || 'click', ev.volume === undefined ? 0.5 : ev.volume);
+        if (didCrossSfxAt(st.prevT, st.now, gAt)) {
+          const vol = (ev.volume === undefined ? 0.5 : Number(ev.volume)) * masterGain;
+          if (vol > 0) playDraftSfx(ev.type || ev.preset || 'click', vol);
         }
       }
     },

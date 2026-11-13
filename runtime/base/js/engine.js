@@ -889,9 +889,21 @@
     return [lt, lt + d];
   }
 
+  function isExactSubsTextMatch(exactSubs, lineText) {
+    const subJoined = exactSubs.map(x => (Array.isArray(x) ? x[2] : '') || '').join('');
+    return normKey(subJoined) === normKey(lineText);
+  }
+
+  function shouldUseExactSubs(exactSubs, lineObj, lineWords) {
+    if (!exactSubs || !exactSubs.length) return false;
+    if (!V.__ignoreBakedLayout) return true;
+    if (lineWords && lineWords.length) return false;
+    return isExactSubsTextMatch(exactSubs, lineObj.text);
+  }
+
   function appendLineSubCues(sc, lineObj, cueStart, cueEnd, exactSubs, lineWords) {
     const speaker = lineObj.speaker || null;
-    if (exactSubs && exactSubs.length) {
+    if (shouldUseExactSubs(exactSubs, lineObj, lineWords)) {
       sc.subCues.push(...exactSubs.map(([s0, s1, txt]) => ({ start: cueStart + s0, end: cueStart + s1, text: txt, speaker })));
     } else {
       sc.subCues.push(...splitSubCues(lineObj.text, cueStart, cueEnd, lineWords).map(s => ({ ...s, speaker })));
@@ -1305,6 +1317,10 @@
     return curT > prevT && curT - prevT <= 0.3;
   }
 
+  function didCrossTime(prevT, curT, gAt) {
+    return gAt <= 0 ? prevT <= 0 && curT > 0 : prevT < gAt && curT >= gAt;
+  }
+
   function checkSceneCheckpoints(sc, si, prevT, curT, ctl) {
     if (ctl.isRecord) { syncRecordCheckpoints(curT); return; }
     const list = resolveSceneCheckpoints(sc, si);
@@ -1314,7 +1330,7 @@
       if (!cp || cp.at == null) continue;
       const gAt = sc.start + Number(cp.at);
       const key = `${si}:${cp.id || i}`;
-      if (!triggeredKeys.has(key) && prevT < gAt && curT >= gAt) {
+      if (!triggeredKeys.has(key) && didCrossTime(prevT, curT, gAt)) {
         triggeredKeys.set(key, gAt);
         triggerCheckpoint(cp, ctl.pause, ctl.play);
         return;
@@ -1388,17 +1404,33 @@
     } catch {}
   }
 
+  function resolveDraftSfxGain() {
+    const s = V.getCfg().sfx;
+    if (s === false || s === 'none') return 0;
+    if (s && typeof s === 'object') {
+      if (s.enabled === false || s.preset === 'none') return 0;
+      if (s.volume !== undefined) return Math.max(0, Number(s.volume) || 0);
+    }
+    return 1;
+  }
+
   function canPlayDraftSfx(st) {
-    if (!st.playing || st.scrubbing || st.hasAudio || st.isRecord || st.muted) return false;
+    if (!st.playing || st.scrubbing || st.hasAudio || st.isRecord || st.muted || st.voiceOn === false) return false;
+    if (resolveDraftSfxGain() <= 0) return false;
     return st.now > st.prevT && st.now - st.prevT <= 0.25;
   }
 
-  function resolveSceneSfxList(sc) {
+  function resolveSceneSfxList(sc, si) {
     if (!sc._resolvedSfx) {
-      const raw = typeof sc.sfx === 'function' ? sc.sfx(sc.ctx) : sc.sfx;
+      const ctx = sc.ctx || (V.makeCtx ? V.makeCtx(sc, si) : null);
+      const raw = typeof sc.sfx === 'function' ? sc.sfx(ctx) : sc.sfx;
       sc._resolvedSfx = Array.isArray(raw) ? raw : [];
     }
     return sc._resolvedSfx;
+  }
+
+  function didCrossSfxAt(prevT, curT, gAt) {
+    return gAt <= 0 ? prevT <= 0 && curT > 0 : prevT < gAt && curT >= gAt;
   }
 
   V.use({
@@ -1406,11 +1438,13 @@
     onRender(st) {
       if (!canPlayDraftSfx(st)) return;
       const sc = st.scene;
-      for (const ev of resolveSceneSfxList(sc)) {
+      const masterGain = resolveDraftSfxGain();
+      for (const ev of resolveSceneSfxList(sc, st.sceneIndex)) {
         if (!ev || ev.at == null) continue;
         const gAt = sc.start + Number(ev.at);
-        if (st.prevT < gAt && st.now >= gAt) {
-          playDraftSfx(ev.type || ev.preset || 'click', ev.volume === undefined ? 0.5 : ev.volume);
+        if (didCrossSfxAt(st.prevT, st.now, gAt)) {
+          const vol = (ev.volume === undefined ? 0.5 : Number(ev.volume)) * masterGain;
+          if (vol > 0) playDraftSfx(ev.type || ev.preset || 'click', vol);
         }
       }
     },
@@ -1659,11 +1693,20 @@
   ];
 
   let subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
+  let globalOverrideSpec = null;
+  let buildSubSpec = null;
+  let updateSubTick = 0;
   let sceneScopedSpec = false;
 
   function getSubCfg() {
     const cfg = V.getCfg();
     return Object.assign({}, cfg.subtitles || {}, V.subtitles || {});
+  }
+
+  function resolveDefaultSubSpec() {
+    if (globalOverrideSpec != null) return globalOverrideSpec;
+    const subCfg = getSubCfg();
+    return subCfg.layout || subCfg.position || 'center';
   }
 
   function resolveSubLayoutObj(spec, subCfg) {
@@ -1687,14 +1730,24 @@
     }
   }
   V.setSubLayout = function (spec) {
-    if (V._inSceneUpdate) sceneScopedSpec = true;
+    if (V._inSceneBuild) {
+      buildSubSpec = spec;
+      sceneScopedSpec = true;
+    } else if (V._inSceneUpdate) {
+      updateSubTick = V._renderTick || 1;
+      sceneScopedSpec = true;
+    } else {
+      globalOverrideSpec = spec;
+    }
     return applySubLayout(spec);
   };
 
   function resetSceneSubLayout() {
+    buildSubSpec = null;
+    updateSubTick = 0;
     if (!sceneScopedSpec) return;
     sceneScopedSpec = false;
-    applySubLayout(getSubCfg().layout || getSubCfg().position || 'center');
+    applySubLayout(resolveDefaultSubSpec());
   }
 
   function mountSubSlot(slotEl, factory) {
@@ -1721,9 +1774,16 @@
 
   function syncSceneSubLayout(sc, lt) {
     const spec = sc.subLayout || sc.subtitles;
-    if (!spec) return;
-    sceneScopedSpec = true;
-    applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
+    if (spec) {
+      sceneScopedSpec = true;
+      applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
+      return;
+    }
+    if (updateSubTick > 0 && updateSubTick !== (V._renderTick || 0)) {
+      updateSubTick = 0;
+      sceneScopedSpec = buildSubSpec != null;
+      applySubLayout(buildSubSpec != null ? buildSubSpec : resolveDefaultSubSpec());
+    }
   }
 
   function updateSubDomText(cue) {
@@ -2407,10 +2467,12 @@
     sc.root = h('div', { class: 'scene ' + (sc.cls || '') });
     sc.ctx = V.makeCtx(sc, si);
     stage.appendChild(sc.root);
+    V._inSceneBuild = true;
     V._inSceneUpdate = true;
     try {
       sc.build(sc.root, sc.ctx);
     } finally {
+      V._inSceneBuild = false;
       V._inSceneUpdate = false;
     }
     current = sc;
@@ -2589,11 +2651,11 @@
     activeCueIdx = V._subtitlesRuntime.updateSubs(sc, idx, lt, now, clock, showSubs);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
     if (!RECORD) V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: false, playing, scrubbing, pause, play });
-    const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false };
+    const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false, voiceOn: true };
     V.emit('onRender', {
       now, clock, alive: clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
       playing, scrubbing, sandbox: sandboxState.active, pointer: ptr,
-      hasAudio: aState.hasAudio, isRecord: RECORD, muted: aState.muted,
+      hasAudio: aState.hasAudio, isRecord: RECORD, muted: aState.muted, voiceOn: aState.voiceOn !== false,
     });
     if (!RECORD) updateUI();
   }
@@ -3062,8 +3124,9 @@
   }
 
   function isEditableTarget(target) {
-    const tag = (target && target.tagName) || '';
-    return /^(INPUT|TEXTAREA|SELECT)$/.test(tag);
+    if (!target) return false;
+    if (target.isContentEditable) return true;
+    return /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || '');
   }
 
   function isNativeSpaceTarget(target) {
@@ -3094,10 +3157,16 @@
     flashOsd(`${stepSec > 0 ? '+' : ''}${stepSec}s · ${fmtTime(now)}`);
   }
 
+  function stepFrameShortcut(dir) {
+    const fps = Math.max(1, Number(V.getCfg().fps) || 30);
+    pause();
+    seek(now + dir / fps, true);
+  }
+
   function bindKeyboard(bar) {
     const keyMap = {
-      '.': () => { pause(); seek(now + 1 / 30); },
-      ',': () => { pause(); seek(now - 1 / 30); },
+      '.': () => stepFrameShortcut(1),
+      ',': () => stepFrameShortcut(-1),
       ']': () => jumpChapterDelta(1),
       PageDown: () => jumpChapterDelta(1),
       '[': () => jumpChapterDelta(-1),
@@ -3135,15 +3204,21 @@
     return Boolean(bar && target && bar.contains && bar.contains(target));
   }
 
-  function hitStageRect(r, cx, cy) {
+  function hitRect(r, cx, cy) {
     if (r.width <= 0 || r.height <= 0) return false;
     return cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
   }
 
-  function updatePointerFromEvent(bar, e) {
+  function isPointerOverBar(bar, e) {
+    if (!bar) return false;
+    if (isEventOverBar(bar, e.target)) return true;
+    return Number.isFinite(e.clientX) && hitRect(bar.getBoundingClientRect(), e.clientX, e.clientY);
+  }
+
+  function applyStagePointerCoords(e) {
     if (RECORD || !stage || !Number.isFinite(e.clientX)) return;
     const r = stage.getBoundingClientRect();
-    if (isEventOverBar(bar, e.target) || !hitStageRect(r, e.clientX, e.clientY)) {
+    if (!hitRect(r, e.clientX, e.clientY)) {
       resetPointerLeave();
       return;
     }
@@ -3156,16 +3231,55 @@
     ptr.ny = ry * 2 - 1;
   }
 
+  function updatePointerFromEvent(bar, e) {
+    if (isEventOverBar(bar, e.target)) {
+      resetPointerLeave();
+      return;
+    }
+    applyStagePointerCoords(e);
+  }
+
   function wakeFromPointer(bar, uiCfg, e, force) {
-    updatePointerFromEvent(bar, e);
+    const overBar = isPointerOverBar(bar, e);
+    if (overBar) resetPointerLeave();
+    else applyStagePointerCoords(e);
     if (!force && Math.abs(e.clientX - lastPtrX) < 1 && Math.abs(e.clientY - lastPtrY) < 1) return;
     lastPtrX = e.clientX;
     lastPtrY = e.clientY;
-    if (bar && bar.contains(e.target)) showUiHold();
+    if (overBar) showUiHold();
     else { inBar = false; flashUi(uiCfg.idleHideDelay); }
   }
 
+  function isBarOverlayHidden(bar) {
+    const b = document.body.classList;
+    if (!(b.contains('ctrl-overlay') || b.contains('web-full') || b.contains('os-full'))) return false;
+    if (!b.contains('playing')) return false;
+    if (b.contains('ui-active') || b.contains('scrubbing') || b.contains('menu-open')) return false;
+    return !(bar && bar.matches && bar.matches(':has(input:focus)'));
+  }
+
+  function bindBlindBarGuard(bar, uiCfg) {
+    if (!bar) return;
+    let blindPointerType = '';
+    bar.addEventListener('pointerdown', e => {
+      if (!isBarOverlayHidden(bar)) { blindPointerType = ''; return; }
+      blindPointerType = e.pointerType || 'mouse';
+      e.stopPropagation();
+      e.preventDefault();
+      flashUi(blindPointerType === 'touch' ? 2200 : uiCfg.idleHideDelay);
+    }, true);
+    bar.addEventListener('click', e => {
+      if (!blindPointerType) return;
+      const pt = blindPointerType;
+      blindPointerType = '';
+      e.stopPropagation();
+      e.preventDefault();
+      if (pt !== 'touch' && playing) pause();
+    }, true);
+  }
+
   function bindIdleWake(bar, uiCfg) {
+    bindBlindBarGuard(bar, uiCfg);
     const clearOnLeave = () => {
       inBar = false;
       lastPtrX = -9999;
@@ -3288,16 +3402,35 @@
     if (vp) vp.style.setProperty('--k', k);
   }
 
-  function seekVideoElementAsync(vid, targetSec) {
+  function waitVideoMetadata(vid, timeoutMs = 2000) {
     return new Promise(resolve => {
-      if (vid.readyState === 0) {
-        const onMeta = () => { vid.removeEventListener('loadedmetadata', onMeta); seekVideoElementAsync(vid, targetSec).then(resolve); };
-        vid.addEventListener('loadedmetadata', onMeta, { once: true });
-        vid.addEventListener('error', () => resolve(), { once: true });
-        return;
-      }
-      if (Math.abs((vid.currentTime || 0) - targetSec) < 0.008 && !vid.seeking) { resolve(); return; }
-      const done = () => { clearTimeout(timer); vid.removeEventListener('seeked', done); vid.removeEventListener('error', done); resolve(); };
+      const done = ok => {
+        clearTimeout(timer);
+        vid.removeEventListener('loadedmetadata', onMeta);
+        vid.removeEventListener('error', onErr);
+        resolve(ok);
+      };
+      const onMeta = () => done(true);
+      const onErr = () => done(false);
+      const timer = setTimeout(() => done(false), timeoutMs);
+      vid.addEventListener('loadedmetadata', onMeta, { once: true });
+      vid.addEventListener('error', onErr, { once: true });
+    });
+  }
+
+  async function seekVideoElementAsync(vid, targetSec) {
+    if (vid.readyState === 0) {
+      const ready = await waitVideoMetadata(vid, 2000);
+      if (!ready || vid.readyState === 0) return;
+    }
+    if (Math.abs((vid.currentTime || 0) - targetSec) < 0.008 && !vid.seeking) return;
+    await new Promise(resolve => {
+      const done = () => {
+        clearTimeout(timer);
+        vid.removeEventListener('seeked', done);
+        vid.removeEventListener('error', done);
+        resolve();
+      };
       const timer = setTimeout(done, 1500);
       vid.addEventListener('seeked', done, { once: true });
       vid.addEventListener('error', done, { once: true });
@@ -3530,8 +3663,13 @@
     const glEl = document.getElementById('gl');
     if (V.gl && glEl) {
       glEl.classList.remove('is-off');
-      await V.gl.init(glEl, V.getCfg());
-      if (V.gl.ready === undefined) V.gl.ready = true;
+      try {
+        await V.gl.init(glEl, V.getCfg());
+        if (V.gl.ready === undefined) V.gl.ready = true;
+      } catch {
+        V.gl.ready = false;
+        glEl.classList.add('is-off');
+      }
     }
     V.start();
   };

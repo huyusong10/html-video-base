@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { ROOT, listVideoIds, loadVideoSandbox, resolveFfmpeg, probeSceneAnchors, getSandboxCfg, isBgmDisabledCfg, extractRawBgmSrc } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, resolveFfmpeg, probeSceneAnchors, getSandboxCfg, isBgmDisabledCfg, extractRawBgmSrc, normalizeCliArgs } from './lib/paths.mjs';
 import { writeSubtitleFiles } from './lib/subtitles.mjs';
 import { auditVideos } from './audit-visual.mjs';
 
@@ -79,10 +79,7 @@ export function stampBakedLayout(videoId, lang = '') {
     })),
   };
 
-  if (!Array.isArray(V.voice.subCues) || !V.voice.subCues.length) {
-    const fromLegacy = resolveVoiceSubCuesGrid(V.voice);
-    V.voice.subCues = fromLegacy.length ? fromLegacy : computeSceneSubCuesGrid(V.scenes);
-  }
+  V.voice.subCues = computeSceneSubCuesGrid(V.scenes);
   if (!bgmRel && V.voice.bgmSrc) {
     fs.rmSync(path.join(videoDir, V.voice.bgmSrc), { force: true });
   }
@@ -299,7 +296,8 @@ export function verifyVideo(videoId, ffmpegBin, lang = '') {
   return errors;
 }
 
-function parseVerifyCliArgs(rawArgs) {
+function parseVerifyCliArgs(rawInput) {
+  const rawArgs = normalizeCliArgs(rawInput);
   const langIdx = rawArgs.indexOf('--lang');
   const lang = langIdx >= 0 && rawArgs[langIdx + 1] ? rawArgs[langIdx + 1] : '';
   const targets = rawArgs.filter((a, i) => !a.startsWith('--') && (langIdx < 0 || i !== langIdx + 1));

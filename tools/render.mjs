@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import {
   ROOT, VIDEOS_DIR, listVideoIds, loadVideoSandbox, resolveBaseFile,
   loadChromium, findBrowserExecutable, resolveFfmpeg, getSandboxCfg,
-  isBgmDisabledCfg, extractRawBgmSrc, localizeMediaRel,
+  isBgmDisabledCfg, extractRawBgmSrc, localizeMediaRel, normalizeCliArgs,
 } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
 
@@ -26,7 +26,8 @@ const BOOLEAN_FLAGS = {
   '--no-bgm': 'noBgm',
 };
 
-function parseRenderArgs(argv) {
+function parseRenderArgs(rawArgv) {
+  const argv = normalizeCliArgs(rawArgv);
   const opts = { workers: null, scene: null, range: null, fps: null, lang: '', noCache: false, noFrameReuse: false, noBgm: false };
   const pos = [];
   for (let i = 0; i < argv.length; i++) {

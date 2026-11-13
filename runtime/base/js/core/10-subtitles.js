@@ -10,11 +10,20 @@
   ];
 
   let subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
+  let globalOverrideSpec = null;
+  let buildSubSpec = null;
+  let updateSubTick = 0;
   let sceneScopedSpec = false;
 
   function getSubCfg() {
     const cfg = V.getCfg();
     return Object.assign({}, cfg.subtitles || {}, V.subtitles || {});
+  }
+
+  function resolveDefaultSubSpec() {
+    if (globalOverrideSpec != null) return globalOverrideSpec;
+    const subCfg = getSubCfg();
+    return subCfg.layout || subCfg.position || 'center';
   }
 
   function resolveSubLayoutObj(spec, subCfg) {
@@ -38,14 +47,24 @@
     }
   }
   V.setSubLayout = function (spec) {
-    if (V._inSceneUpdate) sceneScopedSpec = true;
+    if (V._inSceneBuild) {
+      buildSubSpec = spec;
+      sceneScopedSpec = true;
+    } else if (V._inSceneUpdate) {
+      updateSubTick = V._renderTick || 1;
+      sceneScopedSpec = true;
+    } else {
+      globalOverrideSpec = spec;
+    }
     return applySubLayout(spec);
   };
 
   function resetSceneSubLayout() {
+    buildSubSpec = null;
+    updateSubTick = 0;
     if (!sceneScopedSpec) return;
     sceneScopedSpec = false;
-    applySubLayout(getSubCfg().layout || getSubCfg().position || 'center');
+    applySubLayout(resolveDefaultSubSpec());
   }
 
   function mountSubSlot(slotEl, factory) {
@@ -72,9 +91,16 @@
 
   function syncSceneSubLayout(sc, lt) {
     const spec = sc.subLayout || sc.subtitles;
-    if (!spec) return;
-    sceneScopedSpec = true;
-    applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
+    if (spec) {
+      sceneScopedSpec = true;
+      applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
+      return;
+    }
+    if (updateSubTick > 0 && updateSubTick !== (V._renderTick || 0)) {
+      updateSubTick = 0;
+      sceneScopedSpec = buildSubSpec != null;
+      applySubLayout(buildSubSpec != null ? buildSubSpec : resolveDefaultSubSpec());
+    }
   }
 
   function updateSubDomText(cue) {

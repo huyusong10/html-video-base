@@ -3,18 +3,23 @@
 // 用法：node tools/audit-visual.mjs [video-id ...] [--strict] [--lang en] [--screenshots .runtime/audit]
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable, getSandboxCfg, localizeMediaRel } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable, getSandboxCfg, localizeMediaRel, normalizeCliArgs } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
+
+function clampInScene(sc, rawT) {
+  const maxT = Math.max(sc.start, sc.start + sc.duration - 0.02);
+  return Math.max(sc.start, Math.min(maxT, rawT));
+}
 
 function buildSamplePoints(V) {
   const pts = [];
   V.scenes.forEach((sc, si) => {
     if (sc.cues && sc.cues.length) {
       sc.cues.forEach((c, li) => {
-        pts.push({ t: Math.min(sc.start + sc.duration - 0.05, sc.start + (c.start + c.end) / 2), label: `S${si}L${li}`, isMid: li === 0 });
+        pts.push({ t: clampInScene(sc, Math.min(sc.start + sc.duration - 0.05, sc.start + (c.start + c.end) / 2)), label: `S${si}L${li}`, isMid: li === 0 });
       });
     } else {
-      pts.push({ t: sc.start + sc.duration * 0.5, label: `S${si}`, isMid: true });
+      pts.push({ t: clampInScene(sc, sc.start + sc.duration * 0.5), label: `S${si}`, isMid: true });
     }
   });
   return pts;
@@ -361,7 +366,8 @@ export async function auditVideos(videoIds, { strict = false, lang = '', screens
   return { errors: totalErrors, warnings: totalWarnings, screenshots: allShots };
 }
 
-function parseAuditCliArgs(raw) {
+function parseAuditCliArgs(rawInput) {
+  const raw = normalizeCliArgs(rawInput);
   let lang = '', screenshotDir = '';
   const ids = [];
   for (let i = 0; i < raw.length; i++) {
