@@ -1,5 +1,5 @@
 """开放式多模型 TTS 适配器注册表（edge / openai / elevenlabs / azure / http / command + 自定义脚本扩展）。"""
-import asyncio, base64, importlib, importlib.util, json, os, re, subprocess, urllib.error, urllib.parse, urllib.request
+import asyncio, base64, importlib, importlib.util, json, os, re, shlex, subprocess, urllib.error, urllib.parse, urllib.request
 from xml.sax.saxutils import escape as xml_escape
 
 DEFAULT_PROVIDER = 'edge'
@@ -229,17 +229,49 @@ async def synth_http(text: str, out_path: str, cfg: dict):
     return []
 
 
+def _subst_cmd_tokens(tpl: str, fmt_vars: dict, quote_val: bool = False) -> str:
+    def _rep(m):
+        val = str(fmt_vars.get(m.group(1), ''))
+        if not quote_val:
+            return val
+        return subprocess.list2cmdline([val]) if os.name == 'nt' else shlex.quote(val)
+
+    return re.sub(r'\{(text|raw_text|out|voice|speed)\}', _rep, str(tpl))
+
+
+def _split_cmd_template(cmd_tpl: str):
+    parts = shlex.split(cmd_tpl, posix=(os.name != 'nt'))
+    cleaned = []
+    for p in parts:
+        if os.name == 'nt' and len(p) >= 2 and p[0] == p[-1] and p[0] in ('"', "'"):
+            p = p[1:-1]
+        cleaned.append(p)
+    return cleaned
+
+
+def _build_command_invocation(cmd_tpl, fmt_vars: dict):
+    if isinstance(cmd_tpl, list):
+        return [_subst_cmd_tokens(str(x), fmt_vars, quote_val=False) for x in cmd_tpl], False
+    raw = str(cmd_tpl)
+    if not re.search(r'[|&;<>()`$\n]', raw):
+        try:
+            parts = _split_cmd_template(raw)
+            if parts:
+                return [_subst_cmd_tokens(p, fmt_vars, quote_val=False) for p in parts], False
+        except ValueError:
+            pass
+    return _subst_cmd_tokens(raw, fmt_vars, quote_val=True), True
+
+
 async def synth_command(text: str, out_path: str, cfg: dict):
     cmd_tpl = cfg.get('command')
     if not cmd_tpl:
         raise RuntimeError("TTS provider 'command' requires 'tts.command' in video.config.js")
     fmt_vars = {'text': text, 'raw_text': cfg.get('_rawText', text), 'out': out_path, 'voice': cfg.get('voice', ''), 'speed': cfg.get('speed', 1.0)}
+    cmd_args, use_shell = _build_command_invocation(cmd_tpl, fmt_vars)
 
     def _run():
-        if isinstance(cmd_tpl, list):
-            subprocess.run([str(x).format(**fmt_vars) for x in cmd_tpl], check=True)
-        else:
-            subprocess.run(str(cmd_tpl).format(**fmt_vars), shell=True, check=True)
+        subprocess.run(cmd_args, shell=use_shell, check=True)
 
     await asyncio.to_thread(_run)
     return []

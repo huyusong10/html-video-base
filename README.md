@@ -50,8 +50,8 @@ python -m venv .runtime/venv
 
 | API | 说明 |
 | :--- | :--- |
-| `V.use(plugin)` | 注册生命周期插件（`boot` / `layout` / `tick` / `seek` / `play` / `pause` / `sceneChange`） |
-| `V.transition(name, (prev, curr, k, sc) => {})` | 注册自定义跨幕转场（内置 `none` / `fade` / `slide` / `wipe` / `tiles`） |
+| `V.use(plugin)` | 注册生命周期插件（`onBoot` / `onLayout` / `onRender` / `onSeek` / `onPlay` / `onPause` / `onSceneEnter` / `onEnded`，兼容短名 `boot` / `layout` / `tick` / `seek` / `play` / `pause` / `sceneChange` / `ended`） |
+| `V.transition(name, { dur, mount(box, cfg), update(dom, near, dur, current, cfg) })` | 注册自定义跨幕转场（内置 `none` / `fade` / `slide` / `wipe` / `tiles`） |
 | `V.control({ id, icon, title, onClick, sync })` | 向底部控制栏扩展槽注入自定义图标按钮（推荐传 `16×16` SVG 路径数组、SVG 字符串或渲染函数） |
 | `V.icons(dict)` / `V.makeIcon(spec)` | 覆盖控制栏内置图标字典（`home` / `play` / `pause` / `replay` / `rate` / `subsOn` / `subsOff` / `volumeOn` / `volumeVoice` / `volumeBgm` / `volumeMute` / `webEnter` / `webExit` / `fullEnter` / `fullExit`）或生成同规格图标节点 |
 | `V.preset(name, factory)` | 注册可复用视觉原语（挂载于 `V.c[name]`） |

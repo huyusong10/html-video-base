@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { ROOT, listVideoIds, loadVideoSandbox, resolveFfmpeg, probeSceneAnchors } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, resolveFfmpeg, probeSceneAnchors, getSandboxCfg } from './lib/paths.mjs';
 import { writeSubtitleFiles } from './lib/subtitles.mjs';
 import { auditVideos } from './audit-visual.mjs';
 
@@ -17,7 +17,7 @@ const COMMON_HOMO_MAP = [
 const round3 = n => Math.round(Number(n) * 1000) / 1000;
 const stripPunct = s => String(s || '').replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').toLowerCase();
 
-function buildSpokenNormalizer(pronunciation) {
+function buildSpokenNormalizer(pronunciation, enableCommon = true) {
   const customRules = [];
   if (pronunciation && typeof pronunciation === 'object') {
     for (const [pat, rep] of Object.entries(pronunciation)) {
@@ -27,7 +27,7 @@ function buildSpokenNormalizer(pronunciation) {
   return s => {
     let out = String(s || '');
     for (const [re, rep] of customRules) out = out.replace(re, rep);
-    for (const [re, rep] of COMMON_HOMO_MAP) out = out.replace(re, rep);
+    if (enableCommon) for (const [re, rep] of COMMON_HOMO_MAP) out = out.replace(re, rep);
     return stripPunct(out);
   };
 }
@@ -67,7 +67,10 @@ function computeSceneSubCuesGrid(scenes) {
 export function stampBakedLayout(videoId, lang = '') {
   const { sandbox, videoDir, timingsPath, bgmRel } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: true, lang });
   const V = sandbox.V;
+  if (!V.voice) V.voice = {};
+  if (lang && !V.voice.lang) V.voice.lang = lang;
   const bakedLayout = {
+    ...(lang ? { lang } : {}),
     duration: round3(V.duration),
     scenes: V.scenes.map(sc => ({
       start: round3(sc.start),
@@ -253,7 +256,8 @@ export function verifyVideo(videoId, ffmpegBin, lang = '') {
   const { sandbox: dynamicSb, videoDir, audioRel } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: false, lang });
   const { sandbox: runtimeSb } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: false, requireTimings: false, lang });
   const V = dynamicSb.V;
-  const cfg = Object.assign({}, V.themeDefaults || {}, V.config || {});
+  const cfg = getSandboxCfg(V);
+  const ttsCfg = cfg.tts && typeof cfg.tts === 'object' ? cfg.tts : {};
 
   for (const ae of probeSceneAnchors(dynamicSb)) errors.push(`Broken anchor: ${ae}`);
 
@@ -267,7 +271,12 @@ export function verifyVideo(videoId, ffmpegBin, lang = '') {
     return errors;
   }
 
-  const totalLines = verifyScenesAndTimings(V, V.voice, buildSpokenNormalizer(cfg.pronunciation), errors);
+  const totalLines = verifyScenesAndTimings(
+    V,
+    V.voice,
+    buildSpokenNormalizer(ttsCfg.pronunciation || cfg.pronunciation, ttsCfg.polyphoneFix !== false),
+    errors
+  );
   verifyBakedLayoutMatch(V, V.voice, videoId, errors);
   if (Math.abs(runtimeSb.V.duration - V.duration) > 0.01) {
     errors.push(`Runtime V.duration (${runtimeSb.V.duration}) != dynamic V.duration (${V.duration})`);

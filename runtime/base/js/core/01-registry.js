@@ -15,8 +15,9 @@
   V._videoClips = V._videoClips || new Set();
 
   function upsertById(list, item) {
-    if (!item.id) { list.push(item); return item; }
-    const idx = list.findIndex(x => x.id === item.id);
+    const key = item.id || item.name;
+    if (!key) { list.push(item); return item; }
+    const idx = list.findIndex(x => (x.id || x.name) === key);
     if (idx >= 0) list[idx] = item;
     else list.push(item);
     return item;
@@ -117,9 +118,40 @@
     if (Array.isArray(list)) list.forEach(name => V.activatePreset(name));
   };
 
+  const HOOK_ALIASES = {
+    onStart: ['onBoot', 'boot', 'start'],
+    onBoot: ['boot', 'onStart', 'start'],
+    boot: ['onBoot', 'onStart', 'start'],
+    onLayout: ['layout'],
+    layout: ['onLayout'],
+    onRender: ['tick', 'onTick', 'render'],
+    onTick: ['tick', 'onRender', 'render'],
+    tick: ['onTick', 'onRender', 'render'],
+    onSeek: ['seek'],
+    seek: ['onSeek'],
+    onPlay: ['play'],
+    play: ['onPlay'],
+    onPause: ['pause'],
+    pause: ['onPause'],
+    onSceneEnter: ['sceneChange', 'onSceneChange', 'sceneEnter'],
+    onSceneChange: ['sceneChange', 'onSceneEnter', 'sceneEnter'],
+    sceneChange: ['onSceneChange', 'onSceneEnter', 'sceneEnter'],
+    onEnded: ['ended'],
+    ended: ['onEnded'],
+  };
+
+  function resolvePluginHook(plugin, hook) {
+    if (typeof plugin[hook] === 'function') return plugin[hook];
+    const alts = HOOK_ALIASES[hook];
+    if (!alts) return null;
+    for (const k of alts) if (typeof plugin[k] === 'function') return plugin[k];
+    return null;
+  }
+
   V.emit = function (hook, payload) {
     for (const p of V.plugins) {
-      if (typeof p[hook] === 'function') p[hook](payload, V);
+      const fn = resolvePluginHook(p, hook);
+      if (fn) fn.call(p, payload, V);
     }
   };
 
@@ -132,6 +164,37 @@
     return (V.config && V.config.lang) || '';
   };
 
+  function resolveBaseLang() {
+    if (V.config && V.config.lang) return String(V.config.lang);
+    const docEl = typeof document !== 'undefined' && document.documentElement;
+    const htmlLang = docEl && docEl.getAttribute && docEl.getAttribute('lang');
+    return htmlLang || '';
+  }
+
+  function sameLangFamily(a, b) {
+    if (!a || !b) return false;
+    const na = String(a).toLowerCase(), nb = String(b).toLowerCase();
+    return na === nb || na.split('-')[0] === nb.split('-')[0];
+  }
+
+  V.isSecondaryLocale = function (lang = V.getActiveLang()) {
+    if (!lang) return false;
+    if (V.locales && V.locales[lang]) return true;
+    const base = resolveBaseLang();
+    return base ? !sameLangFamily(lang, base) : true;
+  };
+
+  V.isVoiceLocaleMatch = function (voice = V.voice) {
+    if (!voice) return false;
+    const lang = V.getActiveLang();
+    if (voice.lang) return lang ? voice.lang === lang : !V.isSecondaryLocale(voice.lang);
+    return !V.isSecondaryLocale(lang);
+  };
+
+  V.getActiveVoice = function () {
+    return V.isVoiceLocaleMatch(V.voice) ? V.voice : null;
+  };
+
   function mergeUiDict(baseUi, nextUi) {
     if (!nextUi) return Object.assign({}, baseUi || {});
     const out = Object.assign({}, baseUi || {}, nextUi);
@@ -141,16 +204,29 @@
     return out;
   }
 
+  function extractLocaleCfg(loc) {
+    const out = Object.assign({}, (loc && loc.config) || {});
+    if (loc && loc.title && !out.title) out.title = loc.title;
+    if (loc && loc.tts && !out.tts) out.tts = loc.tts;
+    return out;
+  }
+
+  function mergeTtsDict(a, b) {
+    if (!a && !b) return undefined;
+    return Object.assign({}, a || {}, b || {});
+  }
+
   V.getCfg = function () {
     V.applyConfiguredPresets();
     const lang = V.getActiveLang();
     const loc = (lang && V.locales[lang]) || null;
-    const locCfg = Object.assign({}, (loc && loc.config) || {});
-    if (loc && loc.title && !locCfg.title) locCfg.title = loc.title;
+    const locCfg = extractLocaleCfg(loc);
     const td = V.themeDefaults || {};
     const vc = V.config || {};
     const merged = Object.assign({}, td, vc, locCfg);
     merged.ui = mergeUiDict(mergeUiDict(td.ui, vc.ui), locCfg.ui);
+    const tts = mergeTtsDict(mergeTtsDict(td.tts, vc.tts), locCfg.tts);
+    if (tts) merged.tts = tts;
     return merged;
   };
 })(globalThis.V = globalThis.V || {});

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   ROOT, VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR,
-  listVideoIds, loadVideoSandbox,
+  listVideoIds, loadVideoSandbox, getSandboxCfg,
 } from './lib/paths.mjs';
 
 function parseBundleArgs(argv) {
@@ -47,6 +47,58 @@ function rewriteDirFiles(dirPath, exts, replacements, recursive = false) {
   }
 }
 
+function collectRelFiles(dir, prefix = '', out = new Set()) {
+  if (!fs.existsSync(dir)) return out;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) collectRelFiles(full, rel, out);
+    else if (entry.isFile()) out.add(rel);
+  }
+  return out;
+}
+
+function isolateCollidingSharedAssets(sharedDir, localDir, targetOut) {
+  const sharedFiles = collectRelFiles(sharedDir);
+  const localFiles = collectRelFiles(localDir);
+  const collisions = [];
+  for (const rel of sharedFiles) {
+    if (!localFiles.has(rel)) continue;
+    collisions.push(rel);
+    const dst = path.join(targetOut, 'shared-assets', rel);
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.copyFileSync(path.join(sharedDir, rel), dst);
+  }
+  return collisions.sort((a, b) => b.length - a.length);
+}
+
+function buildCollisionRules(collisions, prefixFrom, prefixTo) {
+  return collisions.map(rel => {
+    const esc = rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return [new RegExp(`${prefixFrom}assets/${esc}(?![\\w.-])`, 'g'), `${prefixTo}shared-assets/${rel}`];
+  });
+}
+
+function rewriteBundledRefs(targetOut, collisions) {
+  const docRelRule = [/(?<!\.\.\/)\.\.\/(base|assets|themes)\//g, './$1/'];
+  const subRelRule = [/\.\.\/\.\.\/(base|assets|themes)\//g, '../$1/'];
+  const docColRules = buildCollisionRules(collisions, '(?<!\\.\\.\\/)\\.\\.\\/', './');
+  const subColRules = [
+    ...buildCollisionRules(collisions, '\\.\\./\\.\\.\\/', '../'),
+    ...buildCollisionRules(collisions, '(?<!\\.\\.\\/)\\.\\.\\/', './'),
+  ];
+  const cssColRules = buildCollisionRules(collisions, '\\.\\./\\.\\.\\/', '../');
+  const themeCssColRules = buildCollisionRules(collisions, '(?<=\\.\\.\\/)', '');
+
+  rewriteDirFiles(targetOut, ['.html', '.css', '.js', '.mjs'], [...docColRules, docRelRule], false);
+  for (const sub of ['js', 'locales']) {
+    rewriteDirFiles(path.join(targetOut, sub), ['.js', '.mjs'], [...subColRules, docRelRule, subRelRule], true);
+  }
+  rewriteDirFiles(path.join(targetOut, 'css'), ['.css'], [...cssColRules, subRelRule], true);
+  rewriteDirFiles(path.join(targetOut, 'themes'), ['.js', '.mjs'], [...docColRules, docRelRule], true);
+  rewriteDirFiles(path.join(targetOut, 'themes'), ['.css'], themeCssColRules, true);
+}
+
 export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
   const videosDir = path.join(projectRoot, 'videos');
   const srcVideo = path.join(videosDir, videoId);
@@ -56,20 +108,15 @@ export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
   fs.rmSync(targetOut, { recursive: true, force: true });
   fs.mkdirSync(targetOut, { recursive: true });
 
+  const sharedAssetsDir = path.join(videosDir, 'assets');
   copyIfExists(RUNTIME_BASE_DIR, path.join(targetOut, 'base'));
   copyIfExists(path.join(videosDir, 'base'), path.join(targetOut, 'base'));
-  copyIfExists(path.join(videosDir, 'assets'), path.join(targetOut, 'assets'));
+  copyIfExists(sharedAssetsDir, path.join(targetOut, 'assets'));
   copyIfExists(path.join(videosDir, 'themes'), path.join(targetOut, 'themes'));
+  const collisions = isolateCollidingSharedAssets(sharedAssetsDir, path.join(srcVideo, 'assets'), targetOut);
   fs.cpSync(srcVideo, targetOut, { recursive: true, force: true });
 
-  const docRelRule = [/(?<!\.\.\/)\.\.\/(base|assets|themes)\//g, './$1/'];
-  const subRelRule = [/\.\.\/\.\.\/(base|assets|themes)\//g, '../$1/'];
-  rewriteDirFiles(targetOut, ['.html', '.css', '.js', '.mjs'], [docRelRule], false);
-  for (const sub of ['js', 'locales']) {
-    rewriteDirFiles(path.join(targetOut, sub), ['.js', '.mjs'], [docRelRule, subRelRule], true);
-  }
-  rewriteDirFiles(path.join(targetOut, 'css'), ['.css'], [subRelRule], true);
-  rewriteDirFiles(path.join(targetOut, 'themes'), ['.js', '.mjs'], [docRelRule], true);
+  rewriteBundledRefs(targetOut, collisions);
   console.log(`✅ Bundled single video '${videoId}' -> ${targetOut}`);
   return targetOut;
 }
@@ -77,7 +124,7 @@ export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
 function buildManifestEntry(id) {
   try {
     const { sandbox } = loadVideoSandbox(ROOT, id, { ignoreBaked: false, requireTimings: false });
-    const cfg = Object.assign({}, sandbox.V.themeDefaults || {}, sandbox.V.config || {});
+    const cfg = getSandboxCfg(sandbox.V);
     return {
       id,
       title: cfg.title || id,

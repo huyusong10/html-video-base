@@ -332,6 +332,124 @@ async function verifyPlayerBarContracts(page, port) {
   await verifyIframeWebFullContract(page, port);
 }
 
+async function verifyHttpAndDomRegressions(page, port) {
+  const suffixRes = await fetch(`http://127.0.0.1:${port}/demo/index.html`, { headers: { Range: 'bytes=-64' } });
+  assert.equal(suffixRes.status, 206, 'Suffix byte range bytes=-64 must return 206');
+  const suffixTxt = await suffixRes.text();
+  assert.ok(suffixTxt.length > 0 && suffixTxt.length <= 64, `Suffix range length must be 1..64, got ${suffixTxt.length}`);
+  const unsatRes = await fetch(`http://127.0.0.1:${port}/demo/index.html`, { headers: { Range: 'bytes=99999999-999999999' } });
+  assert.equal(unsatRes.status, 416, 'Out-of-bounds byte range must return 416');
+
+  const domRes = await page.evaluate(() => {
+    const box = document.createElement('div');
+    window.V.u.set(box, { opacity: 0.25, scale: 1.5, rotate: 12 });
+    const origVoice = window.V.voice;
+    const origLines0 = window.V.scenes[0]._origLines.slice();
+    window.V.voice = null;
+    window.V.scenes[0]._origLines = ['Run voice.py v2.6 at 0.2s carefully.'];
+    window.V.layout();
+    const dotChunks = window.V.scenes[0].subCues.map(c => c.text);
+    window.V.voice = origVoice;
+    window.V.scenes[0]._origLines = origLines0;
+    window.V.layout();
+    return { opacity: box.style.opacity, transform: box.style.transform, dotChunks };
+  });
+  assert.equal(domRes.opacity, '0.25', 'V.u.set must accept opacity alias');
+  assert.ok(domRes.transform.includes('scale(1.5)') && domRes.transform.includes('rotate(12deg)'), `V.u.set must accept scale/rotate aliases, got ${domRes.transform}`);
+  assert.equal(domRes.dotChunks.length, 1, `chunkSentences must not split dots inside tokens: ${JSON.stringify(domRes.dotChunks)}`);
+  assert.ok(domRes.dotChunks[0].includes('voice.py v2.6 at 0.2s'), `chunkSentences lost dotted tokens: ${domRes.dotChunks[0]}`);
+}
+
+async function verifyInteractiveRegressions(page) {
+  const res = await page.evaluate(async () => {
+    const lastStart = window.V.scenes[window.V.scenes.length - 1].start;
+    window.__video.tryEgg(lastStart + 0.05, 'egg-last');
+    await new Promise(r => setTimeout(r, 80));
+    const lastEggAlive = document.body.classList.contains('egg-mode')
+      && document.querySelector('.v-sandbox-bar').classList.contains('on');
+    document.querySelector('.v-sandbox-back').click();
+
+    let playHits = 0, pauseHits = 0, actionResumeVal = null;
+    window.V.use({ id: 'reg-hooks', play() { playHits++; }, pause() { pauseHits++; } });
+    const sc0 = window.V.scenes[0];
+    const origCp = sc0.checkpoints;
+    sc0._resolvedCheckpoints = null;
+    sc0.checkpoints = [{
+      at: 0.2,
+      id: 'reg-cp',
+      title: 'Reg Check',
+      actions: [{ label: 'Proceed', resume: 'ok-action' }],
+      onResume(val) { actionResumeVal = val; },
+    }];
+    window.V.resetCheckpoints();
+    window.__video.seek(0.14);
+    window.__video.play();
+    const ov = document.getElementById('checkpoint-overlay');
+    for (let i = 0; i < 20 && !ov.classList.contains('is-open'); i++) await new Promise(r => setTimeout(r, 40));
+    const cpOpened = ov.classList.contains('is-open');
+    const btn = ov.querySelector('.cp-btn');
+    const btnLabel = btn ? btn.textContent : '';
+    if (btn) btn.click();
+    window.V.resetCheckpoints();
+    window.__video.seek(0.14);
+    for (let i = 0; i < 20 && !ov.classList.contains('is-open'); i++) await new Promise(r => setTimeout(r, 40));
+    window.__video.seek(0.05);
+    const cpClosedOnSeek = !ov.classList.contains('is-open');
+    window.__video.pause();
+    sc0.checkpoints = origCp;
+    sc0._resolvedCheckpoints = null;
+    window.V.resetCheckpoints();
+    return { lastEggAlive, cpOpened, btnLabel, actionResumeVal, playHits, pauseHits, cpClosedOnSeek };
+  });
+  assert.equal(res.lastEggAlive, true, 'tryEgg() targeting live last scene must stay active across animation frames');
+  assert.equal(res.cpOpened, true, 'Checkpoint with actions[] must open #checkpoint-overlay');
+  assert.equal(res.btnLabel, 'Proceed', 'Checkpoint actions[] button label must render');
+  assert.equal(res.actionResumeVal, 'ok-action', 'Checkpoint action resume fallback must pass to onResume');
+  assert.ok(res.playHits >= 1 && res.pauseHits >= 1, `play/pause plugin hooks must fire (${res.playHits}/${res.pauseHits})`);
+  assert.equal(res.cpClosedOnSeek, true, 'Seeking while checkpoint overlay is open must close #checkpoint-overlay');
+}
+
+async function verifyHookAndLocaleVoiceRegressions(page) {
+  const r = await page.evaluate(() => {
+    let bootHit = 0, tickHit = 0, scChangeHit = 0, ctxBound = false;
+    const plug = {
+      id: 'short-alias-hooks',
+      boot() { bootHit++; ctxBound = this === plug; },
+      tick() { tickHit++; },
+      sceneChange() { scChangeHit++; },
+    };
+    window.V.use(plug);
+    window.V.emit('onStart', window.V._playerCtl);
+    window.__video.seek(window.V.scenes[1].start + 0.1);
+    window.__video.seek(0.2);
+
+    const origVoice = window.V.voice;
+    const origLang = window.V.__activeLang;
+    window.V.voice = {
+      src: 'assets/zh-dry.m4a',
+      durations: [[9.9]],
+      subCues: [[[[0, 9.9, '中文旧字幕']]]],
+      bakedLayout: { duration: 99, scenes: [{ start: 0, duration: 50, cues: [[0.35, 10.25]] }, { start: 50, duration: 49, cues: [[0.35, 10.25]] }] },
+    };
+    window.V.__activeLang = 'en';
+    const matchStale = window.V.isVoiceLocaleMatch();
+    window.V.layout();
+    const leakZhSub = window.V.scenes[0].subCues.some(c => c.text.includes('中文旧字幕'));
+    const leakBakedDur = window.V.duration === 99;
+    window.V.voice = origVoice;
+    window.V.__activeLang = origLang;
+    window.V.layout();
+    return { bootHit, tickHit, scChangeHit, ctxBound, matchStale, leakZhSub, leakBakedDur };
+  });
+  assert.equal(r.bootHit, 1, 'Plugin boot() alias must fire on onStart');
+  assert.equal(r.ctxBound, true, 'Plugin hook must preserve this === plugin');
+  assert.ok(r.tickHit >= 1, 'Plugin tick() alias must fire on onRender');
+  assert.ok(r.scChangeHit >= 1, 'Plugin sceneChange() alias must fire on onSceneEnter');
+  assert.equal(r.matchStale, false, 'Unlabeled primary V.voice must NOT match secondary locale');
+  assert.equal(r.leakZhSub, false, 'Stale primary V.voice.subCues must NOT leak into secondary locale V.layout()');
+  assert.equal(r.leakBakedDur, false, 'Stale primary bakedLayout must NOT apply to secondary locale V.layout()');
+}
+
 async function verifyBugfixRegressions(page, port) {
   const badUrlRes = await fetch(`http://127.0.0.1:${port}/%E0%A4%A`);
   assert.equal(badUrlRes.status, 400, 'Malformed URI path must return 400 without crashing HTTP server');
@@ -358,6 +476,10 @@ async function verifyBugfixRegressions(page, port) {
   assert.ok(Math.abs(rt.backNow - 0.35) < 0.03, `Rapid scrub-back seek must not be dropped by dedupe guard, got ${rt.backNow}`);
   assert.equal(rt.enSlowdown, 0.9, 'Per-line enSlowdown override must survive timeline buildCueEntry');
   assert.equal(rt.align, 'acoustic', 'Per-line align override must survive timeline buildCueEntry');
+
+  await verifyHttpAndDomRegressions(page, port);
+  await verifyInteractiveRegressions(page);
+  await verifyHookAndLocaleVoiceRegressions(page);
 }
 
 async function verifyV26ExperienceContracts(page) {
@@ -524,7 +646,7 @@ async function verifyBrowserCapabilities(videoDir) {
       hasPreset: Boolean(document.querySelector('.test-preset-badge')),
       hasControl: Boolean(document.querySelector('[data-custom-ctrl="test-btn"]')),
       maxEnergy: window.__maxLayerEnergy,
-      cpActiveInRecord: document.getElementById('checkpoint-overlay')?.classList.contains('on') || false,
+      cpActiveInRecord: document.getElementById('checkpoint-overlay')?.classList.contains('is-open') || false,
     }));
     assert.equal(recState.pluginInstalled, true, 'Plugin should install');
     assert.equal(recState.hasPreset, true, 'Preset should render');
@@ -533,8 +655,12 @@ async function verifyBrowserCapabilities(videoDir) {
     assert.equal(recState.cpActiveInRecord, false, 'Record mode must auto-bypass checkpoints');
 
     await page.goto(`http://127.0.0.1:${port}/demo/?lang=en&record=1`, { waitUntil: 'networkidle' });
-    const enTitle = await page.evaluate(() => window.V.scenes[0].title);
-    assert.equal(enTitle, 'Architecture', 'Localized scene title should apply');
+    const enInfo = await page.evaluate(() => ({
+      title: window.V.scenes[0].title,
+      bakedLang: window.V.voice && window.V.voice.bakedLayout && window.V.voice.bakedLayout.lang,
+    }));
+    assert.equal(enInfo.title, 'Architecture', 'Localized scene title should apply');
+    assert.equal(enInfo.bakedLang, 'en', 'Localized timings.en.js must stamp bakedLayout.lang = "en"');
 
     await verifyPlayerBarContracts(page, port);
     await page.close();
@@ -571,6 +697,7 @@ async function main() {
     const mixCold = runCliCmd(['build', 'demo', '--mix-only', '--bitrate', '96k']);
     assert.ok(mixCold.includes('2 fallback to stem'), `Expected cold offline mix to slice from stem without TTS, got:\n${mixCold}`);
     fs.renameSync(path.join(videoDir, 'mock_tts.py.bak'), path.join(videoDir, 'mock_tts.py'));
+    runCliCmd(['audit', 'demo', '--lang', 'en']);
     runCliCmd(['build', 'demo', '--lang', 'en']);
     const shotDir = path.join(TEST_ROOT, 'audit-shots');
     runCliCmd(['audit', 'demo', '--screenshots', shotDir]);
@@ -605,6 +732,21 @@ async function main() {
     assert.ok(fs.existsSync(path.join(singleDir, 'base/js/engine.js')), 'Single bundle base/js/engine.js should exist');
     assert.ok(fs.readFileSync(path.join(singleDir, 'index.html'), 'utf8').includes('./base/js/engine.js'), 'Single bundle index.html must rewrite ../base/ -> ./base/');
     assert.ok(fs.readFileSync(path.join(singleDir, 'js/s02.js'), 'utf8').includes('./assets/shared.svg'), 'Single bundle js/* must rewrite document-relative ../assets/ -> ./assets/');
+
+    fs.mkdirSync(path.join(TEST_ROOT, 'videos/assets'), { recursive: true });
+    fs.mkdirSync(path.join(TEST_ROOT, 'videos/themes'), { recursive: true });
+    fs.writeFileSync(path.join(TEST_ROOT, 'videos/assets/collide.svg'), '<svg>SHARED</svg>', 'utf8');
+    fs.writeFileSync(path.join(videoDir, 'assets/collide.svg'), '<svg>LOCAL</svg>', 'utf8');
+    fs.writeFileSync(path.join(TEST_ROOT, 'videos/themes/collision-test.css'), '.t-col{background:url(../assets/collide.svg);mask:url(my-assets/collide.svg)}\n', 'utf8');
+    fs.appendFileSync(path.join(videoDir, 'js/s02.js'), '\nvoid "../assets/collide.svg"; void "assets/collide.svg";\n', 'utf8');
+    const colDir = path.join(TEST_ROOT, 'dist-single-collision');
+    runCliCmd(['bundle', 'demo', '--single', '--out', colDir]);
+    assert.equal(fs.readFileSync(path.join(colDir, 'assets/collide.svg'), 'utf8'), '<svg>LOCAL</svg>', 'Local colliding asset must win at assets/');
+    assert.equal(fs.readFileSync(path.join(colDir, 'shared-assets/collide.svg'), 'utf8'), '<svg>SHARED</svg>', 'Shared colliding asset must isolate into shared-assets/');
+    const colS02 = fs.readFileSync(path.join(colDir, 'js/s02.js'), 'utf8');
+    assert.ok(colS02.includes('./shared-assets/collide.svg') && colS02.includes('"assets/collide.svg"'), 'Shared vs local refs in js/* must stay distinct');
+    const colThemeCss = fs.readFileSync(path.join(colDir, 'themes/collision-test.css'), 'utf8');
+    assert.ok(colThemeCss.includes('../shared-assets/collide.svg') && colThemeCss.includes('my-assets/collide.svg'), 'Theme CSS must rewrite ../assets/ collisions without corrupting substring paths');
 
     console.log('✅ All html-video-base v2.6 end-to-end self-tests PASSED.');
   } finally {

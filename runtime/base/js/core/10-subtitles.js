@@ -10,7 +10,7 @@
   ];
 
   let subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
-  let appliedSceneSpec = false;
+  let sceneScopedSpec = false;
 
   function getSubCfg() {
     const cfg = V.getCfg();
@@ -18,12 +18,13 @@
   }
 
   function resolveSubLayoutObj(spec, subCfg) {
-    if (!spec) return { pos: 'center' };
-    if (typeof spec === 'string') {
-      const m = subCfg && subCfg.modes && subCfg.modes[spec];
-      return m ? Object.assign({ pos: 'center' }, m) : { pos: spec };
+    const eff = spec || (subCfg && (subCfg.layout || subCfg.position));
+    if (!eff) return { pos: 'center' };
+    if (typeof eff === 'string') {
+      const m = subCfg && subCfg.modes && subCfg.modes[eff];
+      return m ? Object.assign({ pos: 'center' }, m) : { pos: eff };
     }
-    return Object.assign({ pos: spec.pos || 'center' }, spec);
+    return Object.assign({ pos: eff.pos || 'center' }, eff);
   }
 
   function applySubLayout(spec) {
@@ -36,7 +37,16 @@
       else subs.style.setProperty(cssVar, typeof val === 'number' && prop !== 'zIndex' ? `${val}px` : String(val));
     }
   }
-  V.setSubLayout = applySubLayout;
+  V.setSubLayout = function (spec) {
+    if (V._inSceneUpdate) sceneScopedSpec = true;
+    return applySubLayout(spec);
+  };
+
+  function resetSceneSubLayout() {
+    if (!sceneScopedSpec) return;
+    sceneScopedSpec = false;
+    applySubLayout(getSubCfg().layout || getSubCfg().position || 'center');
+  }
 
   function mountSubSlot(slotEl, factory) {
     if (!slotEl || !factory) return;
@@ -60,16 +70,11 @@
     if (subCfg.layout || subCfg.position) applySubLayout(subCfg.layout || subCfg.position);
   }
 
-  function syncSceneSubLayout(sc, lt, subCfg) {
+  function syncSceneSubLayout(sc, lt) {
     const spec = sc.subLayout || sc.subtitles;
-    if (spec) {
-      appliedSceneSpec = true;
-      applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
-      return;
-    }
-    if (!appliedSceneSpec) return;
-    appliedSceneSpec = false;
-    applySubLayout(subCfg.layout || subCfg.position || 'center');
+    if (!spec) return;
+    sceneScopedSpec = true;
+    applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
   }
 
   function updateSubDomText(cue) {
@@ -115,5 +120,5 @@
     return activeCueIdx;
   }
 
-  V._subtitlesRuntime = { bindSubElements, applySubLayout, updateSubs };
+  V._subtitlesRuntime = { bindSubElements, applySubLayout, resetSceneSubLayout, updateSubs };
 })(globalThis.V = globalThis.V || {});

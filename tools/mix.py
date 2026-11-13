@@ -342,23 +342,33 @@ def _slice_stem_cue(stem_mono, baked_scenes, si, sc, li, c):
     return seg
 
 
+def _read_cue_wav(wav_path):
+    raw_y, sr = sf.read(wav_path)
+    raw_y = raw_y.mean(axis=1) if raw_y.ndim > 1 else raw_y
+    g = math.gcd(SR, sr)
+    return resample_poly(raw_y, SR // g, sr // g)
+
+
+def _maybe_load_stem(stem_loaded, stem_mono, fallback_stem_path):
+    if stem_loaded:
+        return True, stem_mono
+    if fallback_stem_path and os.path.exists(fallback_stem_path):
+        return True, decode_audio_file(fallback_stem_path, channels=1)
+    return True, None
+
+
 def mix_voice_track(scenes, vdir, n, fallback_stem_path=None, baked_scenes=None):
     voice, active, has_voice = np.zeros(n), np.zeros(n), False
+    stem_mask = np.zeros(n, dtype=bool)
     stem_mono, stem_loaded = None, False
     for si, sc in enumerate(scenes):
         for li, c in enumerate(sc.get('cues', [])):
             wav_path = f'{vdir}/{si:02d}_{li:02d}.wav'
-            y = None
-            if os.path.exists(wav_path):
-                raw_y, sr = sf.read(wav_path)
-                raw_y = raw_y.mean(axis=1) if raw_y.ndim > 1 else raw_y
-                g = math.gcd(SR, sr)
-                y = resample_poly(raw_y, SR // g, sr // g)
+            used_stem = not os.path.exists(wav_path)
+            if not used_stem:
+                y = _read_cue_wav(wav_path)
             else:
-                if not stem_loaded:
-                    stem_loaded = True
-                    if fallback_stem_path and os.path.exists(fallback_stem_path):
-                        stem_mono = decode_audio_file(fallback_stem_path, channels=1)
+                stem_loaded, stem_mono = _maybe_load_stem(stem_loaded, stem_mono, fallback_stem_path)
                 y = _slice_stem_cue(stem_mono, baked_scenes, si, sc, li, c)
             if y is None or len(y) == 0:
                 continue
@@ -368,7 +378,9 @@ def mix_voice_track(scenes, vdir, n, fallback_stem_path=None, baked_scenes=None)
             a, b = max(0, int(at * SR)), min(n, int((at + len(y) / SR) * SR))
             if b > a:
                 active[a:b] = 1
-    return voice, active, has_voice
+                if used_stem:
+                    stem_mask[a:b] = True
+    return voice, active, has_voice, stem_mask
 
 
 def build_bgm_track(bgm_cfg, video_dir, dur, n, secs, active, has_voice):
@@ -444,6 +456,15 @@ def _render_custom_sfx_events(fx_st, events, video_dir):
             place_stereo(fx_st, builtin_cache[kind], at_sec, vol)
 
 
+def _fit_clip_samples(sig, max_len, loop):
+    if max_len <= 0 or len(sig) == 0:
+        return sig
+    if loop and len(sig) < max_len:
+        reps = (max_len + len(sig) - 1) // len(sig)
+        sig = np.tile(sig, (reps, 1)) if sig.ndim > 1 else np.tile(sig, reps)
+    return sig[:max_len] if len(sig) > max_len else sig
+
+
 def mix_video_clip_tracks(data, video_dir, n):
     clips_st = np.zeros((n, 2), dtype=np.float32)
     for vc in data.get('videoClips', []):
@@ -455,8 +476,7 @@ def mix_video_clip_tracks(data, video_dir, n):
             continue
         sig = decode_audio_file(full, channels=2, trim_start=float(vc.get('trim') or 0.0), speed=float(vc.get('speed') or 1.0))
         max_len = int(max(0.0, float(vc.get('maxDur') or 0.0)) * SR)
-        if max_len > 0 and len(sig) > max_len:
-            sig = sig[:max_len]
+        sig = _fit_clip_samples(sig, max_len, bool(vc.get('loop')))
         place_stereo(clips_st, sig, float(vc.get('at') or 0.0), vol)
     return clips_st
 
@@ -486,8 +506,23 @@ def _soft_clip(sig):
     return np.tanh(sig * 1.1) / np.tanh(1.1)
 
 
-def _write_dual_stems(fg, m, out, bgm_out, dur, bitrate, bgm_bitrate):
-    fg_s, m_s = _soft_clip(fg), _soft_clip(m)
+def _compose_foreground_bus(voice, f, vc, stem_mask):
+    voice_st = np.stack([voice, voice], 1)
+    extras = f + vc
+    if stem_mask is not None and stem_mask.any():
+        extras = extras.copy()
+        extras[stem_mask] = 0.0
+    return voice_st + extras
+
+
+def _clip_preserving_stem(sig, stem_mask):
+    if stem_mask is not None and stem_mask.any():
+        return np.where(stem_mask[:, None], sig, _soft_clip(sig))
+    return _soft_clip(sig)
+
+
+def _write_dual_stems(fg, m, out, bgm_out, dur, bitrate, bgm_bitrate, stem_mask=None):
+    fg_s, m_s = _clip_preserving_stem(fg, stem_mask), _soft_clip(m)
     ref_peak = float(np.abs(fg_s + m_s).max())
     scale = (0.95 / ref_peak) if ref_peak > 1e-6 else 1.0
     write_master_output(fg_s * scale, out, bitrate)
@@ -512,17 +547,23 @@ def main():
     def_e = [0.45, 0.55, 0.62, 0.68, 0.65]
     secs = [dict(s, energy=s.get('energy', def_e[i] if i < len(def_e) else 0.58)) for i, s in enumerate(data['scenes'])]
 
-    voice, active, has_voice = mix_voice_track(data['scenes'], vdir, n, fallback_stem_path=out, baked_scenes=data.get('bakedScenes'))
+    voice, active, has_voice, stem_mask = mix_voice_track(
+        data['scenes'], vdir, n, fallback_stem_path=out, baked_scenes=data.get('bakedScenes')
+    )
     m = build_bgm_track(parse_bgm_cfg(data.get('bgm')), video_dir, dur, n, secs, active, has_voice)
     f = mix_sfx_bus(data, parse_sfx_cfg(data.get('sfx')), video_dir, n)
     vc = mix_video_clip_tracks(data, video_dir, n)
-    fg = np.stack([voice, voice], 1) + f + vc
+    fg = _compose_foreground_bus(voice, f, vc, stem_mask)
 
     if bgm_out:
-        _write_dual_stems(fg, m, out, bgm_out, dur, data.get('audioBitrate'), data.get('bgmBitrate'))
+        _write_dual_stems(fg, m, out, bgm_out, dur, data.get('audioBitrate'), data.get('bgmBitrate'), stem_mask=stem_mask)
         return
 
-    mix = _soft_clip(m + fg)
+    bgm_masked = m
+    if stem_mask is not None and stem_mask.any():
+        bgm_masked = m.copy()
+        bgm_masked[stem_mask] = 0.0
+    mix = _clip_preserving_stem(bgm_masked + fg, stem_mask)
     peak = np.abs(mix).max()
     if peak > 1e-6:
         mix = mix / peak * 0.95

@@ -284,15 +284,23 @@ function resolveSceneScriptList(videoDir, cfg) {
   return fs.readdirSync(jsDir).filter(f => f.endsWith('.js')).sort().map(f => `js/${f}`);
 }
 
+export function getSandboxCfg(V) {
+  if (!V) return {};
+  if (typeof V.getCfg === 'function') return V.getCfg();
+  return Object.assign({}, V.themeDefaults || {}, V.config || {});
+}
+
 function loadOptionalTimings(sandbox, timingsPath, timingsRel, videoId, requireTimings) {
   if (!fs.existsSync(timingsPath)) {
     if (requireTimings) throw new Error(`[${videoId}] Missing timings file: ${timingsPath}`);
-    return;
+    return false;
   }
   try {
     vm.runInContext(fs.readFileSync(timingsPath, 'utf8'), sandbox, { filename: timingsRel });
+    return true;
   } catch (err) {
     if (requireTimings) throw err;
+    return false;
   }
 }
 
@@ -313,11 +321,15 @@ export function loadVideoSandbox(root, videoId, { ignoreBaked = false, requireTi
   }
   loadLocaleScriptIfPresent(videoDir, sandbox, lang);
 
-  const { timingsRel, audioRel, bgmRel } = resolveLangMediaPaths(sandbox.V.config, lang);
+  const effCfg = getSandboxCfg(sandbox.V);
+  const { timingsRel, audioRel, bgmRel } = resolveLangMediaPaths(effCfg, lang);
   const timingsPath = path.join(videoDir, timingsRel);
-  loadOptionalTimings(sandbox, timingsPath, timingsRel, videoId, requireTimings);
+  const loadedTimings = loadOptionalTimings(sandbox, timingsPath, timingsRel, videoId, requireTimings);
+  if (!loadedTimings && sandbox.V.voice && sandbox.V.isVoiceLocaleMatch && !sandbox.V.isVoiceLocaleMatch(sandbox.V.voice)) {
+    sandbox.V.voice = null;
+  }
 
-  for (const rel of resolveSceneScriptList(videoDir, sandbox.V.config)) {
+  for (const rel of resolveSceneScriptList(videoDir, effCfg)) {
     const full = path.join(videoDir, rel);
     vm.runInContext(fs.readFileSync(full, 'utf8'), sandbox, { filename: `videos/${videoId}/${rel}` });
   }

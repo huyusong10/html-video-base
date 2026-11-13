@@ -20,7 +20,7 @@
   let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0;
   let inBar = false, lastPtrX = -9999, lastPtrY = -9999;
   let wipeState = { name: '', handler: null, dom: null };
-  const sandboxState = { active: false, entering: false, returnTime: null, el: null, txtEl: null, backEl: null };
+  const sandboxState = { active: false, entering: false, autoExitOnLast: true, returnTime: null, el: null, txtEl: null, backEl: null };
   const ui = {};
   let audioRt = null;
 
@@ -122,11 +122,19 @@
   function enter(sc) {
     if (current && current.root) current.root.remove();
     V._videoClips.clear();
+    if (V._subtitlesRuntime && V._subtitlesRuntime.resetSceneSubLayout) {
+      V._subtitlesRuntime.resetSceneSubLayout();
+    }
     const si = V.scenes.indexOf(sc);
     sc.root = h('div', { class: 'scene ' + (sc.cls || '') });
     sc.ctx = V.makeCtx(sc, si);
     stage.appendChild(sc.root);
-    sc.build(sc.root, sc.ctx);
+    V._inSceneUpdate = true;
+    try {
+      sc.build(sc.root, sc.ctx);
+    } finally {
+      V._inSceneUpdate = false;
+    }
     current = sc;
     V.emit('onSceneEnter', { scene: sc, sceneIndex: si });
   }
@@ -148,6 +156,10 @@
   }
 
   function runTransition() {
+    if (current && current.root) {
+      current.root.style.transform = '';
+      current.root.style.opacity = '';
+    }
     const box = document.getElementById('wipe');
     if (!box || V.scenes.length < 2) return;
     const cfg = V.getCfg();
@@ -170,8 +182,11 @@
   }
 
   function syncSceneVideoClips(lt) {
+    const tick = V._renderTick || 0;
     for (const clip of V._videoClips) {
-      if (clip.isConnected) syncVideoClip(clip, lt, playing && !scrubbing);
+      if (!clip.isConnected) continue;
+      if (clip._vclip && clip._vclip._syncedTick === tick) continue;
+      syncVideoClip(clip, lt, playing && !scrubbing);
     }
   }
 
@@ -207,6 +222,8 @@
     if (!Number.isFinite(target)) return;
     const prefix = opts.prefix === undefined ? '🎮 彩蛋试玩：' : opts.prefix;
     const label = opts.hint ? prefix + opts.hint : '🎮 彩蛋试玩中';
+    const last = V.scenes[V.scenes.length - 1];
+    sandboxState.autoExitOnLast = !last || target < last.start;
     sandboxState.returnTime = Number.isFinite(opts.returnTime) ? opts.returnTime : resolveDefaultSandboxReturn();
     sandboxState.entering = true;
     setSandboxActiveDom(true, label, opts.backLabel || '↩ 返回终章');
@@ -241,11 +258,24 @@
   function syncSceneCtxAndEndState(sc, idle) {
     ended = !playing && now >= V.duration - 0.01;
     document.body.classList.toggle('is-ended', ended);
-    if (sandboxState.active && !sandboxState.entering && sc === V.scenes[V.scenes.length - 1]) setSandboxActiveDom(false);
+    if (sandboxState.active && !sandboxState.entering && sandboxState.autoExitOnLast && sc === V.scenes[V.scenes.length - 1]) {
+      setSandboxActiveDom(false);
+    }
     if (sc !== current) enter(sc);
     sc.ctx.clock = V._clock;
     sc.ctx.idle = idle;
     sc.ctx.ended = ended;
+  }
+
+  function runSceneUpdate(sc, lt, idle) {
+    V._renderTick = (V._renderTick || 0) + 1;
+    V._isPlaying = playing && !scrubbing;
+    V._inSceneUpdate = true;
+    try {
+      sc.update(shouldContinueSceneAtEnd(sc, idle) ? lt + idle : lt, sc.ctx);
+    } finally {
+      V._inSceneUpdate = false;
+    }
   }
 
   function render(t, idleSec) {
@@ -268,7 +298,7 @@
     stage.style.setProperty('--tg', ((clock % 6) / 6) * 150);
     stage.style.setProperty('--anim-t', (-clock).toFixed(3) + 's');
     document.body.classList.toggle('started', now > 0.05);
-    sc.update(shouldContinueSceneAtEnd(sc, idle) ? lt + idle : lt, sc.ctx);
+    runSceneUpdate(sc, lt, idle);
     syncSceneVideoClips(lt);
     activeCueIdx = V._subtitlesRuntime.updateSubs(sc, idx, lt, now, clock, showSubs);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
@@ -360,6 +390,7 @@
     const dt = Math.min(0.1, (ts - lastTs) / 1000) * playbackRate;
     lastTs = ts;
     if (checkSceneLoop(now + dt)) return;
+    if (audioRt) audioRt.syncWithWallClock(now);
     if (now + dt >= V.duration - 0.002) finishPlayback();
     else render(now + dt, 0);
   }
@@ -415,6 +446,7 @@
     lastTs = performance.now();
     if (audioRt) audioRt.startPlayback();
     document.body.classList.add('playing');
+    V.emit('onPlay', { now, playing: true });
     if (!RECORD) {
       if (!inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
       updateUI();
@@ -429,6 +461,7 @@
     document.body.classList.toggle('is-ended', ended);
     if (audioRt) audioRt.pausePlayback();
     for (const clip of V._videoClips) if (clip.pause) clip.pause();
+    V.emit('onPause', { now, ended, playing: false });
     if (!RECORD) updateUI();
   }
 
@@ -477,15 +510,16 @@
     return Math.abs(target - lastSeekTarget) < 0.015 && Math.abs(target - now) < 0.015 && ts - lastSeekAt < 250;
   }
 
-  function seek(t) {
+  function seek(t, force = false) {
     if (!Number.isFinite(t)) return;
     const target = clamp(t, 0, V.duration - 0.001);
     const ts = performance.now();
-    if (isRedundantSeek(target, ts)) return;
+    if (!force && isRedundantSeek(target, ts)) return;
     lastTs = ts;
     pauseBaseTs = ts;
     lastSeekTarget = target;
     lastSeekAt = ts;
+    if (V._checkpointsRuntime && V._checkpointsRuntime.onSeek) V._checkpointsRuntime.onSeek(target);
     render(target, 0);
     V.emit('onSeek', target);
     if (audioRt) audioRt.seekTracks(now);
@@ -619,7 +653,7 @@
       const up = () => {
         scrubbing = false;
         document.body.classList.remove('scrubbing');
-        if (uncommittedT != null) seek(uncommittedT);
+        if (uncommittedT != null) seek(uncommittedT, true);
         removeEventListener('pointermove', mv);
         removeEventListener('pointerup', up);
         removeEventListener('pointercancel', up);
@@ -1070,17 +1104,26 @@
     });
   }
 
+  function clearStaleVoiceIfNeeded() {
+    if (V.voice && V.isVoiceLocaleMatch && !V.isVoiceLocaleMatch(V.voice)) {
+      V.voice = null;
+    }
+  }
+
   async function ensureDynamicBootAssets() {
     const cfg = V.getCfg();
     if (V.scenes.length === 0 && Array.isArray(cfg.sceneScripts)) {
       for (const rel of cfg.sceneScripts) await loadOptionalScript(rel);
     }
     const lang = V.getActiveLang();
-    if (!lang) return;
+    if (!lang || (V.isSecondaryLocale && !V.isSecondaryLocale(lang))) return;
     if (!V.locales[lang]) await loadOptionalScript(`locales/${lang}.js`);
     const baseTimings = cfg.timingsScript || 'assets/voice/timings.js';
     const langTimings = baseTimings.replace(/\.js$/i, `.${lang}.js`);
-    if (langTimings !== baseTimings) await loadOptionalScript(langTimings);
+    if (langTimings !== baseTimings) {
+      const ok = await loadOptionalScript(langTimings);
+      if (!ok) clearStaleVoiceIfNeeded();
+    }
   }
 
   V.boot = async function () {

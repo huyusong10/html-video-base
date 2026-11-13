@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable, getSandboxCfg } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
 
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -139,7 +139,7 @@ async function exportPdfCopy(browser, outHtml) {
 
 const args = parseStoryboardArgs(process.argv.slice(2));
 const { sandbox } = loadVideoSandbox(ROOT, args.videoId, { ignoreBaked: false, requireTimings: false, lang: args.lang });
-const cfg = Object.assign({}, sandbox.V.themeDefaults || {}, sandbox.V.config || {});
+const cfg = getSandboxCfg(sandbox.V);
 const W = cfg.width || 1920;
 const H = cfg.height || 1080;
 const scenes = sandbox.V.scenes || [];

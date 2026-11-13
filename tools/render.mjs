@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
   ROOT, VIDEOS_DIR, listVideoIds, loadVideoSandbox, resolveBaseFile,
-  loadChromium, findBrowserExecutable, resolveFfmpeg,
+  loadChromium, findBrowserExecutable, resolveFfmpeg, getSandboxCfg,
 } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
 
@@ -147,6 +147,15 @@ function nextCutSignature(scenes, si) {
   return `${next.transition || ''}:${next.transitionDur === undefined ? '' : next.transitionDur}`;
 }
 
+function serializePrevLayerState(V, scenes, si) {
+  const prev = si > 0 ? scenes[si - 1] : null;
+  if (!prev || !Array.isArray(V.layers) || !V.layers.length) return '';
+  return V.layers.map(l => {
+    const v = prev[l.prop || l.id];
+    return typeof v === 'function' ? v.toString() : JSON.stringify(v);
+  }).join('|');
+}
+
 function buildCachedSceneSegments(V, videoId, videoDir, totalFrames, W, H, fps, lang) {
   const scenes = V.scenes || [];
   const sharedHash = computeSharedVideoDigest(videoDir, W, H, fps, lang);
@@ -162,11 +171,12 @@ function buildCachedSceneSegments(V, videoId, videoDir, totalFrames, W, H, fps, 
     const f1 = Math.max(f0, bounds[si + 1]);
     if (f1 <= f0) continue;
     const sc = scenes[si];
-    const prevSc = si > 0 ? scenes[si - 1] : null;
+    const prevSc = si > 0 && f0 / fps < sc.start ? scenes[si - 1] : null;
     const h = crypto.createHash('sha256');
     h.update(sharedHash);
     h.update(serializeSceneCode(V, sc));
     h.update(serializeSceneCode(V, prevSc));
+    h.update(serializePrevLayerState(V, scenes, si));
     h.update(nextCutSignature(scenes, si));
     h.update(JSON.stringify({
       frames: f1 - f0,
@@ -226,15 +236,27 @@ function installFrameReuseProbe() {
     const glEl = document.getElementById('gl');
     if (V.gl && V.gl.ready && glEl && !glEl.classList.contains('is-off')) return false;
     if (V._videoClips && V._videoClips.size > 0) return false;
-    if (stage.querySelector('.scene canvas')) return false;
+    if (stage.querySelector('canvas:not(#gl)')) return false;
     if (stage.getAnimations && stage.getAnimations({ subtree: true }).length > 0) return false;
     return !checkUsesTg();
+  };
+  const stageExtraState = stage => {
+    const forms = Array.from(stage.querySelectorAll('input,textarea,select'))
+      .slice(0, 20)
+      .map(el => `${el.value}:${el.checked}`)
+      .join(',');
+    const scrolls = Array.from(stage.querySelectorAll('*'))
+      .filter(el => el.scrollTop || el.scrollLeft)
+      .slice(0, 20)
+      .map(el => `${el.scrollTop}:${el.scrollLeft}`)
+      .join(',');
+    return `${document.documentElement.style.cssText}|${forms}|${scrolls}`;
   };
   window.__seekAndDedupe = async sec => {
     await window.V.seekToAsync(sec);
     const stage = document.getElementById('stage');
     if (!canDedupeStage(stage)) { window.__prevStageSig = null; return false; }
-    const sig = `${document.documentElement.dataset.theme || ''}|${document.body.className}|${stage.innerHTML}`;
+    const sig = `${document.documentElement.dataset.theme || ''}|${document.body.className}|${stageExtraState(stage)}|${stage.innerHTML}`;
     if (sig === window.__prevStageSig) return true;
     window.__prevStageSig = sig;
     return false;
@@ -358,7 +380,7 @@ const defaultVideo = listVideoIds()[0] || 'starter';
 const VIDEO_ID = firstIsMp4 ? defaultVideo : (pos[0] || defaultVideo);
 
 const { sandbox, videoDir, audioRel, bgmRel } = loadVideoSandbox(ROOT, VIDEO_ID, { ignoreBaked: false, requireTimings: false, lang: opts.lang });
-const cfg = Object.assign({}, sandbox.V.themeDefaults || {}, sandbox.V.config || {});
+const cfg = getSandboxCfg(sandbox.V);
 const W = cfg.width || 1920;
 const H = cfg.height || 1080;
 const FPS = Number(opts.fps || process.env.FPS || cfg.fps || 30);

@@ -12,7 +12,11 @@ const NON_METHOD_KW = new Set(['if', 'for', 'while', 'switch', 'catch', 'functio
 const METHOD_PREV = new Set(['{', ',', ';', '}', 'async', 'get', 'set', 'static']);
 const BRANCH_KW = new Set(['if', 'for', 'while', 'do', 'case', 'catch']);
 const BRANCH_OPS = new Set(['&&', '||', '??', '?.', '&&=', '||=', '??=']);
-const REGEX_PREV = new Set(['(', '[', '{', ',', ';', ':', '=', '!', '&', '|', '?', '+', '-', '*', '%', '~', '^', '<', '>', 'return', 'typeof', 'void', 'case', 'in', 'of']);
+const REGEX_PREV = new Set([
+  '(', '[', '{', ',', ';', ':', '=', '!', '&', '|', '?', '+', '-', '*', '%', '~', '^', '<', '>',
+  '&&', '||', '??', '&&=', '||=', '??=', '=>', '===', '!==', '==', '!=', '<=', '>=',
+  'return', 'typeof', 'void', 'case', 'in', 'of', 'await', 'yield', 'throw', 'delete', 'else',
+]);
 const MULTI_OPS = ['===', '!==', '&&=', '||=', '??=', '=>', '?.', '??', '&&', '||', '<=', '>=', '==', '!=', '++', '--'];
 
 function parseMaxArg(args, fallback) {

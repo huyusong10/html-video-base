@@ -2,14 +2,35 @@
 (function (V) {
   if (typeof location === 'undefined') return;
 
+  function isVoiceLocaleMatch() {
+    return V.isVoiceLocaleMatch ? V.isVoiceLocaleMatch() : Boolean(V.voice);
+  }
+
+  function hasExplicitLocaleMedia(lang, key) {
+    const loc = (V.locales && V.locales[lang]) || null;
+    if (!loc) return false;
+    if (loc[key] !== undefined) return true;
+    return Boolean(loc.config && loc.config[key] !== undefined);
+  }
+
+  function localizeFallbackMedia(src, key = 'audioSrc') {
+    if (!src) return null;
+    const lang = typeof V.getActiveLang === 'function' ? V.getActiveLang() : '';
+    const isSec = V.isSecondaryLocale ? V.isSecondaryLocale(lang) : false;
+    if (!isSec || hasExplicitLocaleMedia(lang, key)) return src;
+    return key === 'audioSrc' ? null : src;
+  }
+
   function resolveAudioSource(cfg, isRecord) {
     if (cfg.audioSrc === false || isRecord) return null;
-    return (V.voice && V.voice.src) || cfg.audioSrc || null;
+    if (isVoiceLocaleMatch() && V.voice.src) return V.voice.src;
+    return localizeFallbackMedia(cfg.audioSrc, 'audioSrc') || null;
   }
 
   function resolveBgmSource(cfg, isRecord) {
     if (cfg.audioSrc === false || cfg.bgm === false || cfg.bgmSrc === false || isRecord) return null;
-    return (V.voice && V.voice.bgmSrc) || cfg.bgmSrc || null;
+    if (isVoiceLocaleMatch() && V.voice.bgmSrc) return V.voice.bgmSrc;
+    return localizeFallbackMedia(cfg.bgmSrc, 'bgmSrc') || null;
   }
 
   V._createAudioRuntime = function (hooks) {
@@ -60,13 +81,21 @@
       }
     }
 
+    function handleBgmPlayErr(err) {
+      bgmPlayPending = false;
+      if (err && err.name === 'NotAllowedError') {
+        audioBlocked = true;
+        armBlockedUnlock();
+      }
+    }
+
     function safePlayBgm() {
       if (!bgmAudio || !hooks.isPlaying() || bgmAudio.muted || !bgmAudio.paused || bgmPlayPending) return;
       bgmPlayPending = true;
       bgmAudio.playbackRate = playbackRate;
       const p = bgmAudio.play();
       if (p && typeof p.then === 'function') {
-        p.then(() => { bgmPlayPending = false; }).catch(() => { bgmPlayPending = false; });
+        p.then(() => { bgmPlayPending = false; }).catch(handleBgmPlayErr);
       } else {
         bgmPlayPending = false;
       }
@@ -286,7 +315,8 @@
       initTracks, startPlayback, pausePlayback, seekTracks, setRate,
       setBgm, setVoice, setMuted, toggleVoiceFromMenu, toggleBgmFromMenu,
       isAllMuted, resolveSoundBtnSpec, canUseMasterClock,
-      tickMasterClock, hasBgm: () => Boolean(bgmAudio), getState,
+      tickMasterClock, syncWithWallClock: keepBgmInSync,
+      hasBgm: () => Boolean(bgmAudio), getState,
     };
   };
 })(globalThis.V = globalThis.V || {});

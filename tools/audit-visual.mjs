@@ -3,7 +3,7 @@
 // 用法：node tools/audit-visual.mjs [video-id ...] [--strict] [--lang en] [--screenshots .runtime/audit]
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable, getSandboxCfg } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
 
 function buildSamplePoints(V) {
@@ -46,9 +46,12 @@ const IN_PAGE_SCRUB_CHECK = async ({ sampleT, altT }) => {
   const snap = () => {
     const sc = document.querySelector('#stage .scene');
     if (!sc) return '';
-    return Array.from(sc.querySelectorAll('*')).slice(0, 80)
-      .map(el => `${el.tagName}:${el.className}:${el.style.opacity}:${el.style.transform}:${el.textContent?.slice(0, 20)}`)
+    const subs = document.getElementById('subs');
+    const subMeta = subs ? `${subs.dataset.subPos || ''}:${subs.style.cssText}:${subs.textContent?.slice(0, 24)}` : '';
+    const nodes = Array.from(sc.querySelectorAll('*')).slice(0, 80)
+      .map(el => `${el.tagName}:${el.className}:${el.style.cssText}:${el.textContent?.slice(0, 20)}`)
       .join('|');
+    return `${sc.style.cssText}|${subMeta}|${nodes}`;
   };
   await window.V.seekToAsync(sampleT);
   const a = snap();
@@ -85,7 +88,18 @@ function installPageAuditHelpers() {
     const cls = typeof el.className === 'string' ? el.className.trim().split(/\s+/).slice(0, 2).join('.') : '';
     return cls ? `.${cls}` : el.tagName.toLowerCase();
   };
-  window.__auditH = { effectiveAlpha, isVisible, rectAreaOverlap, isOutOfRect, labelOf };
+  const collectAuditBoxes = (root, sRect, depth = 0, out = []) => {
+    for (const el of Array.from(root.children)) {
+      if (!isVisible(el, 0.15)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) continue;
+      const isFull = r.width >= sRect.width * 0.85 && r.height >= sRect.height * 0.85;
+      if (isFull && el.children.length > 0 && depth < 2) collectAuditBoxes(el, sRect, depth + 1, out);
+      else out.push({ el, r });
+    }
+    return out;
+  };
+  window.__auditH = { effectiveAlpha, isVisible, rectAreaOverlap, isOutOfRect, labelOf, collectAuditBoxes };
 }
 
 const IN_PAGE_BROKEN_IMGS = () => {
@@ -117,12 +131,8 @@ const IN_PAGE_OVERFLOWS = () => {
   const sRect = stage.getBoundingClientRect();
   const tol = 28 * (sRect.width / (stage.offsetWidth || 1920) || 1);
   const overflows = [];
-  for (const el of Array.from(sc.children)) {
-    if (!window.__auditH.isVisible(el, 0.15)) continue;
-    const r = el.getBoundingClientRect();
-    if (r.width >= 2 && r.height >= 2 && window.__auditH.isOutOfRect(r, sRect, tol)) {
-      overflows.push(window.__auditH.labelOf(el));
-    }
+  for (const { el, r } of window.__auditH.collectAuditBoxes(sc, sRect)) {
+    if (window.__auditH.isOutOfRect(r, sRect, tol)) overflows.push(window.__auditH.labelOf(el));
   }
   return overflows;
 };
@@ -136,9 +146,8 @@ const IN_PAGE_SUB_OVERLAPS = () => {
   const subRect = subs.getBoundingClientRect();
   const minArea = subRect.width * subRect.height * 0.35;
   const overlaps = [];
-  for (const el of Array.from(sc.children)) {
-    if (!window.__auditH.isVisible(el, 0.15) || getComputedStyle(el).position === 'static') continue;
-    const r = el.getBoundingClientRect();
+  for (const { el, r } of window.__auditH.collectAuditBoxes(sc, sRect)) {
+    if (getComputedStyle(el).position === 'static') continue;
     if (r.height < sRect.height * 0.85 && el.textContent.trim().length > 8 && window.__auditH.rectAreaOverlap(r, subRect) > minArea) {
       overlaps.push(window.__auditH.labelOf(el));
     }
@@ -239,7 +248,8 @@ async function inspectSamplePoint(page, ctx, pt) {
   if (charCount > 240) vWarnings.push(`${pt.label}: High on-screen text density (${charCount} chars > 240)`);
 
   if (pt.isMid) {
-    const altT = Math.min(duration - 0.05, Math.max(0, pt.t + 1.3));
+    const fwdT = pt.t + 1.3;
+    const altT = fwdT <= duration - 0.05 ? fwdT : (pt.t >= 0.3 ? Math.max(0, pt.t - 1.3) : Math.max(0, duration - 0.05));
     const ok = await page.evaluate(IN_PAGE_SCRUB_CHECK, { sampleT: pt.t, altT });
     if (!ok) vErrors.push(`${pt.label}: Non-idempotent f(t) DOM state after scrubbing`);
   }
@@ -252,7 +262,7 @@ async function auditSingleVideo(browser, port, id, opts) {
   const { lang = '', screenshotDir = '' } = opts;
   const { sandbox } = loadVideoSandbox(ROOT, id, { ignoreBaked: false, requireTimings: false, lang });
   const V = sandbox.V;
-  const cfg = Object.assign({}, V.themeDefaults || {}, V.config || {});
+  const cfg = getSandboxCfg(V);
   const auditCfg = cfg.audit || {};
   const minFontPx = auditCfg.minFontSize === undefined ? 18 : Number(auditCfg.minFontSize);
 
@@ -263,7 +273,9 @@ async function auditSingleVideo(browser, port, id, opts) {
   page.on('pageerror', err => vErrors.push(`Runtime error: ${err.message}`));
   page.on('response', resp => {
     const u = resp.url();
-    const isOptMedia = /\/(soundtrack|bgm)(\.[a-z0-9_-]+)?\.m4a(\?|$)/i.test(u) || u.endsWith('favicon.ico');
+    const isOptMedia = /\/(soundtrack|bgm)(\.[a-z0-9_-]+)?\.m4a(\?|$)/i.test(u)
+      || /\/timings\.[a-z0-9_-]+\.js(\?|$)/i.test(u)
+      || u.endsWith('favicon.ico');
     if (resp.status() >= 400 && !isOptMedia) {
       vErrors.push(`HTTP ${resp.status()}: ${u}`);
     }

@@ -34,9 +34,18 @@
     return `scale(${sx === undefined ? s : sx},${sy === undefined ? s : sy})`;
   }
 
+  function pickOpt(opts, shortKey, longKey, fallback) {
+    if (opts[shortKey] !== undefined) return opts[shortKey];
+    if (opts[longKey] !== undefined) return opts[longKey];
+    return fallback;
+  }
+
   function set(el, opts = {}) {
     if (!el) return;
-    const { o, x = 0, y = 0, s = 1, r = 0, sx, sy, origin } = opts;
+    const o = pickOpt(opts, 'o', 'opacity', undefined);
+    const s = pickOpt(opts, 's', 'scale', 1);
+    const r = pickOpt(opts, 'r', 'rotate', 0);
+    const { x = 0, y = 0, sx, sy, origin } = opts;
     if (o !== undefined) {
       el.style.opacity = o;
       el.style.visibility = o <= 0.001 ? 'hidden' : 'visible';
@@ -229,16 +238,23 @@
     return el;
   }
 
-  function syncVideoClip(el, lt, playing = false) {
+  function resolveClipPlaybackTarget(el, meta, lt) {
+    const rawTarget = meta.trim + Math.max(0, (lt - meta.start) * meta.speed);
+    const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null;
+    const endedClip = Boolean(dur && !meta.loop && rawTarget >= dur - 0.015);
+    const target = dur && meta.loop ? (rawTarget % dur) : (dur ? Math.min(rawTarget, dur - 0.01) : rawTarget);
+    return { target: Math.max(0, target), endedClip };
+  }
+
+  function syncVideoClip(el, lt, playing) {
     if (!el || !el._vclip) return;
     const meta = el._vclip;
-    const rel = (lt - meta.start) * meta.speed;
-    const rawTarget = meta.trim + Math.max(0, rel);
-    const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null;
-    const target = dur && meta.loop ? (rawTarget % dur) : (dur ? Math.min(rawTarget, dur - 0.01) : rawTarget);
-    meta.targetTime = Math.max(0, target);
+    const usePlaying = playing === undefined ? Boolean(V._isPlaying) : Boolean(playing);
+    meta._syncedTick = V._renderTick || 0;
+    const { target, endedClip } = resolveClipPlaybackTarget(el, meta, lt);
+    meta.targetTime = target;
     if (typeof el.pause !== 'function') return;
-    syncBrowserVideoTime(el, meta, lt >= meta.start && playing);
+    syncBrowserVideoTime(el, meta, lt >= meta.start && !endedClip && usePlaying, endedClip);
   }
 
   function toggleBrowserVideoPlay(el, shouldPlay) {
@@ -251,9 +267,10 @@
     if (!el.paused) el.pause();
   }
 
-  function syncBrowserVideoTime(el, meta, shouldPlay) {
+  function syncBrowserVideoTime(el, meta, shouldPlay, endedClip) {
+    const tol = endedClip ? 0.05 : 0.16;
     const diff = Math.abs((el.currentTime || 0) - meta.targetTime);
-    if (diff > 0.16 && el.readyState >= 1) {
+    if (diff > tol && el.readyState >= 1) {
       try { el.currentTime = meta.targetTime; } catch {}
     }
     el.playbackRate = meta.speed * (V._playbackRate || 1);

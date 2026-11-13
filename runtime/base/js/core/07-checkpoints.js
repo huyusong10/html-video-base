@@ -2,7 +2,7 @@
 (function (V) {
   const { h } = V.u;
   let activeCp = null;
-  let triggeredKeys = new Set();
+  let triggeredKeys = new Map();
 
   function resolveSceneCheckpoints(sc) {
     if (!sc._resolvedCheckpoints) {
@@ -18,15 +18,17 @@
       cp.render(overlay, val => resumeFn(cp, val));
       return;
     }
-    const choices = Array.isArray(cp.choices) && cp.choices.length
+    const rawChoices = Array.isArray(cp.choices) && cp.choices.length
       ? cp.choices
-      : [{ label: cp.buttonLabel || '继续播放', value: true, primary: true }];
+      : (Array.isArray(cp.actions) && cp.actions.length ? cp.actions : null);
+    const choices = rawChoices || [{ label: cp.buttonLabel || '继续播放', value: true, primary: true }];
     const btns = choices.map((ch, idx) => {
       const b = h('button', { class: 'cp-btn' + (ch.primary || idx === 0 ? ' is-primary' : '') }, ch.label);
       b.onclick = e => {
         e.stopPropagation();
         if (typeof ch.onSelect === 'function') ch.onSelect(V);
-        resumeFn(cp, ch.value === undefined ? ch.label : ch.value);
+        const resVal = ch.value !== undefined ? ch.value : (ch.resume !== undefined ? ch.resume : ch.label);
+        resumeFn(cp, resVal);
       };
       return b;
     });
@@ -85,7 +87,7 @@
       const gAt = sc.start + Number(cp.at);
       const key = `${si}:${cp.id || i}`;
       if (!triggeredKeys.has(key) && prevT < gAt && curT >= gAt) {
-        triggeredKeys.add(key);
+        triggeredKeys.set(key, gAt);
         triggerCheckpoint(cp, ctl.pause, ctl.play);
         return;
       }
@@ -104,10 +106,17 @@
     if (V._playerCtl) V._playerCtl.play();
   };
 
+  function onSeek(targetT) {
+    closeCheckpointOverlay();
+    for (const [key, gAt] of triggeredKeys.entries()) {
+      if (gAt >= targetT - 0.01) triggeredKeys.delete(key);
+    }
+  }
+
   V.resetCheckpoints = function () {
-    triggeredKeys = new Set();
+    triggeredKeys = new Map();
     closeCheckpointOverlay();
   };
 
-  V._checkpointsRuntime = { checkSceneCheckpoints, closeCheckpointOverlay };
+  V._checkpointsRuntime = { checkSceneCheckpoints, closeCheckpointOverlay, onSeek };
 })(globalThis.V = globalThis.V || {});

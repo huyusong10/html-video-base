@@ -90,7 +90,8 @@
   }
 
   function lookupLineWords(si, lineIdx) {
-    const w = V.voice && V.voice.words;
+    const vv = V.getActiveVoice ? V.getActiveVoice() : V.voice;
+    const w = vv && vv.words;
     return (w && w[si] && w[si][lineIdx]) || null;
   }
 
@@ -135,8 +136,12 @@
     };
   }
 
+  function cleanChunkTail(c) {
+    return c.replace(/(?:[。！？；，、：!?;,:\s]|(?<!\.)\.(?!\.))+$/g, '');
+  }
+
   function chunkSentences(raw) {
-    const parts = raw.match(/[^。！？；.!?;]+[。！？；.!?;]?/g) || [raw];
+    const parts = raw.split(/(?<=[。！？；!?]|;|(?<!\.)\.(?![A-Za-z0-9.]))\s*/);
     const chunks = [];
     for (const s of parts) {
       const clean = s.trim();
@@ -150,7 +155,7 @@
       }
       if (buf) chunks.push(buf);
     }
-    return chunks.map(c => c.replace(/[。！？；，、：.!?;,:""''\s]+$/g, '')).filter(Boolean);
+    return chunks.map(cleanChunkTail).filter(Boolean);
   }
 
   function mapWordsToChunks(chunks, words, cueStart, cueEnd) {
@@ -236,8 +241,16 @@
     return lt + hold + TAIL;
   }
 
+  function isLangBakedMatch(baked) {
+    const activeLang = typeof V.getActiveLang === 'function' ? V.getActiveLang() : '';
+    if (baked.lang) {
+      return activeLang ? baked.lang === activeLang : !(V.isSecondaryLocale && V.isSecondaryLocale(baked.lang));
+    }
+    return !(V.isSecondaryLocale && V.isSecondaryLocale(activeLang));
+  }
+
   function isBakedValid(baked) {
-    if (!baked || V.__ignoreBakedLayout) return false;
+    if (!baked || V.__ignoreBakedLayout || !isLangBakedMatch(baked)) return false;
     if (!Array.isArray(baked.scenes) || baked.scenes.length !== V.scenes.length) return false;
     return V.scenes.every((sc, idx) => {
       const bs = baked.scenes[idx];
@@ -262,20 +275,37 @@
     }
   }
 
-  function layoutScene(sc, si, t, bSc, voiceInfo, pacing) {
+  function buildLocalizedLines(sc, scLoc) {
+    const srcLines = (scLoc && Array.isArray(scLoc.lines) && sc._origLines.length === 0)
+      ? scLoc.lines
+      : sc._origLines;
+    sc.lines = srcLines.map((ln, li) => {
+      const baseObj = typeof ln === 'string' ? { text: ln } : ln;
+      return applyLocaleLine(baseObj, scLoc, li);
+    });
+  }
+
+  function syncSceneLocaleMeta(sc, si) {
+    if (sc._explicitDuration === undefined && typeof sc.duration === 'number' && (!sc.lines || !sc.lines.length)) {
+      sc._explicitDuration = sc.duration;
+    }
     if (sc._origTitle === undefined) sc._origTitle = sc.title;
+    sc.lines = sc.lines || [];
     if (!sc._origLines) sc._origLines = sc.lines.slice();
     const scLoc = getSceneLocaleOverride(sc, si);
     sc.title = (scLoc && scLoc.title) || sc._origTitle;
+    sc._resolvedCheckpoints = null;
+    sc._resolvedSfx = null;
+    buildLocalizedLines(sc, scLoc);
+  }
+
+  function layoutScene(sc, si, t, bSc, voiceInfo, pacing) {
     sc.start = bSc ? bSc.start : t;
     let lt = sc.lead === undefined ? pacing.LEAD : sc.lead;
     sc.cues = [];
     sc.subCues = [];
 
-    sc._origLines.forEach((ln, li) => {
-      const baseObj = typeof ln === 'string' ? { text: ln } : ln;
-      const lineObj = applyLocaleLine(baseObj, scLoc, li);
-      sc.lines[li] = lineObj;
+    sc.lines.forEach((lineObj, li) => {
       const [cueStart, cueEnd] = resolveCueTiming(bSc, voiceInfo.durs, si, li, lineObj, lt, pacing.CPS);
       sc.cues.push(buildCueEntry(lineObj, cueStart, cueEnd));
       const exactSubs = voiceInfo.subs[si] && voiceInfo.subs[si][li];
@@ -320,17 +350,14 @@
 
   V.layout = function () {
     const pacing = getPacing();
-    const vv = V.voice || {};
+    const vv = (V.getActiveVoice ? V.getActiveVoice() : V.voice) || {};
     const voiceInfo = { durs: vv.durations || [], subs: resolveVoiceSubCues(vv), words: vv.words || [] };
+    V.scenes.forEach((sc, si) => syncSceneLocaleMeta(sc, si));
     const baked = vv.bakedLayout;
     const useBaked = isBakedValid(baked);
 
     let t = 0;
     V.scenes.forEach((sc, si) => {
-      if (sc._explicitDuration === undefined && typeof sc.duration === 'number' && (!sc.lines || !sc.lines.length)) {
-        sc._explicitDuration = sc.duration;
-      }
-      sc.lines = sc.lines || [];
       t = layoutScene(sc, si, t, useBaked ? baked.scenes[si] : null, voiceInfo, pacing);
     });
 
@@ -354,7 +381,8 @@
     const li = sc.cues.findIndex(c => lt >= c.start && lt <= c.end);
     if (li < 0) return 0;
     const cue = sc.cues[li];
-    const env = V.voice && V.voice.envelopes && V.voice.envelopes[si] && V.voice.envelopes[si][li];
+    const vv = V.getActiveVoice ? V.getActiveVoice() : V.voice;
+    const env = vv && vv.envelopes && vv.envelopes[si] && vv.envelopes[si][li];
     if (Array.isArray(env) && env.length) return clamp(sampleEnvelopeArray(env, lt - cue.start));
     // 草稿期尚无音频时回退为自然语音节律波
     const g = sc.start + lt;

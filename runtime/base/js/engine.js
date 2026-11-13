@@ -17,8 +17,9 @@
   V._videoClips = V._videoClips || new Set();
 
   function upsertById(list, item) {
-    if (!item.id) { list.push(item); return item; }
-    const idx = list.findIndex(x => x.id === item.id);
+    const key = item.id || item.name;
+    if (!key) { list.push(item); return item; }
+    const idx = list.findIndex(x => (x.id || x.name) === key);
     if (idx >= 0) list[idx] = item;
     else list.push(item);
     return item;
@@ -119,9 +120,40 @@
     if (Array.isArray(list)) list.forEach(name => V.activatePreset(name));
   };
 
+  const HOOK_ALIASES = {
+    onStart: ['onBoot', 'boot', 'start'],
+    onBoot: ['boot', 'onStart', 'start'],
+    boot: ['onBoot', 'onStart', 'start'],
+    onLayout: ['layout'],
+    layout: ['onLayout'],
+    onRender: ['tick', 'onTick', 'render'],
+    onTick: ['tick', 'onRender', 'render'],
+    tick: ['onTick', 'onRender', 'render'],
+    onSeek: ['seek'],
+    seek: ['onSeek'],
+    onPlay: ['play'],
+    play: ['onPlay'],
+    onPause: ['pause'],
+    pause: ['onPause'],
+    onSceneEnter: ['sceneChange', 'onSceneChange', 'sceneEnter'],
+    onSceneChange: ['sceneChange', 'onSceneEnter', 'sceneEnter'],
+    sceneChange: ['onSceneChange', 'onSceneEnter', 'sceneEnter'],
+    onEnded: ['ended'],
+    ended: ['onEnded'],
+  };
+
+  function resolvePluginHook(plugin, hook) {
+    if (typeof plugin[hook] === 'function') return plugin[hook];
+    const alts = HOOK_ALIASES[hook];
+    if (!alts) return null;
+    for (const k of alts) if (typeof plugin[k] === 'function') return plugin[k];
+    return null;
+  }
+
   V.emit = function (hook, payload) {
     for (const p of V.plugins) {
-      if (typeof p[hook] === 'function') p[hook](payload, V);
+      const fn = resolvePluginHook(p, hook);
+      if (fn) fn.call(p, payload, V);
     }
   };
 
@@ -134,6 +166,37 @@
     return (V.config && V.config.lang) || '';
   };
 
+  function resolveBaseLang() {
+    if (V.config && V.config.lang) return String(V.config.lang);
+    const docEl = typeof document !== 'undefined' && document.documentElement;
+    const htmlLang = docEl && docEl.getAttribute && docEl.getAttribute('lang');
+    return htmlLang || '';
+  }
+
+  function sameLangFamily(a, b) {
+    if (!a || !b) return false;
+    const na = String(a).toLowerCase(), nb = String(b).toLowerCase();
+    return na === nb || na.split('-')[0] === nb.split('-')[0];
+  }
+
+  V.isSecondaryLocale = function (lang = V.getActiveLang()) {
+    if (!lang) return false;
+    if (V.locales && V.locales[lang]) return true;
+    const base = resolveBaseLang();
+    return base ? !sameLangFamily(lang, base) : true;
+  };
+
+  V.isVoiceLocaleMatch = function (voice = V.voice) {
+    if (!voice) return false;
+    const lang = V.getActiveLang();
+    if (voice.lang) return lang ? voice.lang === lang : !V.isSecondaryLocale(voice.lang);
+    return !V.isSecondaryLocale(lang);
+  };
+
+  V.getActiveVoice = function () {
+    return V.isVoiceLocaleMatch(V.voice) ? V.voice : null;
+  };
+
   function mergeUiDict(baseUi, nextUi) {
     if (!nextUi) return Object.assign({}, baseUi || {});
     const out = Object.assign({}, baseUi || {}, nextUi);
@@ -143,16 +206,29 @@
     return out;
   }
 
+  function extractLocaleCfg(loc) {
+    const out = Object.assign({}, (loc && loc.config) || {});
+    if (loc && loc.title && !out.title) out.title = loc.title;
+    if (loc && loc.tts && !out.tts) out.tts = loc.tts;
+    return out;
+  }
+
+  function mergeTtsDict(a, b) {
+    if (!a && !b) return undefined;
+    return Object.assign({}, a || {}, b || {});
+  }
+
   V.getCfg = function () {
     V.applyConfiguredPresets();
     const lang = V.getActiveLang();
     const loc = (lang && V.locales[lang]) || null;
-    const locCfg = Object.assign({}, (loc && loc.config) || {});
-    if (loc && loc.title && !locCfg.title) locCfg.title = loc.title;
+    const locCfg = extractLocaleCfg(loc);
     const td = V.themeDefaults || {};
     const vc = V.config || {};
     const merged = Object.assign({}, td, vc, locCfg);
     merged.ui = mergeUiDict(mergeUiDict(td.ui, vc.ui), locCfg.ui);
+    const tts = mergeTtsDict(mergeTtsDict(td.tts, vc.tts), locCfg.tts);
+    if (tts) merged.tts = tts;
     return merged;
   };
 })(globalThis.V = globalThis.V || {});
@@ -259,9 +335,18 @@
     return `scale(${sx === undefined ? s : sx},${sy === undefined ? s : sy})`;
   }
 
+  function pickOpt(opts, shortKey, longKey, fallback) {
+    if (opts[shortKey] !== undefined) return opts[shortKey];
+    if (opts[longKey] !== undefined) return opts[longKey];
+    return fallback;
+  }
+
   function set(el, opts = {}) {
     if (!el) return;
-    const { o, x = 0, y = 0, s = 1, r = 0, sx, sy, origin } = opts;
+    const o = pickOpt(opts, 'o', 'opacity', undefined);
+    const s = pickOpt(opts, 's', 'scale', 1);
+    const r = pickOpt(opts, 'r', 'rotate', 0);
+    const { x = 0, y = 0, sx, sy, origin } = opts;
     if (o !== undefined) {
       el.style.opacity = o;
       el.style.visibility = o <= 0.001 ? 'hidden' : 'visible';
@@ -454,16 +539,23 @@
     return el;
   }
 
-  function syncVideoClip(el, lt, playing = false) {
+  function resolveClipPlaybackTarget(el, meta, lt) {
+    const rawTarget = meta.trim + Math.max(0, (lt - meta.start) * meta.speed);
+    const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null;
+    const endedClip = Boolean(dur && !meta.loop && rawTarget >= dur - 0.015);
+    const target = dur && meta.loop ? (rawTarget % dur) : (dur ? Math.min(rawTarget, dur - 0.01) : rawTarget);
+    return { target: Math.max(0, target), endedClip };
+  }
+
+  function syncVideoClip(el, lt, playing) {
     if (!el || !el._vclip) return;
     const meta = el._vclip;
-    const rel = (lt - meta.start) * meta.speed;
-    const rawTarget = meta.trim + Math.max(0, rel);
-    const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null;
-    const target = dur && meta.loop ? (rawTarget % dur) : (dur ? Math.min(rawTarget, dur - 0.01) : rawTarget);
-    meta.targetTime = Math.max(0, target);
+    const usePlaying = playing === undefined ? Boolean(V._isPlaying) : Boolean(playing);
+    meta._syncedTick = V._renderTick || 0;
+    const { target, endedClip } = resolveClipPlaybackTarget(el, meta, lt);
+    meta.targetTime = target;
     if (typeof el.pause !== 'function') return;
-    syncBrowserVideoTime(el, meta, lt >= meta.start && playing);
+    syncBrowserVideoTime(el, meta, lt >= meta.start && !endedClip && usePlaying, endedClip);
   }
 
   function toggleBrowserVideoPlay(el, shouldPlay) {
@@ -476,9 +568,10 @@
     if (!el.paused) el.pause();
   }
 
-  function syncBrowserVideoTime(el, meta, shouldPlay) {
+  function syncBrowserVideoTime(el, meta, shouldPlay, endedClip) {
+    const tol = endedClip ? 0.05 : 0.16;
     const diff = Math.abs((el.currentTime || 0) - meta.targetTime);
-    if (diff > 0.16 && el.readyState >= 1) {
+    if (diff > tol && el.readyState >= 1) {
       try { el.currentTime = meta.targetTime; } catch {}
     }
     el.playbackRate = meta.speed * (V._playbackRate || 1);
@@ -584,7 +677,8 @@
   }
 
   function lookupLineWords(si, lineIdx) {
-    const w = V.voice && V.voice.words;
+    const vv = V.getActiveVoice ? V.getActiveVoice() : V.voice;
+    const w = vv && vv.words;
     return (w && w[si] && w[si][lineIdx]) || null;
   }
 
@@ -629,8 +723,12 @@
     };
   }
 
+  function cleanChunkTail(c) {
+    return c.replace(/(?:[。！？；，、：!?;,:\s]|(?<!\.)\.(?!\.))+$/g, '');
+  }
+
   function chunkSentences(raw) {
-    const parts = raw.match(/[^。！？；.!?;]+[。！？；.!?;]?/g) || [raw];
+    const parts = raw.split(/(?<=[。！？；!?]|;|(?<!\.)\.(?![A-Za-z0-9.]))\s*/);
     const chunks = [];
     for (const s of parts) {
       const clean = s.trim();
@@ -644,7 +742,7 @@
       }
       if (buf) chunks.push(buf);
     }
-    return chunks.map(c => c.replace(/[。！？；，、：.!?;,:""''\s]+$/g, '')).filter(Boolean);
+    return chunks.map(cleanChunkTail).filter(Boolean);
   }
 
   function mapWordsToChunks(chunks, words, cueStart, cueEnd) {
@@ -730,8 +828,16 @@
     return lt + hold + TAIL;
   }
 
+  function isLangBakedMatch(baked) {
+    const activeLang = typeof V.getActiveLang === 'function' ? V.getActiveLang() : '';
+    if (baked.lang) {
+      return activeLang ? baked.lang === activeLang : !(V.isSecondaryLocale && V.isSecondaryLocale(baked.lang));
+    }
+    return !(V.isSecondaryLocale && V.isSecondaryLocale(activeLang));
+  }
+
   function isBakedValid(baked) {
-    if (!baked || V.__ignoreBakedLayout) return false;
+    if (!baked || V.__ignoreBakedLayout || !isLangBakedMatch(baked)) return false;
     if (!Array.isArray(baked.scenes) || baked.scenes.length !== V.scenes.length) return false;
     return V.scenes.every((sc, idx) => {
       const bs = baked.scenes[idx];
@@ -756,20 +862,37 @@
     }
   }
 
-  function layoutScene(sc, si, t, bSc, voiceInfo, pacing) {
+  function buildLocalizedLines(sc, scLoc) {
+    const srcLines = (scLoc && Array.isArray(scLoc.lines) && sc._origLines.length === 0)
+      ? scLoc.lines
+      : sc._origLines;
+    sc.lines = srcLines.map((ln, li) => {
+      const baseObj = typeof ln === 'string' ? { text: ln } : ln;
+      return applyLocaleLine(baseObj, scLoc, li);
+    });
+  }
+
+  function syncSceneLocaleMeta(sc, si) {
+    if (sc._explicitDuration === undefined && typeof sc.duration === 'number' && (!sc.lines || !sc.lines.length)) {
+      sc._explicitDuration = sc.duration;
+    }
     if (sc._origTitle === undefined) sc._origTitle = sc.title;
+    sc.lines = sc.lines || [];
     if (!sc._origLines) sc._origLines = sc.lines.slice();
     const scLoc = getSceneLocaleOverride(sc, si);
     sc.title = (scLoc && scLoc.title) || sc._origTitle;
+    sc._resolvedCheckpoints = null;
+    sc._resolvedSfx = null;
+    buildLocalizedLines(sc, scLoc);
+  }
+
+  function layoutScene(sc, si, t, bSc, voiceInfo, pacing) {
     sc.start = bSc ? bSc.start : t;
     let lt = sc.lead === undefined ? pacing.LEAD : sc.lead;
     sc.cues = [];
     sc.subCues = [];
 
-    sc._origLines.forEach((ln, li) => {
-      const baseObj = typeof ln === 'string' ? { text: ln } : ln;
-      const lineObj = applyLocaleLine(baseObj, scLoc, li);
-      sc.lines[li] = lineObj;
+    sc.lines.forEach((lineObj, li) => {
       const [cueStart, cueEnd] = resolveCueTiming(bSc, voiceInfo.durs, si, li, lineObj, lt, pacing.CPS);
       sc.cues.push(buildCueEntry(lineObj, cueStart, cueEnd));
       const exactSubs = voiceInfo.subs[si] && voiceInfo.subs[si][li];
@@ -814,17 +937,14 @@
 
   V.layout = function () {
     const pacing = getPacing();
-    const vv = V.voice || {};
+    const vv = (V.getActiveVoice ? V.getActiveVoice() : V.voice) || {};
     const voiceInfo = { durs: vv.durations || [], subs: resolveVoiceSubCues(vv), words: vv.words || [] };
+    V.scenes.forEach((sc, si) => syncSceneLocaleMeta(sc, si));
     const baked = vv.bakedLayout;
     const useBaked = isBakedValid(baked);
 
     let t = 0;
     V.scenes.forEach((sc, si) => {
-      if (sc._explicitDuration === undefined && typeof sc.duration === 'number' && (!sc.lines || !sc.lines.length)) {
-        sc._explicitDuration = sc.duration;
-      }
-      sc.lines = sc.lines || [];
       t = layoutScene(sc, si, t, useBaked ? baked.scenes[si] : null, voiceInfo, pacing);
     });
 
@@ -848,7 +968,8 @@
     const li = sc.cues.findIndex(c => lt >= c.start && lt <= c.end);
     if (li < 0) return 0;
     const cue = sc.cues[li];
-    const env = V.voice && V.voice.envelopes && V.voice.envelopes[si] && V.voice.envelopes[si][li];
+    const vv = V.getActiveVoice ? V.getActiveVoice() : V.voice;
+    const env = vv && vv.envelopes && vv.envelopes[si] && vv.envelopes[si][li];
     if (Array.isArray(env) && env.length) return clamp(sampleEnvelopeArray(env, lt - cue.start));
     // 草稿期尚无音频时回退为自然语音节律波
     const g = sc.start + lt;
@@ -1033,7 +1154,7 @@
 (function (V) {
   const { h } = V.u;
   let activeCp = null;
-  let triggeredKeys = new Set();
+  let triggeredKeys = new Map();
 
   function resolveSceneCheckpoints(sc) {
     if (!sc._resolvedCheckpoints) {
@@ -1049,15 +1170,17 @@
       cp.render(overlay, val => resumeFn(cp, val));
       return;
     }
-    const choices = Array.isArray(cp.choices) && cp.choices.length
+    const rawChoices = Array.isArray(cp.choices) && cp.choices.length
       ? cp.choices
-      : [{ label: cp.buttonLabel || '继续播放', value: true, primary: true }];
+      : (Array.isArray(cp.actions) && cp.actions.length ? cp.actions : null);
+    const choices = rawChoices || [{ label: cp.buttonLabel || '继续播放', value: true, primary: true }];
     const btns = choices.map((ch, idx) => {
       const b = h('button', { class: 'cp-btn' + (ch.primary || idx === 0 ? ' is-primary' : '') }, ch.label);
       b.onclick = e => {
         e.stopPropagation();
         if (typeof ch.onSelect === 'function') ch.onSelect(V);
-        resumeFn(cp, ch.value === undefined ? ch.label : ch.value);
+        const resVal = ch.value !== undefined ? ch.value : (ch.resume !== undefined ? ch.resume : ch.label);
+        resumeFn(cp, resVal);
       };
       return b;
     });
@@ -1116,7 +1239,7 @@
       const gAt = sc.start + Number(cp.at);
       const key = `${si}:${cp.id || i}`;
       if (!triggeredKeys.has(key) && prevT < gAt && curT >= gAt) {
-        triggeredKeys.add(key);
+        triggeredKeys.set(key, gAt);
         triggerCheckpoint(cp, ctl.pause, ctl.play);
         return;
       }
@@ -1135,12 +1258,19 @@
     if (V._playerCtl) V._playerCtl.play();
   };
 
+  function onSeek(targetT) {
+    closeCheckpointOverlay();
+    for (const [key, gAt] of triggeredKeys.entries()) {
+      if (gAt >= targetT - 0.01) triggeredKeys.delete(key);
+    }
+  }
+
   V.resetCheckpoints = function () {
-    triggeredKeys = new Set();
+    triggeredKeys = new Map();
     closeCheckpointOverlay();
   };
 
-  V._checkpointsRuntime = { checkSceneCheckpoints, closeCheckpointOverlay };
+  V._checkpointsRuntime = { checkSceneCheckpoints, closeCheckpointOverlay, onSeek };
 })(globalThis.V = globalThis.V || {});
 
 /* core/08-plugins.js · 内置可插拔扩展（通过标准 V.use 注册：草稿 WebAudio 微音效 + ?dev 面板 + SSE 保位热重载） */
@@ -1444,7 +1574,7 @@
   ];
 
   let subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
-  let appliedSceneSpec = false;
+  let sceneScopedSpec = false;
 
   function getSubCfg() {
     const cfg = V.getCfg();
@@ -1452,12 +1582,13 @@
   }
 
   function resolveSubLayoutObj(spec, subCfg) {
-    if (!spec) return { pos: 'center' };
-    if (typeof spec === 'string') {
-      const m = subCfg && subCfg.modes && subCfg.modes[spec];
-      return m ? Object.assign({ pos: 'center' }, m) : { pos: spec };
+    const eff = spec || (subCfg && (subCfg.layout || subCfg.position));
+    if (!eff) return { pos: 'center' };
+    if (typeof eff === 'string') {
+      const m = subCfg && subCfg.modes && subCfg.modes[eff];
+      return m ? Object.assign({ pos: 'center' }, m) : { pos: eff };
     }
-    return Object.assign({ pos: spec.pos || 'center' }, spec);
+    return Object.assign({ pos: eff.pos || 'center' }, eff);
   }
 
   function applySubLayout(spec) {
@@ -1470,7 +1601,16 @@
       else subs.style.setProperty(cssVar, typeof val === 'number' && prop !== 'zIndex' ? `${val}px` : String(val));
     }
   }
-  V.setSubLayout = applySubLayout;
+  V.setSubLayout = function (spec) {
+    if (V._inSceneUpdate) sceneScopedSpec = true;
+    return applySubLayout(spec);
+  };
+
+  function resetSceneSubLayout() {
+    if (!sceneScopedSpec) return;
+    sceneScopedSpec = false;
+    applySubLayout(getSubCfg().layout || getSubCfg().position || 'center');
+  }
 
   function mountSubSlot(slotEl, factory) {
     if (!slotEl || !factory) return;
@@ -1494,16 +1634,11 @@
     if (subCfg.layout || subCfg.position) applySubLayout(subCfg.layout || subCfg.position);
   }
 
-  function syncSceneSubLayout(sc, lt, subCfg) {
+  function syncSceneSubLayout(sc, lt) {
     const spec = sc.subLayout || sc.subtitles;
-    if (spec) {
-      appliedSceneSpec = true;
-      applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
-      return;
-    }
-    if (!appliedSceneSpec) return;
-    appliedSceneSpec = false;
-    applySubLayout(subCfg.layout || subCfg.position || 'center');
+    if (!spec) return;
+    sceneScopedSpec = true;
+    applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
   }
 
   function updateSubDomText(cue) {
@@ -1549,21 +1684,42 @@
     return activeCueIdx;
   }
 
-  V._subtitlesRuntime = { bindSubElements, applySubLayout, updateSubs };
+  V._subtitlesRuntime = { bindSubElements, applySubLayout, resetSceneSubLayout, updateSubs };
 })(globalThis.V = globalThis.V || {});
 
 /* core/11-audio.js · 解说干声与背景音乐双轨独立加载、寻道防漂移同步与声音状态机 */
 (function (V) {
   if (typeof location === 'undefined') return;
 
+  function isVoiceLocaleMatch() {
+    return V.isVoiceLocaleMatch ? V.isVoiceLocaleMatch() : Boolean(V.voice);
+  }
+
+  function hasExplicitLocaleMedia(lang, key) {
+    const loc = (V.locales && V.locales[lang]) || null;
+    if (!loc) return false;
+    if (loc[key] !== undefined) return true;
+    return Boolean(loc.config && loc.config[key] !== undefined);
+  }
+
+  function localizeFallbackMedia(src, key = 'audioSrc') {
+    if (!src) return null;
+    const lang = typeof V.getActiveLang === 'function' ? V.getActiveLang() : '';
+    const isSec = V.isSecondaryLocale ? V.isSecondaryLocale(lang) : false;
+    if (!isSec || hasExplicitLocaleMedia(lang, key)) return src;
+    return key === 'audioSrc' ? null : src;
+  }
+
   function resolveAudioSource(cfg, isRecord) {
     if (cfg.audioSrc === false || isRecord) return null;
-    return (V.voice && V.voice.src) || cfg.audioSrc || null;
+    if (isVoiceLocaleMatch() && V.voice.src) return V.voice.src;
+    return localizeFallbackMedia(cfg.audioSrc, 'audioSrc') || null;
   }
 
   function resolveBgmSource(cfg, isRecord) {
     if (cfg.audioSrc === false || cfg.bgm === false || cfg.bgmSrc === false || isRecord) return null;
-    return (V.voice && V.voice.bgmSrc) || cfg.bgmSrc || null;
+    if (isVoiceLocaleMatch() && V.voice.bgmSrc) return V.voice.bgmSrc;
+    return localizeFallbackMedia(cfg.bgmSrc, 'bgmSrc') || null;
   }
 
   V._createAudioRuntime = function (hooks) {
@@ -1614,13 +1770,21 @@
       }
     }
 
+    function handleBgmPlayErr(err) {
+      bgmPlayPending = false;
+      if (err && err.name === 'NotAllowedError') {
+        audioBlocked = true;
+        armBlockedUnlock();
+      }
+    }
+
     function safePlayBgm() {
       if (!bgmAudio || !hooks.isPlaying() || bgmAudio.muted || !bgmAudio.paused || bgmPlayPending) return;
       bgmPlayPending = true;
       bgmAudio.playbackRate = playbackRate;
       const p = bgmAudio.play();
       if (p && typeof p.then === 'function') {
-        p.then(() => { bgmPlayPending = false; }).catch(() => { bgmPlayPending = false; });
+        p.then(() => { bgmPlayPending = false; }).catch(handleBgmPlayErr);
       } else {
         bgmPlayPending = false;
       }
@@ -1840,7 +2004,8 @@
       initTracks, startPlayback, pausePlayback, seekTracks, setRate,
       setBgm, setVoice, setMuted, toggleVoiceFromMenu, toggleBgmFromMenu,
       isAllMuted, resolveSoundBtnSpec, canUseMasterClock,
-      tickMasterClock, hasBgm: () => Boolean(bgmAudio), getState,
+      tickMasterClock, syncWithWallClock: keepBgmInSync,
+      hasBgm: () => Boolean(bgmAudio), getState,
     };
   };
 })(globalThis.V = globalThis.V || {});
@@ -1958,7 +2123,7 @@
   let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0;
   let inBar = false, lastPtrX = -9999, lastPtrY = -9999;
   let wipeState = { name: '', handler: null, dom: null };
-  const sandboxState = { active: false, entering: false, returnTime: null, el: null, txtEl: null, backEl: null };
+  const sandboxState = { active: false, entering: false, autoExitOnLast: true, returnTime: null, el: null, txtEl: null, backEl: null };
   const ui = {};
   let audioRt = null;
 
@@ -2060,11 +2225,19 @@
   function enter(sc) {
     if (current && current.root) current.root.remove();
     V._videoClips.clear();
+    if (V._subtitlesRuntime && V._subtitlesRuntime.resetSceneSubLayout) {
+      V._subtitlesRuntime.resetSceneSubLayout();
+    }
     const si = V.scenes.indexOf(sc);
     sc.root = h('div', { class: 'scene ' + (sc.cls || '') });
     sc.ctx = V.makeCtx(sc, si);
     stage.appendChild(sc.root);
-    sc.build(sc.root, sc.ctx);
+    V._inSceneUpdate = true;
+    try {
+      sc.build(sc.root, sc.ctx);
+    } finally {
+      V._inSceneUpdate = false;
+    }
     current = sc;
     V.emit('onSceneEnter', { scene: sc, sceneIndex: si });
   }
@@ -2086,6 +2259,10 @@
   }
 
   function runTransition() {
+    if (current && current.root) {
+      current.root.style.transform = '';
+      current.root.style.opacity = '';
+    }
     const box = document.getElementById('wipe');
     if (!box || V.scenes.length < 2) return;
     const cfg = V.getCfg();
@@ -2108,8 +2285,11 @@
   }
 
   function syncSceneVideoClips(lt) {
+    const tick = V._renderTick || 0;
     for (const clip of V._videoClips) {
-      if (clip.isConnected) syncVideoClip(clip, lt, playing && !scrubbing);
+      if (!clip.isConnected) continue;
+      if (clip._vclip && clip._vclip._syncedTick === tick) continue;
+      syncVideoClip(clip, lt, playing && !scrubbing);
     }
   }
 
@@ -2145,6 +2325,8 @@
     if (!Number.isFinite(target)) return;
     const prefix = opts.prefix === undefined ? '🎮 彩蛋试玩：' : opts.prefix;
     const label = opts.hint ? prefix + opts.hint : '🎮 彩蛋试玩中';
+    const last = V.scenes[V.scenes.length - 1];
+    sandboxState.autoExitOnLast = !last || target < last.start;
     sandboxState.returnTime = Number.isFinite(opts.returnTime) ? opts.returnTime : resolveDefaultSandboxReturn();
     sandboxState.entering = true;
     setSandboxActiveDom(true, label, opts.backLabel || '↩ 返回终章');
@@ -2179,11 +2361,24 @@
   function syncSceneCtxAndEndState(sc, idle) {
     ended = !playing && now >= V.duration - 0.01;
     document.body.classList.toggle('is-ended', ended);
-    if (sandboxState.active && !sandboxState.entering && sc === V.scenes[V.scenes.length - 1]) setSandboxActiveDom(false);
+    if (sandboxState.active && !sandboxState.entering && sandboxState.autoExitOnLast && sc === V.scenes[V.scenes.length - 1]) {
+      setSandboxActiveDom(false);
+    }
     if (sc !== current) enter(sc);
     sc.ctx.clock = V._clock;
     sc.ctx.idle = idle;
     sc.ctx.ended = ended;
+  }
+
+  function runSceneUpdate(sc, lt, idle) {
+    V._renderTick = (V._renderTick || 0) + 1;
+    V._isPlaying = playing && !scrubbing;
+    V._inSceneUpdate = true;
+    try {
+      sc.update(shouldContinueSceneAtEnd(sc, idle) ? lt + idle : lt, sc.ctx);
+    } finally {
+      V._inSceneUpdate = false;
+    }
   }
 
   function render(t, idleSec) {
@@ -2206,7 +2401,7 @@
     stage.style.setProperty('--tg', ((clock % 6) / 6) * 150);
     stage.style.setProperty('--anim-t', (-clock).toFixed(3) + 's');
     document.body.classList.toggle('started', now > 0.05);
-    sc.update(shouldContinueSceneAtEnd(sc, idle) ? lt + idle : lt, sc.ctx);
+    runSceneUpdate(sc, lt, idle);
     syncSceneVideoClips(lt);
     activeCueIdx = V._subtitlesRuntime.updateSubs(sc, idx, lt, now, clock, showSubs);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
@@ -2298,6 +2493,7 @@
     const dt = Math.min(0.1, (ts - lastTs) / 1000) * playbackRate;
     lastTs = ts;
     if (checkSceneLoop(now + dt)) return;
+    if (audioRt) audioRt.syncWithWallClock(now);
     if (now + dt >= V.duration - 0.002) finishPlayback();
     else render(now + dt, 0);
   }
@@ -2353,6 +2549,7 @@
     lastTs = performance.now();
     if (audioRt) audioRt.startPlayback();
     document.body.classList.add('playing');
+    V.emit('onPlay', { now, playing: true });
     if (!RECORD) {
       if (!inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
       updateUI();
@@ -2367,6 +2564,7 @@
     document.body.classList.toggle('is-ended', ended);
     if (audioRt) audioRt.pausePlayback();
     for (const clip of V._videoClips) if (clip.pause) clip.pause();
+    V.emit('onPause', { now, ended, playing: false });
     if (!RECORD) updateUI();
   }
 
@@ -2415,15 +2613,16 @@
     return Math.abs(target - lastSeekTarget) < 0.015 && Math.abs(target - now) < 0.015 && ts - lastSeekAt < 250;
   }
 
-  function seek(t) {
+  function seek(t, force = false) {
     if (!Number.isFinite(t)) return;
     const target = clamp(t, 0, V.duration - 0.001);
     const ts = performance.now();
-    if (isRedundantSeek(target, ts)) return;
+    if (!force && isRedundantSeek(target, ts)) return;
     lastTs = ts;
     pauseBaseTs = ts;
     lastSeekTarget = target;
     lastSeekAt = ts;
+    if (V._checkpointsRuntime && V._checkpointsRuntime.onSeek) V._checkpointsRuntime.onSeek(target);
     render(target, 0);
     V.emit('onSeek', target);
     if (audioRt) audioRt.seekTracks(now);
@@ -2557,7 +2756,7 @@
       const up = () => {
         scrubbing = false;
         document.body.classList.remove('scrubbing');
-        if (uncommittedT != null) seek(uncommittedT);
+        if (uncommittedT != null) seek(uncommittedT, true);
         removeEventListener('pointermove', mv);
         removeEventListener('pointerup', up);
         removeEventListener('pointercancel', up);
@@ -3008,17 +3207,26 @@
     });
   }
 
+  function clearStaleVoiceIfNeeded() {
+    if (V.voice && V.isVoiceLocaleMatch && !V.isVoiceLocaleMatch(V.voice)) {
+      V.voice = null;
+    }
+  }
+
   async function ensureDynamicBootAssets() {
     const cfg = V.getCfg();
     if (V.scenes.length === 0 && Array.isArray(cfg.sceneScripts)) {
       for (const rel of cfg.sceneScripts) await loadOptionalScript(rel);
     }
     const lang = V.getActiveLang();
-    if (!lang) return;
+    if (!lang || (V.isSecondaryLocale && !V.isSecondaryLocale(lang))) return;
     if (!V.locales[lang]) await loadOptionalScript(`locales/${lang}.js`);
     const baseTimings = cfg.timingsScript || 'assets/voice/timings.js';
     const langTimings = baseTimings.replace(/\.js$/i, `.${lang}.js`);
-    if (langTimings !== baseTimings) await loadOptionalScript(langTimings);
+    if (langTimings !== baseTimings) {
+      const ok = await loadOptionalScript(langTimings);
+      if (!ok) clearStaleVoiceIfNeeded();
+    }
   }
 
   V.boot = async function () {

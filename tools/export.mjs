@@ -2,7 +2,7 @@
 // 用法：node tools/export.mjs <video-id> <out-lines.json> <out-cues.json> [--lang en]
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, listVideoIds, loadVideoSandbox, probeSceneAnchors } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, probeSceneAnchors, getSandboxCfg } from './lib/paths.mjs';
 import { writeSubtitleFiles } from './lib/subtitles.mjs';
 
 function parseExportArgs(argv) {
@@ -58,6 +58,7 @@ function buildVideoClipAudioList(dryClips, scenes) {
         trim: Number(vc.trim || 0),
         speed: Number(vc.speed || 1),
         volume: Number(vc.volume || 0),
+        loop: Boolean(vc.loop),
         maxDur: Math.max(0.1, sc.duration - clipStart),
       };
     });
@@ -71,7 +72,7 @@ if (!videoId) {
 
 const { sandbox, videoDir, audioRel, bgmRel } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: false, lang });
 const V = sandbox.V;
-const cfg = Object.assign({}, V.themeDefaults || {}, V.config || {});
+const cfg = getSandboxCfg(V);
 
 const dryClips = [];
 const anchorErrors = probeSceneAnchors(sandbox, dryClips);

@@ -14,8 +14,21 @@ const parts = [
   ...coreFiles.map(f => fs.readFileSync(path.join(CORE_DIR, f), 'utf8').trim()),
   '',
 ];
+const assembled = parts.join('\n\n');
 
-fs.writeFileSync(OUT_ENGINE, parts.join('\n\n'), 'utf8');
+if (process.argv.includes('--check')) {
+  const existing = fs.existsSync(OUT_ENGINE)
+    ? fs.readFileSync(OUT_ENGINE, 'utf8').replace(/\r\n/g, '\n')
+    : '';
+  if (existing !== assembled.replace(/\r\n/g, '\n')) {
+    console.error('❌ runtime/base/js/engine.js is out of sync with core/*.js. Run: npm run assemble');
+    process.exit(1);
+  }
+  console.log('✅ Engine assembly check PASSED.');
+  process.exit(0);
+}
+
+fs.writeFileSync(OUT_ENGINE, assembled, 'utf8');
 fs.writeFileSync(
   OUT_ESM,
   `import './engine.js';\nexport const V = globalThis.V;\nexport default globalThis.V;\n`,

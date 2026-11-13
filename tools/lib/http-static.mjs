@@ -2,7 +2,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR, listVideoIds, loadVideoSandbox } from './paths.mjs';
+import { VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR, listVideoIds, loadVideoSandbox, getSandboxCfg } from './paths.mjs';
 
 export const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -50,7 +50,7 @@ function pipeFileSafe(res, fp, opts) {
 function buildLiveManifestItem(projectRoot, id) {
   try {
     const { sandbox } = loadVideoSandbox(projectRoot, id, { ignoreBaked: false, requireTimings: false });
-    const cfg = Object.assign({}, sandbox.V.themeDefaults || {}, sandbox.V.config || {});
+    const cfg = getSandboxCfg(sandbox.V);
     return {
       id,
       title: cfg.title || id,
@@ -96,12 +96,29 @@ function resolveVirtualFile(pathname, videosDir) {
   return null;
 }
 
+function parseByteRange(rangeHeader, size) {
+  const m = /^bytes=(\d*)-(\d*)$/i.exec(String(rangeHeader || '').trim());
+  if (!m) return null;
+  if (!m[1] && !m[2]) return { unsat: true };
+  if (!m[1]) {
+    const suf = parseInt(m[2], 10);
+    if (suf <= 0 || size <= 0) return { unsat: true };
+    return { start: Math.max(0, size - suf), end: size - 1 };
+  }
+  const start = parseInt(m[1], 10);
+  const end = Math.min(m[2] ? parseInt(m[2], 10) : size - 1, size - 1);
+  if (start >= size || start > end) return { unsat: true };
+  return { start, end };
+}
+
 function serveRangeResponse(req, res, fp, size, contentType) {
-  const m = /bytes=(\d*)-(\d*)/.exec(req.headers.range || '');
-  if (!m) return false;
-  const start = m[1] ? parseInt(m[1], 10) : 0;
-  const end = m[2] ? parseInt(m[2], 10) : size - 1;
-  if (start >= size || end >= size || start > end) return false;
+  const parsed = parseByteRange(req.headers.range, size);
+  if (!parsed) return false;
+  if (parsed.unsat) {
+    res.writeHead(416, { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes' }).end();
+    return true;
+  }
+  const { start, end } = parsed;
   res.writeHead(206, {
     'Content-Type': contentType,
     'Content-Range': `bytes ${start}-${end}/${size}`,
@@ -109,21 +126,25 @@ function serveRangeResponse(req, res, fp, size, contentType) {
     'Content-Length': end - start + 1,
     'Cache-Control': 'no-cache',
   });
-  pipeFileSafe(res, fp, { start, end });
+  if (req.method === 'HEAD') res.end();
+  else pipeFileSafe(res, fp, { start, end });
   return true;
 }
 
 function attachHmrWatchers(dirs, clients) {
   const watchers = [];
   let debounceTimer = null;
+  let needReload = false;
 
   const notify = filename => {
     if (!filename) return;
     const norm = String(filename).replace(/\\/g, '/');
     if (norm.includes('.runtime') || norm.endsWith('.tmp')) return;
+    if (!norm.endsWith('.css')) needReload = true;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
-      const type = norm.endsWith('.css') ? 'css' : 'reload';
+      const type = needReload ? 'reload' : 'css';
+      needReload = false;
       const payload = `data: ${JSON.stringify({ type, file: norm })}\n\n`;
       for (const res of clients) {
         try { res.write(payload); } catch { clients.delete(res); }
@@ -173,7 +194,8 @@ export function createVideoHttpServer({ videosDir = VIDEOS_DIR, watch = false } 
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-cache',
     });
-    pipeFileSafe(res, fp);
+    if (req.method === 'HEAD') res.end();
+    else pipeFileSafe(res, fp);
   });
 
   const origClose = srv.close.bind(srv);

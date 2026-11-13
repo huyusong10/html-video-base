@@ -4,7 +4,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   ROOT, PKG_ROOT, TOOLS_DIR, VIDEOS_DIR, TEMPLATES_DIR,
-  listVideoIds, resolvePython, loadVideoSandbox, resolveLangMediaPaths,
+  listVideoIds, resolvePython, loadVideoSandbox, resolveLangMediaPaths, getSandboxCfg,
 } from './lib/paths.mjs';
 
 function run(bin, args, label, extraEnv = {}) {
@@ -18,8 +18,12 @@ function run(bin, args, label, extraEnv = {}) {
 }
 
 function parseFlag(args, name, fallback = null) {
+  const eq = args.find(a => a.startsWith(`${name}=`));
+  if (eq !== undefined) return eq.slice(name.length + 1) || fallback;
   const idx = args.indexOf(name);
-  return idx >= 0 && idx + 1 < args.length ? args[idx + 1] : fallback;
+  if (idx < 0 || idx + 1 >= args.length) return fallback;
+  const next = args[idx + 1];
+  return next.startsWith('--') ? fallback : next;
 }
 
 function stripFlags(args, valueFlags = []) {
@@ -27,7 +31,10 @@ function stripFlags(args, valueFlags = []) {
   const vf = new Set(valueFlags);
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (vf.has(a)) { i++; continue; }
+    if (vf.has(a)) {
+      if (i + 1 < args.length && !args[i + 1].startsWith('--')) i++;
+      continue;
+    }
     if (!a.startsWith('--')) out.push(a);
   }
   return out;
@@ -56,7 +63,7 @@ function copyTemplateDir(src, dest, replacements) {
 function buildManifestItem(id) {
   try {
     const { sandbox } = loadVideoSandbox(ROOT, id, { ignoreBaked: false, requireTimings: false });
-    const cfg = sandbox.V.config || {};
+    const cfg = getSandboxCfg(sandbox.V);
     return {
       id,
       title: cfg.title || id,
@@ -228,15 +235,19 @@ function cmdBuild(args) {
   const voiceDir = path.join(rtDir, 'voice');
 
   const { sandbox } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: false, lang });
-  const { timingsRel, audioRel, bgmRel } = resolveLangMediaPaths(sandbox.V.config, lang);
+  const cfg = getSandboxCfg(sandbox.V);
+  const { timingsRel, audioRel, bgmRel } = resolveLangMediaPaths(cfg, lang);
+  const hasLines = (sandbox.V.scenes || []).some(sc => Array.isArray(sc.lines) && sc.lines.length > 0);
 
   fs.rmSync(rtDir, { recursive: true, force: true });
   fs.mkdirSync(rtDir, { recursive: true });
 
   run(process.execPath, [path.join(TOOLS_DIR, 'export.mjs'), videoId, linesJson, cuesJson, ...langArgs],
     `[1/4] Exporting scene script & config for '${videoId}'...`, ttsEnv);
-  run(py, [path.join(TOOLS_DIR, 'voice.py'), linesJson, voiceDir, path.join(videoDir, timingsRel)],
-    `[2/4] Synthesizing TTS voice, word boundaries & 30Hz envelopes...`, ttsEnv);
+  if (audioRel || hasLines) {
+    run(py, [path.join(TOOLS_DIR, 'voice.py'), linesJson, voiceDir, path.join(videoDir, timingsRel)],
+      `[2/4] Synthesizing TTS voice, word boundaries & 30Hz envelopes...`, ttsEnv);
+  }
   run(process.execPath, [path.join(TOOLS_DIR, 'export.mjs'), videoId, linesJson, cuesJson, ...langArgs],
     `[3/4] Computing timeline cues, subtitles & mixing soundtrack + BGM stems...`, ttsEnv);
   if (audioRel) {
