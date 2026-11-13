@@ -74,13 +74,20 @@
     return u.resumeMinSec === undefined ? 5 : Math.max(0, Number(u.resumeMinSec) || 0);
   }
 
+  function resolveUiDelays(u) {
+    return {
+      idleHideDelay: Number(u.idleHideDelay) || 1500,
+      leaveHideDelay: Number(u.leaveHideDelay || u.autoHideDelay) || 220,
+    };
+  }
+
   function getUiCfg(cfg) {
     const u = (cfg && cfg.ui) || {};
+    const delays = resolveUiDelays(u);
     return {
       controlsMode: u.controlsMode || (cfg && cfg.controlsMode) || 'overlay',
-      autoHideZone: Number(u.autoHideZone) || 72,
-      autoHideDelay: Number(u.autoHideDelay) || 300,
-      actionWakeDelay: Number(u.actionWakeDelay) || 850,
+      idleHideDelay: delays.idleHideDelay,
+      leaveHideDelay: delays.leaveHideDelay,
       persist: u.persist !== false,
       resumeMinSec: resolveResumeMinSec(u),
       osd: u.osd !== false,

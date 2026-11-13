@@ -444,7 +444,7 @@ body.record #checkpoint-overlay { display: none !important; }
 :is(body.ctrl-overlay, body.web-full, body.os-full) #start-hint { top: 50%; }
 body.playing #start-hint, body.started #start-hint, body.record #start-hint { opacity: 0; }
 
-/* 底部播放控制栏（默认 PotPlayer 式悬浮自动隐藏，底边热区唤醒并联动字幕避让） */
+/* 底部播放控制栏（默认 PotPlayer 式悬浮：鼠标移入视频即显、静止自动隐退、移出窗口速隐、全屏同步隐鼠） */
 #controls {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
   height: var(--ctrl-h);
@@ -460,15 +460,18 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 :is(body.ctrl-overlay, body.web-full, body.os-full) #controls {
   backdrop-filter: blur(10px);
   opacity: 0;
-  transition: opacity 0.15s ease;
+  transition: opacity 0.16s ease;
 }
 :is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing), .ui-active, .scrubbing, .menu-open) #controls,
-:is(body.ctrl-overlay, body.web-full, body.os-full) #controls:is(:hover, :focus-within) {
+:is(body.ctrl-overlay, body.web-full, body.os-full) #controls:has(input:focus) {
   opacity: 1;
 }
 :is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing), .ui-active, .scrubbing, .menu-open) #stage,
-:is(body.ctrl-overlay, body.web-full, body.os-full):has(#controls:is(:hover, :focus-within)) #stage {
+:is(body.ctrl-overlay, body.web-full, body.os-full):has(#controls input:focus) #stage {
   --ctrl-dodge: var(--ctrl-overlap, 52px);
+}
+:is(body.web-full, body.os-full).playing:not(.ui-active, .scrubbing, .menu-open) #viewport {
+  cursor: none;
 }
 
 #controls :where(button, .ctrl-home) {
@@ -523,9 +526,6 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 }
 #controls :where(button.is-off) {
   opacity: 0.56;
-}
-#controls :where(button.is-sub-on) {
-  box-shadow: inset 0 -2px 0 var(--accent);
 }
 #controls :where(button.on),
 #controls.chap-open :where(.chap-trigger),

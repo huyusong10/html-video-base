@@ -64,7 +64,7 @@ python -m venv .runtime/venv
 | `V.tryEgg(targetSec, hint)` / `V.enterSandbox` / `V.exitSandbox` | 终章彩蛋与沙盒试玩跳转及悬浮返回条 |
 | `V.search(query)` / `V.openSearch()` / `V.getDeepLink(t)` | 内置全文台词与章节检索跳转（快捷键 `/` 或 `Ctrl+K`）及时间码点击复制 `?t=` 深链 |
 | `V.setBgm(on)` / `V.setVoice(on)` / `V.setMuted(on)` / `V.clearSavedState()` | 解说主轨与 BGM 伴奏轨独立开关（上拉菜单 / `B` 键开关配乐、`M` 键静音），以及偏好记忆与断点续播清理 |
-| `V.config.ui` / `V.themeDefaults.ui` | 定制播放器模式（默认 `controlsMode: 'overlay'` 底边浮出 + `0.3s` 快速收起；悬停进度条实时跟随 `.track-tip` 章节时间预览；键盘操作仅在右上角闪出 `#osd` 胶囊而不弹底栏顶跳字幕；内置 `persist: true` 偏好与断点续播记忆）、图标预设（`iconPreset: 'default' \| 'pixel'`）与倍速档位（`rates`） |
+| `V.config.ui` / `V.themeDefaults.ui` | 定制播放器模式（默认 `controlsMode: 'overlay'`：鼠标进入或移动于视频内即显控制栏、静止 `1.5s` 自动隐退、移出窗口 `0.22s` 速隐、全屏同步隐鼠；悬停进度条实时跟随 `.track-tip` 章节时间预览；键盘操作仅在右上角闪出 `#osd` 胶囊而不弹底栏顶跳字幕；内置 `persist: true` 偏好与断点续播记忆）、图标预设（`iconPreset: 'default' \| 'pixel'`）与倍速档位（`rates`） |
 
 ## 主题与控制栏 CSS 变量槽位
 

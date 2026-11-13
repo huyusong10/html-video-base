@@ -67,7 +67,7 @@ V.scene({
 
 - **字幕伴随插槽与避让**：通过 `V.subtitle({ lead: (h, V) => el, tail, position, modes, onUpdate(cue, info, dom) })` 挂载前置吉祥物或角标；单幕可设 `subLayout: 'left' | { pos: 'center', offsetX: 56, maxWidth: 1520 }` 动态避让角色。
 - **PotPlayer 式悬浮控制栏与配置项（`V.config.ui`）**：
-  - `controlsMode: 'overlay' | 'docked'`（默认为 `'overlay'`：画面铺满视口，播放时鼠标移入底部 `autoHideZone: 72` 热区浮出，移出 `autoHideDelay: 300` 毫秒收起；悬停进度条实时跟随 `.track-tip` 预览章节与时间；按键盘快进/静音/切章仅在右上角闪出 `#osd` 胶囊，不弹底栏顶跳字幕）
+  - `controlsMode: 'overlay' | 'docked'`（默认为 `'overlay'`：鼠标移入视频或在画面内移动立即唤醒底栏，在画面上静止 `idleHideDelay: 1500` 毫秒自动隐退，移出视频窗口 `leaveHideDelay: 220` 毫秒速隐，悬停底栏时保持常亮，全屏静止同步隐鼠；悬停进度条实时跟随 `.track-tip` 预览章节与时间；按键盘快进/静音/切章仅在右上角闪出 `#osd` 胶囊，不弹底栏顶跳字幕）
   - `persist: true`（按路径持久化倍速、字幕、双音轨开关及播放进度，超过 `resumeMinSec: 5` 秒刷新自动断点续播；嵌入弹窗若无需续播可设 `persist: false`）、`osd: true`、`chapterMarks: true`、`hud: true`、`rate: true`、`webFull: true`、`iconPreset: 'default' | 'pixel'`
 - **全图标控制栏与业务图标覆盖规范**：
   - 控制栏左右按钮默认统一使用 `32×30` 紧凑矢量图标（返回主界面 `home`、播放/暂停/重播 `play`/`pause`/`replay`、章节箭头 `chapCaret`、倍速 `rate` 在 `1.0x` 显示仪表图标并在非 `1.0x` 动态切换为紧凑数字、字幕 `subsOn`/`subsOff`、声音多态 `volumeOn`/`volumeVoice`/`volumeBgm`/`volumeMute`、全屏 `webEnter`/`webExit`/`fullEnter`/`fullExit`）。

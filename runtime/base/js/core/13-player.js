@@ -17,7 +17,8 @@
   let lastTs = 0, pauseBaseTs = 0, ended = false, scrubbing = false;
   let showSubs = !params.has('nosubs'), playbackRate = 1, loopScene = false;
   let lastSeekTarget = -1, lastSeekAt = 0, activeCueIdx = -1;
-  let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0, inHotZone = false;
+  let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0;
+  let inBar = false, lastPtrX = -9999, lastPtrY = -9999;
   let wipeState = { name: '', handler: null, dom: null };
   const sandboxState = { active: false, entering: false, returnTime: null, el: null, txtEl: null, backEl: null };
   const ui = {};
@@ -278,7 +279,7 @@
   }
 
   function showUiHold() {
-    inHotZone = true;
+    inBar = true;
     clearTimeout(idleTimer);
     document.body.classList.add('ui-active');
   }
@@ -286,13 +287,18 @@
   function scheduleUiHide(ms) {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      if (!inHotZone) document.body.classList.remove('ui-active');
+      if (!inBar) document.body.classList.remove('ui-active');
     }, ms);
   }
 
-  function flashUi(ms = 850) {
+  function flashUi(ms = 1500) {
     document.body.classList.add('ui-active');
-    if (!inHotZone) scheduleUiHide(ms);
+    if (!inBar) scheduleUiHide(ms);
+  }
+
+  function releaseBarHold() {
+    inBar = false;
+    scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
   }
 
   function flashOsd(text, ms = 680) {
@@ -394,7 +400,7 @@
     bar.classList.toggle('rate-open', mode === 'rate');
     bar.classList.toggle('sound-open', mode === 'sound');
     document.body.classList.toggle('menu-open', Boolean(mode));
-    if (prev && !mode && !inHotZone) scheduleUiHide(300);
+    if (prev && !mode && !inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
   }
 
   function play() {
@@ -408,7 +414,10 @@
     lastTs = performance.now();
     if (audioRt) audioRt.startPlayback();
     document.body.classList.add('playing');
-    if (!RECORD) updateUI();
+    if (!RECORD) {
+      if (!inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
+      updateUI();
+    }
   }
 
   function pause() {
@@ -640,6 +649,7 @@
     document.body.classList.toggle('web-full', webFull);
     setBtnIcon(ui.webfull, webFull ? 'webExit' : 'webEnter', webFull ? icons.webExit : icons.webEnter, webFull ? '退出窗口全屏（W / Esc）' : '窗口全屏（W）', webFull);
     setBtnIcon(ui.full, osOn ? 'fullExit' : 'fullEnter', osOn ? icons.fullExit : icons.fullEnter, osOn ? '退出全屏（F / Esc）' : '全屏（F）', osOn);
+    releaseBarHold();
     fit();
   }
 
@@ -735,23 +745,33 @@
     });
   }
 
+  function wakeFromPointer(bar, uiCfg, e, force) {
+    if (!force && Math.abs(e.clientX - lastPtrX) < 1 && Math.abs(e.clientY - lastPtrY) < 1) return;
+    lastPtrX = e.clientX;
+    lastPtrY = e.clientY;
+    if (bar && bar.contains(e.target)) showUiHold();
+    else { inBar = false; flashUi(uiCfg.idleHideDelay); }
+  }
+
   function bindIdleWake(bar, uiCfg) {
-    const hotZone = uiCfg.autoHideZone;
-    const leaveDelay = uiCfg.autoHideDelay;
-    addEventListener('pointermove', e => {
-      const hot = e.clientY >= innerHeight - hotZone || Boolean(bar && bar.contains(e.target));
-      if (hot) showUiHold();
-      else if (inHotZone) { inHotZone = false; scheduleUiHide(leaveDelay); }
-    });
-    document.addEventListener('mouseleave', () => { inHotZone = false; scheduleUiHide(leaveDelay); });
-    addEventListener('blur', () => { inHotZone = false; scheduleUiHide(leaveDelay); });
+    const clearOnLeave = () => {
+      inBar = false;
+      lastPtrX = -9999;
+      lastPtrY = -9999;
+      scheduleUiHide(uiCfg.leaveHideDelay);
+    };
+    document.addEventListener('pointerenter', e => wakeFromPointer(bar, uiCfg, e, true));
+    addEventListener('pointermove', e => wakeFromPointer(bar, uiCfg, e, false));
+    if (bar) bar.addEventListener('pointerleave', () => { inBar = false; scheduleUiHide(uiCfg.idleHideDelay); });
+    document.addEventListener('mouseleave', clearOnLeave);
+    addEventListener('blur', clearOnLeave);
     addEventListener('pointerdown', e => {
-      if (e.pointerType === 'touch') flashUi(bar && bar.contains(e.target) ? 2000 : 1500);
+      if (e.pointerType === 'touch') flashUi(bar && bar.contains(e.target) ? 2200 : uiCfg.idleHideDelay);
     });
     addEventListener('focusin', e => {
-      if (bar && bar.contains(e.target)) flashUi(1200);
+      if (bar && bar.contains(e.target)) flashUi(uiCfg.idleHideDelay);
     });
-    flashUi(uiCfg.actionWakeDelay);
+    flashUi(uiCfg.idleHideDelay);
     document.getElementById('viewport').addEventListener('click', e => {
       if (e.target.closest('[data-interactive]')) return;
       if (!playing && isInteractiveHold()) return;
@@ -774,7 +794,6 @@
     if (!ui.subs) return;
     const icons = getUiCfg(V.getCfg()).icons;
     const key = showSubs ? 'subsOn' : 'subsOff';
-    ui.subs.classList.toggle('is-sub-on', showSubs);
     ui.subs.classList.toggle('is-off', !showSubs);
     swapBtnIcon(ui.subs, key, icons[key], showSubs ? '关闭字幕' : '开启字幕');
   }
@@ -1016,7 +1035,7 @@
     V.emit('onStart', V._playerCtl);
 
     fit();
-    addEventListener('resize', fit);
+    addEventListener('resize', () => { releaseBarHold(); fit(); });
     pauseBaseTs = performance.now();
     const initPos = resolveInitialTime(uiCfg);
     if (initPos.t > 0) {

@@ -93,7 +93,7 @@ function writeTestProjectFiles(videoDir) {
     'V.config = {',
     '  title: "微内核自检演示",',
     '  width: 640, height: 360, fps: 10,',
-    '  ui: { resumeMinSec: 0.5 },',
+    '  ui: { resumeMinSec: 0.5, idleHideDelay: 420, leaveHideDelay: 120 },',
     '  tts: { provider: "custom", script: "./mock_tts.py" },',
     '  sceneScripts: ["js/s01.js", "js/s02.js"],',
     '};',
@@ -170,33 +170,50 @@ async function verifyIframeWebFullContract(page, port) {
 }
 
 async function verifyPotPlayerAutoHideContract(page) {
+  const subsShadow = await page.evaluate(() => getComputedStyle(document.querySelector('[data-act="subs"]')).boxShadow);
+  assert.equal(subsShadow, 'none', 'Active [data-act="subs"] must NOT render bottom decorative inset box-shadow');
+
   await page.mouse.move(200, 200);
-  await page.evaluate(() => window.__video.play());
-  await page.waitForTimeout(960);
+  await page.evaluate(() => {
+    window.__video.seek(window.V.scenes[1].start + 0.05);
+    window.__video.play();
+  });
+  await page.waitForTimeout(640);
   const idleHidden = await page.evaluate(() => ({
     uiActive: document.body.classList.contains('ui-active'),
     opacity: Number(getComputedStyle(document.getElementById('controls')).opacity),
   }));
-  assert.equal(idleHidden.uiActive, false, 'Playing with pointer outside bottom hot-zone must clear .ui-active');
-  assert.ok(idleHidden.opacity < 0.05, `Expected hidden #controls opacity ~0, got ${idleHidden.opacity}`);
+  assert.equal(idleHidden.uiActive, false, 'Playing with stationary pointer on video canvas must clear .ui-active');
+  assert.ok(idleHidden.opacity < 0.05, `Expected idle-hidden #controls opacity ~0, got ${idleHidden.opacity}`);
 
-  await page.mouse.move(200, 706);
+  await page.mouse.move(320, 180);
   await page.waitForTimeout(190);
-  const hotWake = await page.evaluate(() => ({
+  const canvasWake = await page.evaluate(() => ({
     uiActive: document.body.classList.contains('ui-active'),
     opacity: Number(getComputedStyle(document.getElementById('controls')).opacity),
   }));
-  assert.equal(hotWake.uiActive, true, 'Entering bottom hot-zone must immediately wake #controls');
-  assert.ok(hotWake.opacity > 0.95, `Expected awake #controls opacity ~1, got ${hotWake.opacity}`);
+  assert.equal(canvasWake.uiActive, true, 'Moving pointer anywhere inside video canvas must immediately wake #controls');
+  assert.ok(canvasWake.opacity > 0.95, `Expected awake #controls opacity ~1, got ${canvasWake.opacity}`);
 
-  await page.mouse.move(200, 200);
-  await page.waitForTimeout(520);
-  const fastHide = await page.evaluate(() => ({
+  await page.evaluate(() => document.dispatchEvent(new MouseEvent('mouseleave')));
+  await page.waitForTimeout(300);
+  const leaveHide = await page.evaluate(() => ({
     uiActive: document.body.classList.contains('ui-active'),
     opacity: Number(getComputedStyle(document.getElementById('controls')).opacity),
   }));
-  assert.equal(fastHide.uiActive, false, 'Leaving bottom hot-zone must clear .ui-active within ~300ms');
-  assert.ok(fastHide.opacity < 0.05, `Expected fast-hidden #controls opacity ~0, got ${fastHide.opacity}`);
+  assert.equal(leaveHide.uiActive, false, 'Pointer leaving video window must snap-hide #controls quickly');
+  assert.ok(leaveHide.opacity < 0.05, `Expected leave-hidden #controls opacity ~0, got ${leaveHide.opacity}`);
+
+  await page.locator('#controls [data-act="full"]').click();
+  await page.waitForTimeout(660);
+  const fullAutoHidden = await page.evaluate(async () => {
+    const focusedInBar = document.getElementById('controls').contains(document.activeElement);
+    const opacity = Number(getComputedStyle(document.getElementById('controls')).opacity);
+    if (document.fullscreenElement) await document.exitFullscreen();
+    return { focusedInBar, opacity };
+  });
+  assert.equal(fullAutoHidden.focusedInBar, true, 'Clicking fullscreen button focuses button inside #controls');
+  assert.ok(fullAutoHidden.opacity < 0.05, `Fullscreen #controls must still auto-hide after button focus, got opacity ${fullAutoHidden.opacity}`);
 
   await page.evaluate(() => { window.__video.pause(); window.__video.seek(0.2); });
   await page.waitForTimeout(200);
@@ -351,7 +368,7 @@ async function verifyV26ExperienceContracts(page) {
     window.__video.seek(window.V.scenes[1].start + 0.05);
     window.__video.play();
   });
-  await page.waitForTimeout(480);
+  await page.waitForTimeout(640);
   await page.keyboard.press('b');
   const osdState = await page.evaluate(() => ({
     osdShow: document.getElementById('osd').classList.contains('is-show'),
