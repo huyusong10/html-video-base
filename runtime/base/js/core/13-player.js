@@ -180,9 +180,10 @@
 
   function updateHud() {
     const el = document.getElementById('hud');
-    if (el && !el.classList.contains('is-off')) {
-      el.querySelector('.hud-bar').style.width = clamp(now / V.duration) * 100 + '%';
-    }
+    if (!el || el.classList.contains('is-off') || !(V.duration > 0)) return;
+    const steps = Math.max(400, (V.stageWidth || 1920) * 2);
+    const q = Math.round(clamp(now / V.duration) * steps) / steps;
+    el.querySelector('.hud-bar').style.width = (q * 100).toFixed(4) + '%';
   }
 
   function syncSceneVideoClips(lt) {
@@ -297,6 +298,7 @@
     prevRenderNow = now;
     V._now = now;
     V._clock = clock;
+    if (RECORD) V._checkpointsRuntime.syncRecordCheckpoints(now);
     const sc = sceneAt(now);
     syncSceneCtxAndEndState(sc, idle);
     const lt = now - sc.start;
@@ -312,7 +314,7 @@
     syncSceneVideoClips(lt);
     activeCueIdx = V._subtitlesRuntime.updateSubs(sc, idx, lt, now, clock, showSubs);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
-    V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: RECORD, playing, scrubbing, pause, play });
+    if (!RECORD) V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: false, playing, scrubbing, pause, play });
     const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false };
     V.emit('onRender', {
       now, clock, alive: clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
@@ -1043,16 +1045,26 @@
     if (tasks.length) await Promise.all(tasks);
   }
 
+  function consumeHmrTime() {
+    try {
+      const raw = sessionStorage.getItem('__video_hmr_t');
+      if (raw == null) return null;
+      sessionStorage.removeItem('__video_hmr_t');
+      const v = parseFloat(raw);
+      return Number.isFinite(v) ? v : 0;
+    } catch {
+      return null;
+    }
+  }
+
   function resolveInitialTime(uiCfg) {
+    const hmrT = consumeHmrTime();
+    if (hmrT != null) return { t: hmrT, resumed: false };
     if (params.has('t')) return { t: parseFloat(params.get('t')) || 0, resumed: false };
     if (params.has('scene')) {
       const sIdx = clamp(+params.get('scene') || 0, 0, Math.max(0, V.scenes.length - 1));
       return { t: V.scenes[sIdx] ? V.scenes[sIdx].start + 0.01 : 0, resumed: false };
     }
-    try {
-      const hmrT = sessionStorage.getItem('__video_hmr_t');
-      if (hmrT != null) { sessionStorage.removeItem('__video_hmr_t'); return { t: parseFloat(hmrT) || 0, resumed: false }; }
-    } catch {}
     const savedT = V._prefsRuntime ? V._prefsRuntime.resolveSavedResumeTime(params, uiCfg, V.duration) : 0;
     return { t: savedT, resumed: savedT > 0 };
   }
@@ -1071,7 +1083,7 @@
 
   function exposeBridge(cfg) {
     window.__video = {
-      duration: V.duration,
+      get duration() { return V.duration; },
       width: V.stageWidth,
       height: V.stageHeight,
       fps: cfg.fps || 30,
@@ -1120,7 +1132,7 @@
           audioPaused: a.audioPaused,
         };
       },
-      scenes: V.scenes.map(s => ({ title: s.title, start: s.start, duration: s.duration, cues: s.cues })),
+      get scenes() { return V.scenes.map(s => ({ title: s.title, start: s.start, duration: s.duration, cues: s.cues })); },
     };
   }
 
@@ -1214,14 +1226,22 @@
     }
   }
 
+  function shouldProbeLocalePack(lang) {
+    if (!lang || V.locales[lang]) return false;
+    if (V.isSecondaryLocale && V.isSecondaryLocale(lang)) return true;
+    const base = V.getBaseLang ? V.getBaseLang() : '';
+    const explicit = Boolean(V.__activeLang || params.get('lang'));
+    return explicit && Boolean(!base || lang.toLowerCase() !== base.toLowerCase());
+  }
+
   async function ensureDynamicBootAssets() {
     const cfg = V.getCfg();
     if (V.scenes.length === 0 && Array.isArray(cfg.sceneScripts)) {
       for (const rel of cfg.sceneScripts) await loadOptionalScript(rel);
     }
     const lang = V.getActiveLang();
+    if (shouldProbeLocalePack(lang)) await loadOptionalScript(`locales/${lang}.js`);
     if (!lang || (V.isSecondaryLocale && !V.isSecondaryLocale(lang))) return;
-    if (!V.locales[lang]) await loadOptionalScript(`locales/${lang}.js`);
     const baseTimings = cfg.timingsScript || 'assets/voice/timings.js';
     const langTimings = baseTimings.replace(/\.js$/i, `.${lang}.js`);
     if (langTimings !== baseTimings) {

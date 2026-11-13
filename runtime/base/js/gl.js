@@ -80,7 +80,8 @@ const SHAPES = {
     return [x + (o.x || 0), y, Math.sin(x * 1.2 + t * 2.2) * 0.12 + (R[3][i] - 0.5) * 0.25];
   },
   burst(i, _t, o, now) {
-    const k = clamp(((now || 0) - (o.t0 || 0)) / 2.2), e = 1 - Math.pow(1 - k, 3);
+    const origin = o.t0 === undefined ? (o.t || 0) : o.t0;
+    const k = clamp(((now || 0) - origin) / 2.2), e = 1 - Math.pow(1 - k, 3);
     const th = R[1][i] * TAU, ph = Math.acos(2 * R[2][i] - 1), r = e * (3 + R[0][i] * 9);
     return [(o.x || 0) + Math.sin(ph) * Math.cos(th) * r, (o.y || 0) + Math.cos(ph) * r * 0.7, Math.sin(ph) * Math.sin(th) * r];
   },
@@ -117,9 +118,19 @@ const COLORS = {
   burst: toneAt,
 };
 
+const STATIC_COLOR_SHAPES = new Set(['swarm', 'drift', 'stream', 'burst', 'ring', 'grid', 'hex']);
+
+function resolveColorCacheKey(keyframe) {
+  const name = keyframe.shape;
+  if (name === 'text') return `text:${keyframe.text || defaultText}`;
+  if (STATIC_COLOR_SHAPES.has(name) && keyframe.color === undefined) return name;
+  const { t: _t, t0: _t0, ...rest } = keyframe;
+  return `${name}:${JSON.stringify(rest)}`;
+}
+
 function colorsFor(keyframe) {
   const name = keyframe.shape;
-  const cacheKey = name === 'text' ? `text:${keyframe.text || defaultText}` : name;
+  const cacheKey = resolveColorCacheKey(keyframe);
   if (!colorCache[cacheKey]) {
     const a = new Float32Array(N * 3);
     const fn = COLORS[name] || toneAt;

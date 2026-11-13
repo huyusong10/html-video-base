@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  ROOT, VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR,
+  ROOT, PKG_ROOT, VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR,
   listVideoIds, loadVideoSandbox, getSandboxCfg,
 } from './lib/paths.mjs';
 
@@ -79,22 +79,72 @@ function buildCollisionRules(collisions, prefixFrom, prefixTo) {
   });
 }
 
-function rewriteBundledRefs(targetOut, collisions) {
-  const docRelRule = [/(?<!\.\.\/)\.\.\/(base|assets|themes)\//g, './$1/'];
-  const subRelRule = [/\.\.\/\.\.\/(base|assets|themes)\//g, '../$1/'];
-  const docColRules = buildCollisionRules(collisions, '(?<!\\.\\.\\/)\\.\\.\\/', './');
-  const subColRules = [
-    ...buildCollisionRules(collisions, '\\.\\./\\.\\.\\/', '../'),
-    ...buildCollisionRules(collisions, '(?<!\\.\\.\\/)\\.\\.\\/', './'),
-  ];
-  const cssColRules = buildCollisionRules(collisions, '\\.\\./\\.\\.\\/', '../');
-  const themeCssColRules = buildCollisionRules(collisions, '(?<=\\.\\.\\/)', '');
+const BUNDLED_SYS_DIRS = new Set(['base', 'assets', 'shared-assets', 'themes']);
 
-  rewriteDirFiles(targetOut, ['.html', '.css', '.js', '.mjs'], [...docColRules, docRelRule], false);
-  for (const sub of ['js', 'locales']) {
-    rewriteDirFiles(path.join(targetOut, sub), ['.js', '.mjs'], [...subColRules, docRelRule, subRelRule], true);
+function normCmpPath(p) {
+  const r = path.resolve(p);
+  return process.platform === 'win32' ? r.toLowerCase() : r;
+}
+
+function isSameOrParent(parentPath, childPath) {
+  const rel = path.relative(normCmpPath(parentPath), normCmpPath(childPath));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function assertSafeBundleOutDir(outDir, projectRoot = ROOT) {
+  const resolved = path.resolve(outDir);
+  if (path.parse(resolved).root === resolved) {
+    throw new Error(`Refusing to bundle into filesystem root: ${resolved}`);
   }
-  rewriteDirFiles(path.join(targetOut, 'css'), ['.css'], [...cssColRules, subRelRule], true);
+  const videosDir = path.join(projectRoot, 'videos');
+  for (const guarded of [projectRoot, PKG_ROOT, videosDir]) {
+    if (isSameOrParent(resolved, guarded)) {
+      throw new Error(`Refusing to bundle into project/package directory or ancestor: ${resolved}`);
+    }
+  }
+  for (const srcDir of [videosDir, RUNTIME_BASE_DIR, TEMPLATES_DIR, path.join(PKG_ROOT, 'tools')]) {
+    if (isSameOrParent(srcDir, resolved)) {
+      throw new Error(`Refusing to bundle inside protected source directory: ${resolved}`);
+    }
+  }
+}
+
+function buildDepthRules(depth, collisions, includeDocLevel) {
+  const escHops = '(?<!\\.\\.\\/)' + '\\.\\.\\/'.repeat(depth + 1);
+  const toPrefix = depth === 0 ? './' : '../'.repeat(depth);
+  const depthRelRule = [new RegExp(`${escHops}(base|assets|themes)\\/`, 'g'), `${toPrefix}$1/`];
+  const colRules = buildCollisionRules(collisions, escHops, toPrefix);
+  if (!includeDocLevel || depth === 0) return [...colRules, depthRelRule];
+  const docColRules = buildCollisionRules(collisions, '(?<!\\.\\.\\/)\\.\\.\\/', './');
+  const docRelRule = [/(?<!\.\.\/)\.\.\/(base|assets|themes)\//g, './$1/'];
+  return [...colRules, ...docColRules, docRelRule, depthRelRule];
+}
+
+function rewriteEntryFile(entryName, full, jsRules, docRules) {
+  if (entryName.endsWith('.js') || entryName.endsWith('.mjs')) rewriteTextRefs(full, jsRules);
+  else if (entryName.endsWith('.html') || entryName.endsWith('.css')) rewriteTextRefs(full, docRules);
+}
+
+function walkRewriteVideoDirs(dirPath, depth, collisions) {
+  if (!fs.existsSync(dirPath)) return;
+  const docRules = buildDepthRules(depth, collisions, false);
+  const jsRules = buildDepthRules(depth, collisions, true);
+  for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+    const full = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      if (depth === 0 && BUNDLED_SYS_DIRS.has(entry.name)) continue;
+      walkRewriteVideoDirs(full, depth + 1, collisions);
+    } else if (entry.isFile()) {
+      rewriteEntryFile(entry.name, full, jsRules, docRules);
+    }
+  }
+}
+
+function rewriteBundledRefs(targetOut, collisions) {
+  walkRewriteVideoDirs(targetOut, 0, collisions);
+  const docColRules = buildCollisionRules(collisions, '(?<!\\.\\.\\/)\\.\\.\\/', './');
+  const docRelRule = [/(?<!\.\.\/)\.\.\/(base|assets|themes)\//g, './$1/'];
+  const themeCssColRules = buildCollisionRules(collisions, '(?<=\\.\\.\\/)', '');
   rewriteDirFiles(path.join(targetOut, 'themes'), ['.js', '.mjs'], [...docColRules, docRelRule], true);
   rewriteDirFiles(path.join(targetOut, 'themes'), ['.css'], themeCssColRules, true);
 }
@@ -104,6 +154,7 @@ export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
   const srcVideo = path.join(videosDir, videoId);
   if (!fs.existsSync(srcVideo)) throw new Error(`Video directory not found: ${srcVideo}`);
   const targetOut = outDir || path.join(projectRoot, 'dist', videoId);
+  assertSafeBundleOutDir(targetOut, projectRoot);
 
   fs.rmSync(targetOut, { recursive: true, force: true });
   fs.mkdirSync(targetOut, { recursive: true });
@@ -144,6 +195,7 @@ function buildManifestEntry(id) {
 export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
   const targets = videoIds && videoIds.length ? videoIds : listVideoIds();
   if (!targets.length) throw new Error('No videos found under videos/ to bundle.');
+  assertSafeBundleOutDir(outDir, ROOT);
 
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });

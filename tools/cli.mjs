@@ -210,9 +210,12 @@ function cmdMix(args) {
   if (audioRel) {
     run(py, [path.join(TOOLS_DIR, 'voice.py'), linesJson, voiceDir, path.join(videoDir, timingsRel)],
       `[2/3] Hydrating cached dry voices & remixing soundtrack + BGM stems...`, mixEnv);
-    const mixArgs = [path.join(TOOLS_DIR, 'mix.py'), cuesJson, voiceDir, path.join(videoDir, audioRel)];
+  }
+  if (audioRel || bgmRel) {
+    const outArg = audioRel ? path.join(videoDir, audioRel) : '';
+    const mixArgs = [path.join(TOOLS_DIR, 'mix.py'), cuesJson, voiceDir, outArg];
     if (bgmRel) mixArgs.push(path.join(videoDir, bgmRel));
-    run(py, mixArgs, null, mixEnv);
+    run(py, mixArgs, audioRel ? null : `[2/3] Remixing BGM stem for '${videoId}'...`, mixEnv);
   }
   fs.rmSync(rtDir, { recursive: true, force: true });
 
@@ -244,14 +247,15 @@ function cmdBuild(args) {
 
   run(process.execPath, [path.join(TOOLS_DIR, 'export.mjs'), videoId, linesJson, cuesJson, ...langArgs],
     `[1/4] Exporting scene script & config for '${videoId}'...`, ttsEnv);
-  if (audioRel || hasLines) {
+  if (audioRel || bgmRel || hasLines) {
     run(py, [path.join(TOOLS_DIR, 'voice.py'), linesJson, voiceDir, path.join(videoDir, timingsRel)],
       `[2/4] Synthesizing TTS voice, word boundaries & 30Hz envelopes...`, ttsEnv);
   }
   run(process.execPath, [path.join(TOOLS_DIR, 'export.mjs'), videoId, linesJson, cuesJson, ...langArgs],
     `[3/4] Computing timeline cues, subtitles & mixing soundtrack + BGM stems...`, ttsEnv);
-  if (audioRel) {
-    const mixArgs = [path.join(TOOLS_DIR, 'mix.py'), cuesJson, voiceDir, path.join(videoDir, audioRel)];
+  if (audioRel || bgmRel) {
+    const outArg = audioRel ? path.join(videoDir, audioRel) : '';
+    const mixArgs = [path.join(TOOLS_DIR, 'mix.py'), cuesJson, voiceDir, outArg];
     if (bgmRel) mixArgs.push(path.join(videoDir, bgmRel));
     run(py, mixArgs, null, ttsEnv);
   }

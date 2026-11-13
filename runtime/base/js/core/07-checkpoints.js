@@ -4,9 +4,12 @@
   let activeCp = null;
   let triggeredKeys = new Map();
 
-  function resolveSceneCheckpoints(sc) {
+  const recordManagedIds = new Set();
+
+  function resolveSceneCheckpoints(sc, si) {
     if (!sc._resolvedCheckpoints) {
-      const raw = typeof sc.checkpoints === 'function' ? sc.checkpoints(sc.ctx) : sc.checkpoints;
+      const ctx = sc.ctx || (V.makeCtx ? V.makeCtx(sc, si) : null);
+      const raw = typeof sc.checkpoints === 'function' ? sc.checkpoints(ctx) : sc.checkpoints;
       sc._resolvedCheckpoints = Array.isArray(raw) ? raw : [];
     }
     return sc._resolvedCheckpoints;
@@ -62,11 +65,27 @@
     });
   }
 
-  function applyRecordCheckpoints(list, scStart, curT) {
-    for (const cp of list) {
-      if (!cp || cp.at == null || !cp.id) continue;
-      if (curT >= scStart + Number(cp.at) && V.checkpointState[cp.id] === undefined) {
-        V.checkpointState[cp.id] = cp.defaultValue === undefined ? true : cp.defaultValue;
+  function collectAllRecordCheckpoints() {
+    const all = [];
+    const scenes = V.scenes || [];
+    for (let si = 0; si < scenes.length; si++) {
+      const sc = scenes[si];
+      for (const cp of resolveSceneCheckpoints(sc, si)) {
+        if (cp && cp.at != null && cp.id) {
+          all.push({ gAt: (sc.start || 0) + Number(cp.at), id: cp.id, val: cp.defaultValue === undefined ? true : cp.defaultValue });
+        }
+      }
+    }
+    return all.sort((a, b) => a.gAt - b.gAt);
+  }
+
+  function syncRecordCheckpoints(curT) {
+    for (const id of recordManagedIds) delete V.checkpointState[id];
+    recordManagedIds.clear();
+    for (const item of collectAllRecordCheckpoints()) {
+      if (curT >= item.gAt) {
+        V.checkpointState[item.id] = item.val;
+        recordManagedIds.add(item.id);
       }
     }
   }
@@ -77,10 +96,9 @@
   }
 
   function checkSceneCheckpoints(sc, si, prevT, curT, ctl) {
-    const list = resolveSceneCheckpoints(sc);
-    if (!list.length) return;
-    if (ctl.isRecord) { applyRecordCheckpoints(list, sc.start, curT); return; }
-    if (!canCheckInteractive(ctl, prevT, curT)) return;
+    if (ctl.isRecord) { syncRecordCheckpoints(curT); return; }
+    const list = resolveSceneCheckpoints(sc, si);
+    if (!list.length || !canCheckInteractive(ctl, prevT, curT)) return;
     for (let i = 0; i < list.length; i++) {
       const cp = list[i];
       if (!cp || cp.at == null) continue;
@@ -118,5 +136,5 @@
     closeCheckpointOverlay();
   };
 
-  V._checkpointsRuntime = { checkSceneCheckpoints, closeCheckpointOverlay, onSeek };
+  V._checkpointsRuntime = { checkSceneCheckpoints, syncRecordCheckpoints, closeCheckpointOverlay, onSeek };
 })(globalThis.V = globalThis.V || {});

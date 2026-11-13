@@ -11,6 +11,17 @@ def rate_str(speed: float) -> str:
     return f'{pct:+d}%'
 
 
+def vol_str(vol) -> str:
+    if vol is None or vol == '':
+        return '+0%'
+    if isinstance(vol, (int, float)) and not isinstance(vol, bool):
+        return f'{round((float(vol) - 1.0) * 100):+d}%'
+    s = str(vol).strip()
+    if re.fullmatch(r'[+-]?\d+(?:\.\d+)?', s):
+        return f'{round((float(s) - 1.0) * 100):+d}%'
+    return s
+
+
 def _resolve_api_key(cfg: dict, default_env: str, required: bool = True) -> str:
     env_name = cfg.get('apiKeyEnv') or default_env
     key = cfg.get('apiKey') or os.environ.get(env_name) or os.environ.get('TTS_API_KEY') or ''
@@ -57,7 +68,7 @@ async def synth_edge(text: str, out_path: str, cfg: dict):
     voice = cfg.get('voice') or DEFAULT_VOICE
     rate = rate_str(cfg.get('speed', 1.15))
     pitch = cfg.get('pitch', '+0Hz')
-    volume = cfg.get('volume', '+0%')
+    volume = vol_str(cfg.get('volume'))
     for attempt in range(4):
         try:
             return await _synth_edge_once(text, out_path, voice, rate, pitch, volume)
@@ -152,17 +163,37 @@ async def synth_elevenlabs(text: str, out_path: str, cfg: dict):
     return _alignment_to_words(resp.get('alignment') or resp.get('normalized_alignment'))
 
 
+def _xml_attr(val) -> str:
+    return xml_escape(str(val), {'"': '&quot;', "'": '&apos;'})
+
+
+AZURE_SHORT_LANG_MAP = {'en': 'en-US', 'zh': 'zh-CN', 'ja': 'ja-JP', 'ko': 'ko-KR', 'fr': 'fr-FR', 'de': 'de-DE', 'es': 'es-ES'}
+
+
+def _resolve_azure_xml_lang(voice: str, cfg: dict) -> str:
+    if cfg.get('xmlLang'):
+        return str(cfg['xmlLang'])
+    if 'Multilingual' not in voice:
+        m = re.match(r'^([a-z]{2,3}-[A-Z]{2}(?:-[A-Za-z]+)?)', voice)
+        if m:
+            return m.group(1)
+    lang = str(cfg.get('lang') or '').lower()
+    return AZURE_SHORT_LANG_MAP.get(lang, 'zh-CN')
+
+
 async def synth_azure(text: str, out_path: str, cfg: dict):
     region = cfg.get('region') or os.environ.get('AZURE_SPEECH_REGION') or 'eastus'
     endpoint = cfg.get('endpoint') or f'https://{region}.tts.speech.microsoft.com/cognitiveservices/v1'
     api_key = _resolve_api_key(cfg, 'AZURE_SPEECH_KEY', required=True)
     voice = cfg.get('voice') or DEFAULT_VOICE
-    inner = f'<prosody rate="{rate_str(cfg.get("speed", 1.15))}" pitch="{cfg.get("pitch", "+0Hz")}">{xml_escape(text)}</prosody>'
+    xml_lang = _resolve_azure_xml_lang(voice, cfg)
+    vol_attr = f' volume="{_xml_attr(vol_str(cfg["volume"]))}"' if cfg.get('volume') is not None else ''
+    inner = f'<prosody rate="{_xml_attr(rate_str(cfg.get("speed", 1.15)))}" pitch="{_xml_attr(cfg.get("pitch", "+0Hz"))}"{vol_attr}>{xml_escape(text)}</prosody>'
     if cfg.get('style'):
-        inner = f'<mstts:express-as style="{xml_escape(str(cfg["style"]))}">{inner}</mstts:express-as>'
+        inner = f'<mstts:express-as style="{_xml_attr(cfg["style"])}">{inner}</mstts:express-as>'
     ssml = (
         '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
-        f'xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="zh-CN"><voice name="{xml_escape(voice)}">{inner}</voice></speak>'
+        f'xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="{_xml_attr(xml_lang)}"><voice name="{_xml_attr(voice)}">{inner}</voice></speak>'
     )
     headers = {
         'Ocp-Apim-Subscription-Key': api_key,
@@ -178,6 +209,9 @@ async def synth_azure(text: str, out_path: str, cfg: dict):
 
 def _subst(template, mapping: dict):
     if isinstance(template, str):
+        exact = re.fullmatch(r'\{\{(\w+)\}\}', template)
+        if exact and exact.group(1) in mapping:
+            return mapping[exact.group(1)]
         out = template
         for k, val in mapping.items():
             out = out.replace(f'{{{{{k}}}}}', str(val))
@@ -207,7 +241,7 @@ def _prepare_http_req(text: str, cfg: dict):
     mapping = {'text': text, 'rawText': cfg.get('_rawText', text), 'voice': cfg.get('voice', ''), 'speed': cfg.get('speed', 1.0), 'model': cfg.get('model', '')}
     method = (cfg.get('method') or 'POST').upper()
     url_map = {k: urllib.parse.quote(str(val)) if method == 'GET' else val for k, val in mapping.items()}
-    url = _subst(raw_url, url_map)
+    url = str(_subst(raw_url, url_map))
     headers = dict(cfg.get('headers') or {})
     api_key = _resolve_api_key(cfg, 'TTS_API_KEY', required=False)
     if api_key and 'Authorization' not in headers:
@@ -229,14 +263,22 @@ async def synth_http(text: str, out_path: str, cfg: dict):
     return []
 
 
-def _subst_cmd_tokens(tpl: str, fmt_vars: dict, quote_val: bool = False) -> str:
-    def _rep(m):
-        val = str(fmt_vars.get(m.group(1), ''))
-        if not quote_val:
-            return val
-        return subprocess.list2cmdline([val]) if os.name == 'nt' else shlex.quote(val)
+def _quote_shell_arg(val: str) -> str:
+    if os.name != 'nt':
+        return shlex.quote(val)
+    safe = val.replace('%', '%%').replace('"', '\\"')
+    return f'"{safe}"'
 
-    return re.sub(r'\{(text|raw_text|out|voice|speed)\}', _rep, str(tpl))
+
+def _subst_cmd_tokens(tpl: str, fmt_vars: dict, quote_val: bool = False) -> str:
+    pattern = r'(["\']?)\{(text|raw_text|out|voice|speed)\}\1' if quote_val else r'\{(text|raw_text|out|voice|speed)\}'
+
+    def _rep(m):
+        key = m.group(2) if quote_val else m.group(1)
+        val = str(fmt_vars.get(key, ''))
+        return _quote_shell_arg(val) if quote_val else val
+
+    return re.sub(pattern, _rep, str(tpl))
 
 
 def _split_cmd_template(cmd_tpl: str):

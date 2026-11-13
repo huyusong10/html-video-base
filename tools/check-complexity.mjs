@@ -225,10 +225,12 @@ function isDecisionToken(tok, nextVal) {
   return tok.val === '?' && nextVal !== '.' && nextVal !== '?';
 }
 
+const EXPR_END_TOKENS = new Set([',', ';', ')', ']', '}']);
+
 function shouldEndExprArrow(tok, d) {
   if (d.paren < 0 || d.bracket < 0 || d.brace < 0) return true;
   if (d.paren !== 0 || d.bracket !== 0 || d.brace !== 0) return false;
-  return tok.val === ',' || tok.val === ';';
+  return EXPR_END_TOKENS.has(tok.val);
 }
 
 const DEPTH_DELTAS = {

@@ -1,5 +1,5 @@
 """多模型 TTS 配音合成、声学词边界对齐与 30Hz 真实语音振幅包络提取管线。"""
-import asyncio, hashlib, json, os, re, shutil, subprocess, sys
+import asyncio, hashlib, json, os, re, shutil, subprocess, sys, threading
 import imageio_ffmpeg, numpy as np, soundfile as sf
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +20,8 @@ COMMON_FIX = [
 ]
 TOKEN_RE = re.compile(r'[A-Za-z0-9]+|[\u4e00-\u9fa5]')
 PAUSE_CHARS = set('，。；：！？——,.;:!?、')
-_WHISPER_MODEL = None
+_WHISPER_MODELS = {}
+_WHISPER_LOCK = threading.Lock()
 
 
 def build_rules(pron_dict, enable_common=True):
@@ -136,13 +137,19 @@ def _collect_whisper_char_times(segments):
     return w_times
 
 
+def _get_whisper_model(model_name: str):
+    key = model_name or 'tiny'
+    with _WHISPER_LOCK:
+        if key not in _WHISPER_MODELS:
+            from faster_whisper import WhisperModel
+            _WHISPER_MODELS[key] = WhisperModel(key, device='cpu', compute_type='int8')
+        return _WHISPER_MODELS[key]
+
+
 def _try_whisper_align(wav_path: str, tokens: list[str], dur: float, cfg: dict):
-    global _WHISPER_MODEL
     try:
-        from faster_whisper import WhisperModel
-        if _WHISPER_MODEL is None:
-            _WHISPER_MODEL = WhisperModel(cfg.get('whisperModel') or 'tiny', device='cpu', compute_type='int8')
-        segments, _ = _WHISPER_MODEL.transcribe(wav_path, word_timestamps=True)
+        model = _get_whisper_model(str(cfg.get('whisperModel') or 'tiny'))
+        segments, _ = model.transcribe(wav_path, word_timestamps=True)
         w_times = _collect_whisper_char_times(segments)
         if not w_times:
             return None
@@ -248,7 +255,7 @@ def compute_en_ratio(cfg: dict) -> float:
 _CACHE_CFG_KEYS = (
     'script', 'model', 'baseUrl', 'url', 'instructions', 'style', 'extraBody',
     'volume', 'voiceSettings', 'region', 'endpoint', 'outputFormat', 'format',
-    'method', 'body', 'headers', 'command', 'whisperModel',
+    'method', 'body', 'headers', 'command', 'whisperModel', 'lang', 'xmlLang',
 )
 
 
@@ -284,7 +291,7 @@ def normalize_line_item(item, base_cfg: dict):
     if not isinstance(item, dict):
         return str(item), base_cfg
     line_cfg = dict(base_cfg)
-    for k in ('provider', 'voice', 'speed', 'pitch', 'model', 'style', 'instructions', 'enSlowdown', 'align'):
+    for k in ('provider', 'voice', 'speed', 'pitch', 'model', 'style', 'instructions', 'enSlowdown', 'align', 'whisperModel', 'volume', 'xmlLang', 'lang'):
         if item.get(k) is not None:
             line_cfg[k] = item[k]
     if item.get('provider'):
@@ -316,6 +323,21 @@ def _resolve_media_ext(cfg: dict) -> str:
     return 'wav'
 
 
+def _write_cache_entry_atomic(out_wav: str, c_wav: str, c_meta: str, payload: dict):
+    suffix = f'.{os.getpid()}.{threading.get_ident()}.tmp'
+    tmp_wav, tmp_meta = c_wav + suffix, c_meta + suffix
+    try:
+        shutil.copyfile(out_wav, tmp_wav)
+        os.replace(tmp_wav, c_wav)
+        with open(tmp_meta, 'w', encoding='utf-8') as mf:
+            json.dump(payload, mf, ensure_ascii=False)
+        os.replace(tmp_meta, c_meta)
+    except Exception:
+        for p in (tmp_wav, tmp_meta):
+            if os.path.exists(p):
+                os.remove(p)
+
+
 async def synth_one(text, synth_fn, cfg, en_ratio, rules, out_wav, video_dir=None):
     os.makedirs(CACHE_DIR, exist_ok=True)
     spoken = speakable(text, rules)
@@ -332,12 +354,7 @@ async def synth_one(text, synth_fn, cfg, en_ratio, rules, out_wav, video_dir=Non
         raw_res = raw_res.get('words') or []
     words = [(float(x[0]), float(x[1]) if len(x) > 2 else 0.1, str(x[-1])) for x in (raw_res or [])]
     dur, adj_words, env_30hz = await asyncio.to_thread(post_process_audio, src_media, raw_wav, out_wav, words, en_ratio, spoken, cfg)
-    try:
-        shutil.copyfile(out_wav, c_wav)
-        with open(c_meta, 'w', encoding='utf-8') as mf:
-            json.dump({'dur': dur, 'words': adj_words, 'env': env_30hz, 'text': text}, mf, ensure_ascii=False)
-    except Exception:
-        pass
+    _write_cache_entry_atomic(out_wav, c_wav, c_meta, {'dur': dur, 'words': adj_words, 'env': env_30hz, 'text': text})
     return dur, adj_words, env_30hz
 
 
@@ -431,12 +448,26 @@ def _write_timings_js(timings_path, audio_src, bgm_src, voice_label, durs, all_w
         f.write('V.voice = ' + json.dumps(meta, ensure_ascii=False) + ';\n')
 
 
+def _run_synthesis_stage(scenes, out_dir, tts_cfg, provider, rules, video_dir):
+    if not tts_cfg.get('enabled', True) or sum(len(s) for s in scenes) == 0:
+        os.makedirs(out_dir, exist_ok=True)
+        print('  No spoken lines (or TTS disabled); skipping speech synthesis.')
+        return [[] for _ in scenes], [[] for _ in scenes], [[] for _ in scenes], 'none'
+    prov_label = f"script:{os.path.basename(tts_cfg['script'])}" if tts_cfg.get('script') else provider
+    voice_tag = tts_cfg.get('voice') or tts_cfg.get('model') or 'default'
+    print(f"  TTS Provider: {prov_label} ({voice_tag}, speed={tts_cfg['speed']})")
+    durs, all_words, all_envs = asyncio.run(synth_all(scenes, out_dir, tts_cfg, rules, video_dir=video_dir))
+    return durs, all_words, all_envs, f"{prov_label} / {voice_tag}"
+
+
 def main():
     lines_path, out_dir, timings_path = sys.argv[1:4]
     with open(lines_path, encoding='utf-8') as f:
         raw_payload = json.load(f)
     lang = raw_payload.get('lang') or '' if isinstance(raw_payload, dict) else ''
     scenes, tts_cfg, audio_src, bgm_src, video_dir = _parse_cli_tts_config(raw_payload, sys.argv)
+    if lang and 'lang' not in tts_cfg:
+        tts_cfg['lang'] = lang
     provider = _finalize_tts_defaults(tts_cfg)
     rules = build_rules(tts_cfg.get('pronunciation', {}), enable_common=bool(tts_cfg.get('polyphoneFix', True)))
 
@@ -444,17 +475,7 @@ def main():
         hydrate_cached_voices(scenes, out_dir, tts_cfg, rules, video_dir=video_dir)
         return
 
-    if not tts_cfg.get('enabled', True) or sum(len(s) for s in scenes) == 0:
-        os.makedirs(out_dir, exist_ok=True)
-        durs, all_words, all_envs, voice_label = [[] for _ in scenes], [[] for _ in scenes], [[] for _ in scenes], 'none'
-        print('  No spoken lines (or TTS disabled); skipping speech synthesis.')
-    else:
-        prov_label = f"script:{os.path.basename(tts_cfg['script'])}" if tts_cfg.get('script') else provider
-        voice_tag = tts_cfg.get('voice') or tts_cfg.get('model') or 'default'
-        print(f"  TTS Provider: {prov_label} ({voice_tag}, speed={tts_cfg['speed']})")
-        durs, all_words, all_envs = asyncio.run(synth_all(scenes, out_dir, tts_cfg, rules, video_dir=video_dir))
-        voice_label = f"{prov_label} / {voice_tag}"
-
+    durs, all_words, all_envs, voice_label = _run_synthesis_stage(scenes, out_dir, tts_cfg, provider, rules, video_dir)
     _write_timings_js(timings_path, audio_src, bgm_src, voice_label, durs, all_words, all_envs, lang)
     print('total voice', round(sum(map(sum, durs)), 1), 's')
 

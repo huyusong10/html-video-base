@@ -139,7 +139,7 @@ function attachHmrWatchers(dirs, clients) {
   const notify = filename => {
     if (!filename) return;
     const norm = String(filename).replace(/\\/g, '/');
-    if (norm.includes('.runtime') || norm.endsWith('.tmp')) return;
+    if (norm.includes('.runtime') || norm.endsWith('.tmp') || norm.includes('.tmp.')) return;
     if (!norm.endsWith('.css')) needReload = true;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {

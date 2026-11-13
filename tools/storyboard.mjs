@@ -156,6 +156,7 @@ try {
   const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
   const langQuery = args.lang ? `&lang=${encodeURIComponent(args.lang)}` : '';
   await page.goto(`http://127.0.0.1:${port}/${args.videoId}/?record=1&nosubs=1${langQuery}`, { waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.__video && window.V && window.V.seekToAsync, null, { timeout: 15000 });
   await page.evaluate(() => (document.fonts ? document.fonts.ready : Promise.resolve()));
 
   const cards = [];

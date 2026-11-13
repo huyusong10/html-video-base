@@ -30,7 +30,7 @@ function applyTtsEnvOverrides(ttsCfg) {
   }
 }
 
-const LINE_TTS_KEYS = ['voice', 'speed', 'pitch', 'model', 'provider', 'style', 'instructions', 'enSlowdown', 'align'];
+const LINE_TTS_KEYS = ['voice', 'speed', 'pitch', 'model', 'provider', 'style', 'instructions', 'enSlowdown', 'align', 'whisperModel', 'volume', 'xmlLang'];
 
 function serializeLineCue(c) {
   const overrides = {};

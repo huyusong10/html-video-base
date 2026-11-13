@@ -74,10 +74,17 @@
     return u.resumeMinSec === undefined ? 5 : Math.max(0, Number(u.resumeMinSec) || 0);
   }
 
+  function numDelayOr(val, fallback) {
+    if (val === undefined || val === null || val === '') return fallback;
+    const n = Number(val);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  }
+
   function resolveUiDelays(u) {
+    const rawLeave = u.leaveHideDelay !== undefined ? u.leaveHideDelay : u.autoHideDelay;
     return {
-      idleHideDelay: Number(u.idleHideDelay) || 1500,
-      leaveHideDelay: Number(u.leaveHideDelay || u.autoHideDelay) || 220,
+      idleHideDelay: numDelayOr(u.idleHideDelay, 1500),
+      leaveHideDelay: numDelayOr(rawLeave, 220),
     };
   }
 

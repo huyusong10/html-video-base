@@ -180,8 +180,12 @@
   function sameLangFamily(a, b) {
     if (!a || !b) return false;
     const na = String(a).toLowerCase(), nb = String(b).toLowerCase();
-    return na === nb || na.split('-')[0] === nb.split('-')[0];
+    if (na === nb) return true;
+    if (na.includes('-') && nb.includes('-')) return false;
+    return na.split('-')[0] === nb.split('-')[0];
   }
+
+  V.getBaseLang = resolveBaseLang;
 
   V.isSecondaryLocale = function (lang = V.getActiveLang()) {
     if (!lang) return false;

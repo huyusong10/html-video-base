@@ -234,6 +234,9 @@
       instructions: lineObj.instructions,
       enSlowdown: lineObj.enSlowdown,
       align: lineObj.align,
+      whisperModel: lineObj.whisperModel,
+      volume: lineObj.volume,
+      xmlLang: lineObj.xmlLang,
     };
   }
 
@@ -279,13 +282,15 @@
   }
 
   function buildLocalizedLines(sc, scLoc) {
-    const srcLines = (scLoc && Array.isArray(scLoc.lines) && sc._origLines.length === 0)
-      ? scLoc.lines
-      : sc._origLines;
-    sc.lines = srcLines.map((ln, li) => {
-      const baseObj = typeof ln === 'string' ? { text: ln } : ln;
-      return applyLocaleLine(baseObj, scLoc, li);
-    });
+    const locArr = Array.isArray(scLoc) ? scLoc : (scLoc && Array.isArray(scLoc.lines) ? scLoc.lines : null);
+    const count = locArr ? locArr.length : sc._origLines.length;
+    const out = [];
+    for (let li = 0; li < count; li++) {
+      const orig = sc._origLines[li];
+      const baseObj = orig ? (typeof orig === 'string' ? { text: orig } : orig) : { text: '' };
+      out.push(applyLocaleLine(baseObj, scLoc, li));
+    }
+    sc.lines = out;
   }
 
   function syncSceneLocaleMeta(sc, si) {
@@ -321,13 +326,20 @@
     return sc.start + sc.duration;
   }
 
+  function resolveGlKeyframeT0(k, scStart, at) {
+    if (k.t0 === 'self') return at;
+    if (typeof k.t0 === 'number') return scStart + k.t0;
+    if (k.t0 === undefined && k.shape === 'burst') return at;
+    return k.t0;
+  }
+
   function collectGlKeyframes() {
     V.glKeys = [];
     V.scenes.forEach((sc, si) => {
       if (!sc.gl) return;
       for (const k of sc.gl(makeCtx(sc, si))) {
         const at = sc.start + k.t;
-        V.glKeys.push({ ...k, t: at, t0: k.t0 === 'self' ? at : k.t0 });
+        V.glKeys.push({ ...k, t: at, t0: resolveGlKeyframeT0(k, sc.start, at) });
       }
     });
     V.glKeys.sort((a, b) => a.t - b.t);

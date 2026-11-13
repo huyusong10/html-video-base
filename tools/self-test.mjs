@@ -5,8 +5,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { PKG_ROOT, resolveFfmpeg, loadChromium, findBrowserExecutable } from './lib/paths.mjs';
+import { PKG_ROOT, resolveFfmpeg, resolvePython, loadChromium, findBrowserExecutable } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
+import { stripSceneCalls } from './render.mjs';
 
 const TEST_ROOT = path.join(PKG_ROOT, '.runtime/self-test-proj');
 const CLI_BIN = path.join(PKG_ROOT, 'bin/html-video.mjs');
@@ -68,6 +69,17 @@ function writeTestProjectFiles(videoDir) {
     '',
   ].join('\n'), 'utf8');
 
+  fs.writeFileSync(path.join(videoDir, 'locales/zh-TW.js'), [
+    'V.locale("zh-TW", {',
+    '  title: "微內核自檢演示",',
+    '  scenes: {',
+    '    s01: { title: "微內核架構", lines: ["歡迎體驗關鍵微內核時間軸引擎。"], anchors: { "关键": "關鍵" } },',
+    '    s02: ["第一句繁體檢驗。", "第二句陣列簡寫擴行。"],',
+    '  },',
+    '});',
+    '',
+  ].join('\n'), 'utf8');
+
   fs.writeFileSync(path.join(videoDir, 'video.config.js'), [
     'window.__pluginInstalled = false;',
     'window.__maxLayerEnergy = 0;',
@@ -108,8 +120,8 @@ function writeTestProjectFiles(videoDir) {
   fs.writeFileSync(path.join(videoDir, 'js/s01.js'), [
     'V.scene({',
     '  id: "s01", title: "微内核架构", subLayout: "mascotLeft",',
-    '  lines: [{ text: "欢迎体验关键微内核时间轴引擎。", enSlowdown: 0.9, align: "acoustic" }],',
-    '  checkpoints: x => [{ at: 0.45, id: "cp-1", prompt: "继续演示？", actions: [{ label: "继续", resume: true }] }],',
+    '  lines: [{ text: "欢迎体验关键微内核时间轴引擎。", enSlowdown: 0.9, align: "acoustic", volume: 0.85, whisperModel: "tiny", xmlLang: "zh-CN" }],',
+    '  checkpoints: x => [{ at: 0.45, id: "cp-1", defaultValue: "auto-ok", prompt: "继续演示？", actions: [{ label: "继续", resume: true }] }],',
     '  build(root, x) {',
     '    const badge = V.c.badge("OPEN-KERNEL");',
     '    const clip = V.u.videoClip("assets/clip.mp4", { start: 0.05, volume: 0.25, style: { width: "160px", height: "90px" } });',
@@ -127,10 +139,11 @@ function writeTestProjectFiles(videoDir) {
 
   fs.writeFileSync(path.join(videoDir, 'js/s02.js'), [
     'V.scene({',
+    '  // 1) don\'t break stripSceneCalls )',
     '  id: "s02", title: "纯函数校验", live: true, transition: "zoomFade", transitionDur: 0.35,',
     '  lines: ["所有画面仅由时间纯函数唯一决定。"],',
     '  build(root) { root.append(V.u.h("div", { class: "s2-box", "data-ref": "../assets/shared.svg" }, "PURE F(T)")); },',
-    '  update(t) { window.__s2LiveT = t; },',
+    '  update(t) { window.__s2LiveT = t; window.__s2SeenCp = V.checkpointState["cp-1"]; },',
     '});',
     '',
   ].join('\n'), 'utf8');
@@ -450,6 +463,77 @@ async function verifyHookAndLocaleVoiceRegressions(page) {
   assert.equal(r.leakBakedDur, false, 'Stale primary bakedLayout must NOT apply to secondary locale V.layout()');
 }
 
+async function verifyRound2EngineRegressions(page, port) {
+  const r = await page.evaluate(() => {
+    const u0 = window.V._getUiCfg({ ui: { idleHideDelay: 0, leaveHideDelay: 0 } });
+    const tileBox = document.createElement('div');
+    const tileDom = window.V.transitions.tiles.mount(tileBox, { tileSize: 320 });
+    window.V.transitions.tiles.update(tileDom, 0, 0);
+    const tileTfZero = tileDom.tiles[0] && tileDom.tiles[0][0].style.transform;
+
+    const sc1 = window.V.scenes[1];
+    const origGl = sc1.gl;
+    sc1.gl = () => [
+      { t: 0.2, shape: 'burst', x: 0.5, y: 0.5 },
+      { t: 0.4, t0: 0.1, shape: 'ring', x: 0.5, y: 0.5 },
+    ];
+    window.V.layout();
+    const burstKey = window.V.glKeys.find(k => k.shape === 'burst');
+    const ringKey = window.V.glKeys.find(k => k.shape === 'ring');
+    const s1Start = sc1.start;
+    sc1.gl = origGl;
+
+    window.__video.search('唯一决定');
+    const origLang = window.V.__activeLang;
+    window.V.locale('zz-reg', {
+      scenes: { s01: { lines: ['Alpha line', 'Beta UniqueToken99', 'Gamma line'] } },
+    });
+    window.V.__activeLang = 'zz-reg';
+    window.V.layout();
+    const cuesLen = window.V.scenes[0].cues.length;
+    const searchHits = window.__video.search('UniqueToken99').length;
+    delete window.V.locales['zz-reg'];
+    window.V.__activeLang = origLang;
+    window.V.layout();
+    return {
+      u0Idle: u0.idleHideDelay,
+      u0Leave: u0.leaveHideDelay,
+      tileTfZero,
+      burstT0Diff: Math.abs(burstKey.t0 - (s1Start + 0.2)),
+      ringT0Diff: Math.abs(ringKey.t0 - (s1Start + 0.1)),
+      cuesLen,
+      searchHits,
+    };
+  });
+  assert.equal(r.u0Idle, 0, 'Explicit idleHideDelay: 0 must not fall back to 1500');
+  assert.equal(r.u0Leave, 0, 'Explicit leaveHideDelay: 0 must not fall back to 220');
+  assert.equal(r.tileTfZero, 'scale(0)', 'tiles transition with dur=0 must output scale(0), not scale(NaN)');
+  assert.ok(r.burstT0Diff < 1e-6, 'GL burst without explicit t0 must default t0 to burst timestamp');
+  assert.ok(r.ringT0Diff < 1e-6, 'GL numeric t0 must be offset by scene start');
+  assert.equal(r.cuesLen, 3, 'Locale override with extra lines must preserve all localized lines');
+  assert.equal(r.searchHits, 1, 'V.layout() must invalidate cached search index');
+
+  const hmrCtx = await page.context().browser().newContext();
+  try {
+    const pHmr = await hmrCtx.newPage();
+    await pHmr.addInitScript(() => {
+      if (!sessionStorage.getItem('__hmr_seeded')) {
+        sessionStorage.setItem('__hmr_seeded', '1');
+        sessionStorage.setItem('__video_hmr_t', '1.85');
+      }
+    });
+    await pHmr.goto(`http://127.0.0.1:${port}/demo/?record=1&t=0.15`, { waitUntil: 'networkidle' });
+    const hmrState = await pHmr.evaluate(() => ({
+      now: window.__video.getSyncState().now,
+      rem: sessionStorage.getItem('__video_hmr_t'),
+    }));
+    assert.ok(Math.abs(hmrState.now - 1.85) < 0.1, `__video_hmr_t must take priority over ?t=, got ${hmrState.now}`);
+    assert.equal(hmrState.rem, null, '__video_hmr_t must be cleared from sessionStorage after restore');
+  } finally {
+    await hmrCtx.close();
+  }
+}
+
 async function verifyBugfixRegressions(page, port) {
   const badUrlRes = await fetch(`http://127.0.0.1:${port}/%E0%A4%A`);
   assert.equal(badUrlRes.status, 400, 'Malformed URI path must return 400 without crashing HTTP server');
@@ -480,6 +564,7 @@ async function verifyBugfixRegressions(page, port) {
   await verifyHttpAndDomRegressions(page, port);
   await verifyInteractiveRegressions(page);
   await verifyHookAndLocaleVoiceRegressions(page);
+  await verifyRound2EngineRegressions(page, port);
 }
 
 async function verifyV26ExperienceContracts(page) {
@@ -679,6 +764,72 @@ async function verifySearchAndDeepLinkContract(page) {
   assert.equal(res.copiedState, true, 'Clicking .time must copy deep link and show confirmation');
 }
 
+async function verifyRound3BrowserContracts(page, port) {
+  await page.goto(`http://127.0.0.1:${port}/demo/?record=1`, { waitUntil: 'networkidle' });
+  const cpDeterminism = await page.evaluate(async () => {
+    const cue0 = window.V.scenes[0].cues[0];
+    const s2Start = window.V.scenes[1].start + 0.2;
+    await window.V.seekToAsync(s2Start);
+    const seenInS2FirstFrame = window.__s2SeenCp;
+    await window.V.seekToAsync(0.1);
+    const afterRewind = window.V.checkpointState['cp-1'];
+    return {
+      cueVol: cue0.volume,
+      cueWhisper: cue0.whisperModel,
+      cueXmlLang: cue0.xmlLang,
+      seenInS2FirstFrame,
+      afterRewind,
+    };
+  });
+  assert.equal(cpDeterminism.cueVol, 0.85, 'buildCueEntry must preserve per-line volume');
+  assert.equal(cpDeterminism.cueWhisper, 'tiny', 'buildCueEntry must preserve per-line whisperModel');
+  assert.equal(cpDeterminism.cueXmlLang, 'zh-CN', 'buildCueEntry must preserve per-line xmlLang');
+  assert.equal(cpDeterminism.seenInS2FirstFrame, 'auto-ok', 'Record mode must populate prior-scene checkpoints before first S2 update');
+  assert.equal(cpDeterminism.afterRewind, undefined, 'Record mode backward scrub must clear future checkpoints');
+
+  await page.goto(`http://127.0.0.1:${port}/demo/?lang=zh-TW&record=1`, { waitUntil: 'networkidle' });
+  const twInfo = await page.evaluate(() => ({
+    s1Title: window.V.scenes[0].title,
+    s2LineCount: window.V.scenes[1].lines.length,
+    s2SecondLine: window.V.scenes[1].lines[1] && window.V.scenes[1].lines[1].text,
+    voiceMatched: Boolean(window.V.getActiveVoice && window.V.getActiveVoice()),
+  }));
+  assert.equal(twInfo.s1Title, '微內核架構', 'Regional locale ?lang=zh-TW on zh-CN page must load locales/zh-TW.js');
+  assert.equal(twInfo.s2LineCount, 2, 'Locale array shorthand must expand scene line count');
+  assert.equal(twInfo.s2SecondLine, '第二句陣列簡寫擴行。', 'Locale array shorthand extra line must apply');
+  assert.equal(twInfo.voiceMatched, false, 'Unbuilt regional locale zh-TW must not reuse zh-CN V.voice');
+}
+
+function verifyRound3UnitRegressions() {
+  const sample = [
+    '// Example: V.scene(unclosed in comment',
+    'const SHARED = 7;',
+    'V.scene({',
+    '  // 1) step ) with "quote and \'apostrophe',
+    '  /* block ) comment */',
+    '  build() { return "(ok)"; },',
+    '});',
+    'const AFTER = 9;',
+  ].join('\n');
+  const stripped = stripSceneCalls(sample);
+  assert.ok(stripped.includes('const SHARED = 7;') && stripped.includes('const AFTER = 9;'), 'stripSceneCalls must preserve shared code around commented V.scene');
+  assert.equal(stripped.includes('build()'), false, 'stripSceneCalls must strip real V.scene body containing comments with parens/quotes');
+
+  const py = resolvePython(PKG_ROOT);
+  const pyCheck = spawnSync(py, [
+    '-c',
+    [
+      'import sys; sys.path.insert(0, "tools")',
+      'from tts_providers import vol_str',
+      'from voice import make_cache_key',
+      'assert vol_str(0.8) == "-20%" and vol_str(1.2) == "+20%" and vol_str("+5%") == "+5%" and vol_str(None) == "+0%"',
+      'assert make_cache_key({"lang": "en"}, "OK", 1.0) != make_cache_key({"lang": "ja"}, "OK", 1.0)',
+      'assert make_cache_key({"xmlLang": "zh-TW"}, "OK", 1.0) != make_cache_key({"xmlLang": "zh-CN"}, "OK", 1.0)',
+    ].join('; '),
+  ], { cwd: PKG_ROOT, encoding: 'utf8' });
+  assert.equal(pyCheck.status, 0, `Python TTS unit checks failed:\n${pyCheck.stderr}`);
+}
+
 async function verifyBrowserCapabilities(videoDir) {
   const { srv, port } = await startEphemeralVideoServer({ videosDir: path.join(TEST_ROOT, 'videos'), watch: true });
   const chromium = await loadChromium(PKG_ROOT);
@@ -725,6 +876,7 @@ async function verifyBrowserCapabilities(videoDir) {
     assert.equal(enInfo.title, 'Architecture', 'Localized scene title should apply');
     assert.equal(enInfo.bakedLang, 'en', 'Localized timings.en.js must stamp bakedLayout.lang = "en"');
 
+    await verifyRound3BrowserContracts(page, port);
     await verifyPlayerBarContracts(page, port);
     await page.close();
   } finally {
@@ -737,11 +889,60 @@ async function verifyBrowserCapabilities(videoDir) {
   }
 }
 
+function assertCliFails(args, msg) {
+  const r = spawnSync(process.execPath, [CLI_BIN, ...args], {
+    cwd: TEST_ROOT,
+    encoding: 'utf8',
+    env: Object.assign({}, process.env, { VIDEO_PROJECT_ROOT: TEST_ROOT }),
+  });
+  assert.notEqual(r.status, 0, msg || `Expected CLI failure for: ${args.join(' ')}`);
+}
+
+function verifyFreshUnbuiltAudit() {
+  runCliCmd(['init', 'fresh-unbuilt', '--title', 'Fresh Unbuilt']);
+  runCliCmd(['audit', 'fresh-unbuilt']);
+  fs.rmSync(path.join(TEST_ROOT, 'videos/fresh-unbuilt'), { recursive: true, force: true });
+}
+
+function verifyRenderAssetCacheInvalidation(videoDir, outMp4) {
+  fs.mkdirSync(path.join(videoDir, 'assets'), { recursive: true });
+  fs.writeFileSync(path.join(videoDir, 'assets/probe.svg'), '<svg>V1</svg>', 'utf8');
+  const outAssetV1 = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
+  assert.ok(outAssetV1.includes('0/2 scenes hit'), `Adding visual asset must invalidate render cache, got:\n${outAssetV1}`);
+  const outAssetHit = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
+  assert.ok(outAssetHit.includes('2/2 scenes hit'), `Unchanged visual asset must hit 2/2 render cache, got:\n${outAssetHit}`);
+  fs.writeFileSync(path.join(videoDir, 'assets/probe.svg'), '<svg>V2</svg>', 'utf8');
+  const outAssetV2 = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
+  assert.ok(outAssetV2.includes('0/2 scenes hit'), `Modifying visual asset must invalidate render cache, got:\n${outAssetV2}`);
+}
+
+function seedNestedBundleComponent(videoDir) {
+  const nestedDir = path.join(videoDir, 'components/nested');
+  fs.mkdirSync(nestedDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(nestedDir, 'card.js'),
+    'export const u = "../assets/collide.svg"; import "../../../base/js/engine.js";\n',
+    'utf8'
+  );
+}
+
+function verifyBundleSafetyAndDepth(videoDir, colDir) {
+  const nestedOut = fs.readFileSync(path.join(colDir, 'components/nested/card.js'), 'utf8');
+  assert.ok(
+    nestedOut.includes('./shared-assets/collide.svg') && nestedOut.includes('../../base/js/engine.js'),
+    `Nested bundle component refs must rewrite by depth, got:\n${nestedOut}`
+  );
+  assertCliFails(['bundle', 'demo', '--out', TEST_ROOT], 'bundle must reject TEST_ROOT as --out');
+  assertCliFails(['bundle', 'demo', '--single', '--out', path.join(TEST_ROOT, 'videos')], 'bundle must reject videos/ as --out');
+  assert.equal(fs.existsSync(path.join(videoDir, 'index.html')), true, 'Rejected bundle --out must leave videos/demo untouched');
+}
+
 async function main() {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(path.join(TEST_ROOT, 'videos'), { recursive: true });
 
   try {
+    verifyRound3UnitRegressions();
     console.log('[SelfTest 1/5] Scaffolding isolated video project (zero local videos/base)...');
     runCliCmd(['init', 'demo', '--title', '微内核自检演示', '--skill']);
     assert.equal(fs.existsSync(path.join(TEST_ROOT, 'videos/base')), false, 'videos/base must NOT exist locally');
@@ -764,6 +965,7 @@ async function main() {
     runCliCmd(['build', 'demo', '--lang', 'en']);
     const shotDir = path.join(TEST_ROOT, 'audit-shots');
     runCliCmd(['audit', 'demo', '--screenshots', shotDir]);
+    verifyFreshUnbuiltAudit();
 
     console.log('[SelfTest 3/5] Verifying microkernel registries, 30Hz lip-sync energy, SSE HMR & i18n in Chromium...');
     await verifyBrowserCapabilities(videoDir);
@@ -779,6 +981,7 @@ async function main() {
     fs.appendFileSync(path.join(videoDir, 'style.css'), '\n.s2-box { letter-spacing: 0.02em; }\n', 'utf8');
     const outCssChanged = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
     assert.ok(outCssChanged.includes('0/2 scenes hit'), `Editing style.css must invalidate scene render cache, got:\n${outCssChanged}`);
+    verifyRenderAssetCacheInvalidation(videoDir, outMp4);
     const outNoBgm = path.join(TEST_ROOT, 'demo-nobgm.mp4');
     const out3 = runCliCmd(['render', 'demo', outNoBgm, '--fps', '10', '--no-bgm']);
     assert.ok(fs.existsSync(outNoBgm) && out3.includes('+ audio ->'), `--no-bgm render must mux voice-only stem, got:\n${out3}`);
@@ -802,6 +1005,7 @@ async function main() {
     fs.writeFileSync(path.join(videoDir, 'assets/collide.svg'), '<svg>LOCAL</svg>', 'utf8');
     fs.writeFileSync(path.join(TEST_ROOT, 'videos/themes/collision-test.css'), '.t-col{background:url(../assets/collide.svg);mask:url(my-assets/collide.svg)}\n', 'utf8');
     fs.appendFileSync(path.join(videoDir, 'js/s02.js'), '\nvoid "../assets/collide.svg"; void "assets/collide.svg";\n', 'utf8');
+    seedNestedBundleComponent(videoDir);
     const colDir = path.join(TEST_ROOT, 'dist-single-collision');
     runCliCmd(['bundle', 'demo', '--single', '--out', colDir]);
     assert.equal(fs.readFileSync(path.join(colDir, 'assets/collide.svg'), 'utf8'), '<svg>LOCAL</svg>', 'Local colliding asset must win at assets/');
@@ -810,6 +1014,7 @@ async function main() {
     assert.ok(colS02.includes('./shared-assets/collide.svg') && colS02.includes('"assets/collide.svg"'), 'Shared vs local refs in js/* must stay distinct');
     const colThemeCss = fs.readFileSync(path.join(colDir, 'themes/collision-test.css'), 'utf8');
     assert.ok(colThemeCss.includes('../shared-assets/collide.svg') && colThemeCss.includes('my-assets/collide.svg'), 'Theme CSS must rewrite ../assets/ collisions without corrupting substring paths');
+    verifyBundleSafetyAndDepth(videoDir, colDir);
 
     console.log('✅ All html-video-base v2.6 end-to-end self-tests PASSED.');
   } finally {

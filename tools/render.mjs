@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import {
   ROOT, VIDEOS_DIR, listVideoIds, loadVideoSandbox, resolveBaseFile,
   loadChromium, findBrowserExecutable, resolveFfmpeg, getSandboxCfg,
+  isBgmDisabledCfg, extractRawBgmSrc, localizeMediaRel,
 } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
 
@@ -37,18 +38,46 @@ function parseRenderArgs(argv) {
   return { opts, pos };
 }
 
-function resolveAudioFile(videoDir, sandbox, cfg, audioRelDefault, bgmRelDefault, noBgm) {
-  if (cfg.audioSrc === false) return { audioPath: null, hasAudio: false, bgmPath: null, hasBgm: false };
+function resolveRawBgmVol(cfg) {
+  const b = cfg && cfg.bgm;
+  if (b && typeof b === 'object' && b.volume !== undefined) {
+    const v = Number(b.volume);
+    return Number.isFinite(v) ? Math.max(0, v) : 0.18;
+  }
+  return cfg && cfg.bgmSrc ? 1 : 0.18;
+}
+
+function findRawBgmPath(videoDir, cfg, lang) {
+  const rawBase = extractRawBgmSrc(cfg);
+  if (!rawBase) return null;
+  if (lang) {
+    const locPath = path.join(videoDir, localizeMediaRel(rawBase, lang));
+    if (fs.existsSync(locPath)) return locPath;
+  }
+  const basePath = path.join(videoDir, rawBase);
+  return fs.existsSync(basePath) ? basePath : null;
+}
+
+function resolveBgmForRender(videoDir, voice, cfg, bgmRelDefault, noBgm, lang) {
+  const bgmLoop = !(cfg && cfg.bgm && typeof cfg.bgm === 'object' && cfg.bgm.loop === false);
+  if (noBgm || isBgmDisabledCfg(cfg)) return { bgmPath: null, hasBgm: false, bgmVolume: 1, bgmLoop };
+  const stemRel = voice.bgmSrc || bgmRelDefault || '';
+  if (stemRel && fs.existsSync(path.join(videoDir, stemRel))) {
+    return { bgmPath: path.join(videoDir, stemRel), hasBgm: true, bgmVolume: 1, bgmLoop };
+  }
+  const rawPath = findRawBgmPath(videoDir, cfg, lang);
+  return { bgmPath: rawPath, hasBgm: Boolean(rawPath), bgmVolume: resolveRawBgmVol(cfg), bgmLoop };
+}
+
+function resolveAudioFile(videoDir, sandbox, cfg, audioRelDefault, bgmRelDefault, opts) {
   const voice = sandbox.V.voice || {};
-  const audioRel = voice.src || audioRelDefault || 'assets/soundtrack.m4a';
-  const audioPath = path.join(videoDir, audioRel);
-  const bgmRel = !noBgm && (voice.bgmSrc || cfg.bgmSrc || bgmRelDefault || '');
-  const bgmPath = bgmRel ? path.join(videoDir, bgmRel) : null;
+  const audioRel = cfg.audioSrc === false ? '' : (voice.src || audioRelDefault || 'assets/soundtrack.m4a');
+  const audioPath = audioRel ? path.join(videoDir, audioRel) : null;
+  const bgmInfo = resolveBgmForRender(videoDir, voice, cfg, bgmRelDefault, opts.noBgm, opts.lang);
   return {
     audioPath,
-    hasAudio: fs.existsSync(audioPath),
-    bgmPath,
-    hasBgm: Boolean(bgmPath && fs.existsSync(bgmPath)),
+    hasAudio: Boolean(audioPath && fs.existsSync(audioPath)),
+    ...bgmInfo,
   };
 }
 
@@ -60,7 +89,7 @@ function buildRenderSuffix(opts) {
 }
 
 function resolveOutAndAudio(videoId, videoDir, sandbox, cfg, opts, pos, audioRelDefault, bgmRelDefault) {
-  const audioInfo = resolveAudioFile(videoDir, sandbox, cfg, audioRelDefault, bgmRelDefault, opts.noBgm);
+  const audioInfo = resolveAudioFile(videoDir, sandbox, cfg, audioRelDefault, bgmRelDefault, opts);
   const firstIsMp4 = Boolean(pos[0] && pos[0].endsWith('.mp4'));
   const suffix = buildRenderSuffix(opts);
   const baseName = cfg.outputName || `${videoId}.mp4`;
@@ -102,22 +131,158 @@ function hashFilesInDir(h, dir, extFilter, recursive = false) {
   }
 }
 
-function computeSharedVideoDigest(videoDir, W, H, fps, lang) {
+function isGeneratedMediaOrSub(name) {
+  return /^(soundtrack|bgm|subtitles)(\.[a-z0-9_-]+)?\.(m4a|mp3|wav|ogg|vtt|srt)$/i.test(name);
+}
+
+function hashFileFast(h, fp) {
+  const st = fs.statSync(fp);
+  if (st.size <= 2 * 1024 * 1024) { h.update(fs.readFileSync(fp)); return; }
+  const chunk = 65536;
+  const buf = Buffer.allocUnsafe(chunk * 2);
+  const fd = fs.openSync(fp, 'r');
+  try {
+    fs.readSync(fd, buf, 0, chunk, 0);
+    fs.readSync(fd, buf, chunk, chunk, st.size - chunk);
+  } finally {
+    fs.closeSync(fd);
+  }
+  h.update(`${st.size}:`);
+  h.update(buf);
+}
+
+function hashVisualAssetsDir(h, dir) {
+  if (!fs.existsSync(dir)) return;
+  for (const name of fs.readdirSync(dir).sort()) {
+    if (name.startsWith('.')) continue;
+    const fp = path.join(dir, name);
+    const st = fs.statSync(fp);
+    if (st.isDirectory()) {
+      if (name !== 'voice') { h.update(`d:${name}/`); hashVisualAssetsDir(h, fp); }
+    } else if (st.isFile() && !isGeneratedMediaOrSub(name)) {
+      h.update(`f:${name}:`);
+      hashFileFast(h, fp);
+    }
+  }
+}
+
+function shouldHashExtraScript(name, rel, sceneRelSet) {
+  if (!name.endsWith('.js') && !name.endsWith('.mjs')) return false;
+  if (/^timings(\.[a-z0-9_-]+)?\.js$/i.test(name)) return false;
+  return !sceneRelSet.has(rel);
+}
+
+const SKIP_EXTRA_SCRIPT_DIRS = new Set(['assets', 'locales', 'node_modules']);
+
+function hashExtraVideoScripts(h, videoDir, sceneRelSet, relDir = '') {
+  const dir = relDir ? path.join(videoDir, relDir) : videoDir;
+  if (!fs.existsSync(dir)) return;
+  for (const name of fs.readdirSync(dir).sort()) {
+    if (name.startsWith('.')) continue;
+    const rel = relDir ? `${relDir}/${name}` : name;
+    const fp = path.join(dir, name);
+    const st = fs.statSync(fp);
+    if (st.isDirectory()) {
+      if (!SKIP_EXTRA_SCRIPT_DIRS.has(name)) hashExtraVideoScripts(h, videoDir, sceneRelSet, rel);
+    } else if (st.isFile() && shouldHashExtraScript(name, rel, sceneRelSet)) {
+      h.update(`js:${rel}:`);
+      h.update(fs.readFileSync(fp));
+    }
+  }
+}
+
+function skipQuoted(code, i, quote) {
+  i++;
+  while (i < code.length) {
+    if (code[i] === '\\') { i += 2; continue; }
+    if (code[i] === quote) return i + 1;
+    i++;
+  }
+  return i;
+}
+
+function skipBlockComment(code, i) {
+  const end = code.indexOf('*/', i + 2);
+  return end < 0 ? code.length : end + 2;
+}
+
+function skipLineComment(code, i) {
+  const end = code.indexOf('\n', i + 2);
+  return end < 0 ? code.length : end + 1;
+}
+
+function advanceCallToken(code, i) {
+  const ch = code[i];
+  if (ch === '"' || ch === "'" || ch === '`') return skipQuoted(code, i, ch);
+  if (ch === '/' && code[i + 1] === '/') return skipLineComment(code, i);
+  if (ch === '/' && code[i + 1] === '*') return skipBlockComment(code, i);
+  return -1;
+}
+
+function findCallEnd(code, openParenIdx) {
+  let depth = 0;
+  for (let i = openParenIdx; i < code.length; i++) {
+    const next = advanceCallToken(code, i);
+    if (next >= 0) { i = next - 1; continue; }
+    if (code[i] === '(') depth++;
+    else if (code[i] === ')' && --depth === 0) return i + 1;
+  }
+  return code.length;
+}
+
+const SCENE_CALL_AT = /^V\.(?:scene|scenes\.push)\s*\(/;
+
+function isIdentChar(ch) {
+  return Boolean(ch && /[A-Za-z0-9_$]/.test(ch));
+}
+
+export function stripSceneCalls(code) {
+  let out = '', last = 0, i = 0;
+  while (i < code.length) {
+    const next = advanceCallToken(code, i);
+    if (next >= 0) { i = next; continue; }
+    if (code[i] === 'V' && !isIdentChar(code[i - 1])) {
+      const m = SCENE_CALL_AT.exec(code.slice(i));
+      if (m) {
+        out += code.slice(last, i);
+        last = findCallEnd(code, i + m[0].length - 1);
+        i = last;
+        continue;
+      }
+    }
+    i++;
+  }
+  return out + code.slice(last);
+}
+
+function getSceneModuleSharedDigest(videoDir, relScript, memo) {
+  if (!relScript) return '';
+  if (memo.has(relScript)) return memo.get(relScript);
+  const fp = path.join(videoDir, relScript);
+  const raw = fs.existsSync(fp) ? stripSceneCalls(fs.readFileSync(fp, 'utf8')) : '';
+  const dg = crypto.createHash('sha256').update(raw).digest('hex');
+  memo.set(relScript, dg);
+  return dg;
+}
+
+function computeSharedVideoDigest(videoDir, W, H, fps, lang, sceneRelSet) {
   const h = crypto.createHash('sha256');
-  h.update(JSON.stringify({ v: '2.1', W, H, fps, lang }));
+  h.update(JSON.stringify({ v: '2.2', W, H, fps, lang }));
   for (const rel of ['css/base.css', 'js/engine.js', 'js/gl.js']) {
     const fp = resolveBaseFile(rel, VIDEOS_DIR);
     if (fs.existsSync(fp)) h.update(fs.readFileSync(fp));
   }
-  for (const rel of ['index.html', 'video.config.js', `locales/${lang}.js`]) {
+  const topFiles = ['index.html', 'video.config.js', ...(lang ? [`locales/${lang}.js`] : [])];
+  for (const rel of topFiles) {
     const fp = path.join(videoDir, rel);
     if (fs.existsSync(fp)) h.update(fs.readFileSync(fp));
   }
   hashFilesInDir(h, videoDir, n => n.endsWith('.css'), false);
   hashFilesInDir(h, path.join(videoDir, 'css'), n => n.endsWith('.css'), true);
   hashFilesInDir(h, path.join(VIDEOS_DIR, 'themes'), n => n.endsWith('.css') || n.endsWith('.js'), true);
-  const compJs = path.join(videoDir, 'js/components.js');
-  if (fs.existsSync(compJs)) h.update(fs.readFileSync(compJs));
+  hashExtraVideoScripts(h, videoDir, sceneRelSet || new Set());
+  hashVisualAssetsDir(h, path.join(VIDEOS_DIR, 'assets'));
+  hashVisualAssetsDir(h, path.join(videoDir, 'assets'));
   return h.digest('hex');
 }
 
@@ -130,6 +295,7 @@ function serializeSceneCode(V, sc) {
   const parts = [
     sc.id, sc.title, sc.cls, sc.transition, sc.transitionDur,
     serializeSubSpec(sc.subLayout || sc.subtitles),
+    serializeSubSpec(sc.checkpoints),
     sc.build && sc.build.toString(),
     sc.update && sc.update.toString(),
     sc.gl && sc.gl.toString(),
@@ -156,9 +322,45 @@ function serializePrevLayerState(V, scenes, si) {
   }).join('|');
 }
 
-function buildCachedSceneSegments(V, videoId, videoDir, totalFrames, W, H, fps, lang) {
+function computeSceneSegmentDigest(V, sharedHash, videoDir, modMemo, scenes, si, f0, f1, fps, hudSig, cpSig) {
+  const sc = scenes[si];
+  const prevSc = si > 0 && f0 / fps < sc.start ? scenes[si - 1] : null;
+  const h = crypto.createHash('sha256');
+  h.update(sharedHash);
+  h.update(serializeSceneCode(V, sc));
+  h.update(serializeSceneCode(V, prevSc));
+  h.update(getSceneModuleSharedDigest(videoDir, sc._sourceScript, modMemo));
+  h.update(getSceneModuleSharedDigest(videoDir, prevSc && prevSc._sourceScript, modMemo));
+  h.update(serializePrevLayerState(V, scenes, si));
+  h.update(nextCutSignature(scenes, si));
+  h.update(cpSig);
+  h.update(JSON.stringify({
+    frames: f1 - f0,
+    phase: Math.round((f0 / fps - sc.start) * 10000),
+    dur: sc.duration,
+    hudSig,
+    cues: sc.cues,
+    subCues: sc.subCues,
+    env: V.voice && V.voice.envelopes ? V.voice.envelopes[si] : null,
+    glKeys: V.glKeys || null,
+  }));
+  return h.digest('hex').slice(0, 16);
+}
+
+function computeHudSignature(V, cfg, scenes) {
+  const hudEnabled = !(cfg && (cfg.hud === false || (cfg.ui && cfg.ui.hud === false)));
+  if (!hudEnabled) return '';
+  const durNorm = Math.max(0.001, V.duration || 1);
+  return `${Math.round(durNorm * 1000)}:${scenes.slice(1).map(s => Math.round((s.start / durNorm) * 10000)).join(',')}`;
+}
+
+export function buildCachedSceneSegments(V, cfg, videoId, videoDir, totalFrames, W, H, fps, lang) {
   const scenes = V.scenes || [];
-  const sharedHash = computeSharedVideoDigest(videoDir, W, H, fps, lang);
+  const sceneRelSet = new Set(scenes.map(s => s._sourceScript).filter(Boolean));
+  const sharedHash = computeSharedVideoDigest(videoDir, W, H, fps, lang, sceneRelSet);
+  const modMemo = new Map();
+  const hudSig = computeHudSignature(V, cfg, scenes);
+  const cpParts = scenes.map(s => `${s.start}:${serializeSubSpec(s.checkpoints)}`);
   const cacheDir = path.join(ROOT, '.runtime/render-cache', videoId);
   fs.mkdirSync(cacheDir, { recursive: true });
 
@@ -170,24 +372,8 @@ function buildCachedSceneSegments(V, videoId, videoDir, totalFrames, W, H, fps, 
     const f0 = bounds[si];
     const f1 = Math.max(f0, bounds[si + 1]);
     if (f1 <= f0) continue;
-    const sc = scenes[si];
-    const prevSc = si > 0 && f0 / fps < sc.start ? scenes[si - 1] : null;
-    const h = crypto.createHash('sha256');
-    h.update(sharedHash);
-    h.update(serializeSceneCode(V, sc));
-    h.update(serializeSceneCode(V, prevSc));
-    h.update(serializePrevLayerState(V, scenes, si));
-    h.update(nextCutSignature(scenes, si));
-    h.update(JSON.stringify({
-      frames: f1 - f0,
-      phase: Math.round((f0 / fps - sc.start) * 10000),
-      dur: sc.duration,
-      cues: sc.cues,
-      subCues: sc.subCues,
-      env: V.voice && V.voice.envelopes ? V.voice.envelopes[si] : null,
-      glKeys: V.glKeys || null,
-    }));
-    const digest = h.digest('hex').slice(0, 16);
+    const cpSig = cpParts.slice(0, si + 1).join('|');
+    const digest = computeSceneSegmentDigest(V, sharedHash, videoDir, modMemo, scenes, si, f0, f1, fps, hudSig, cpSig);
     const cachePath = path.join(cacheDir, `s${String(si).padStart(2, '0')}-${digest}.mp4`);
     segments.push({ idx: si, f0, f1, partPath: cachePath, cached: fs.existsSync(cachePath) });
   }
@@ -252,11 +438,21 @@ function installFrameReuseProbe() {
       .join(',');
     return `${document.documentElement.style.cssText}|${forms}|${scrolls}`;
   };
+  const readStageHtml = stage => {
+    const hud = document.getElementById('hud');
+    const bar = hud && getComputedStyle(hud).display === 'none' ? hud.querySelector('.hud-bar') : null;
+    if (!bar) return stage.innerHTML;
+    const prev = bar.style.width;
+    bar.style.width = '';
+    const html = stage.innerHTML;
+    bar.style.width = prev;
+    return html;
+  };
   window.__seekAndDedupe = async sec => {
     await window.V.seekToAsync(sec);
     const stage = document.getElementById('stage');
     if (!canDedupeStage(stage)) { window.__prevStageSig = null; return false; }
-    const sig = `${document.documentElement.dataset.theme || ''}|${document.body.className}|${stageExtraState(stage)}|${stage.innerHTML}`;
+    const sig = `${document.documentElement.dataset.theme || ''}|${document.body.className}|${stageExtraState(stage)}|${readStageHtml(stage)}`;
     if (sig === window.__prevStageSig) return true;
     window.__prevStageSig = sig;
     return false;
@@ -268,6 +464,7 @@ async function openRenderPage(browser, port, videoId, W, H, lang) {
   await page.addInitScript(installFrameReuseProbe);
   const q = lang ? `?record=1&lang=${encodeURIComponent(lang)}` : '?record=1';
   await page.goto(`http://127.0.0.1:${port}/${videoId}/${q}`, { waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.__video && window.V && window.V.seekToAsync, null, { timeout: 15000 });
   await page.evaluate(() => (document.fonts ? document.fonts.ready : Promise.resolve()));
   return page;
 }
@@ -347,26 +544,57 @@ function pushSlicedAudioInput(muxArgs, filePath, isSlice, startSec, renderDur) {
   muxArgs.push('-i', filePath);
 }
 
-async function stitchSegmentsAndAudio({ segments, tmpDir, ffmpegBin, hasAudio, audioPath, hasBgm, bgmPath, audioBitrate, isSlice, startSec, renderDur, outPath }) {
+function pushVoiceOnlyMuxArgs(muxArgs, audioPath, isSlice, startSec, renderDur, audioBitrate) {
+  pushSlicedAudioInput(muxArgs, audioPath, isSlice, startSec, renderDur);
+  muxArgs.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy');
+  const canCopy = !isSlice && /\.m4a$/i.test(audioPath);
+  muxArgs.push(...(canCopy ? ['-c:a', 'copy', '-shortest'] : ['-c:a', 'aac', '-b:a', audioBitrate || '128k', '-shortest']));
+}
+
+function buildBgmFilterOps({ isSlice, startSec, renderDur, bgmVolume, padToEnd }) {
+  const ops = [];
+  if (isSlice) ops.push(`atrim=start=${startSec.toFixed(3)}:duration=${renderDur.toFixed(3)},asetpts=PTS-STARTPTS`);
+  if (Math.abs((bgmVolume ?? 1) - 1) > 0.001) ops.push(`volume=${Number(bgmVolume).toFixed(4)}`);
+  if (padToEnd) ops.push('apad');
+  return ops;
+}
+
+function pushBgmOnlyMuxArgs(muxArgs, { bgmPath, bgmLoop, bgmVolume, isSlice, startSec, renderDur, audioBitrate }) {
+  if (bgmLoop) muxArgs.push('-stream_loop', '-1');
+  muxArgs.push('-i', bgmPath);
+  const ops = buildBgmFilterOps({ isSlice, startSec, renderDur, bgmVolume, padToEnd: !bgmLoop });
+  if (ops.length) muxArgs.push('-af', ops.join(','));
+  muxArgs.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', audioBitrate || '128k', '-shortest');
+}
+
+function pushDualStemMuxArgs(muxArgs, { audioPath, bgmPath, bgmLoop, bgmVolume, isSlice, startSec, renderDur, audioBitrate }) {
+  pushSlicedAudioInput(muxArgs, audioPath, isSlice, startSec, renderDur);
+  if (bgmLoop) muxArgs.push('-stream_loop', '-1');
+  muxArgs.push('-i', bgmPath);
+  const ops = buildBgmFilterOps({ isSlice, startSec, renderDur, bgmVolume, padToEnd: false });
+  const bgmGraph = ops.length ? `[2:a]${ops.join(',')}[bgm];[1:a][bgm]` : '[1:a][2:a]';
+  muxArgs.push(
+    '-filter_complex', `${bgmGraph}amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`,
+    '-map', '0:v:0', '-map', '[aout]', '-c:v', 'copy',
+    '-c:a', 'aac', '-b:a', audioBitrate || '128k', '-shortest'
+  );
+}
+
+async function stitchSegmentsAndAudio(spec) {
+  const { segments, tmpDir, ffmpegBin, hasAudio, audioPath, hasBgm, audioBitrate, isSlice, startSec, renderDur, outPath } = spec;
   fs.mkdirSync(tmpDir, { recursive: true });
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   const listFile = path.join(tmpDir, 'concat.txt');
-  const listBody = segments.map(s => `file '${s.partPath.replace(/\\/g, '/')}'`).join('\n') + '\n';
+  const listBody = segments.map(s => `file '${s.partPath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n') + '\n';
   fs.writeFileSync(listFile, listBody, 'utf8');
 
   const muxArgs = ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listFile];
   if (hasAudio && hasBgm) {
-    pushSlicedAudioInput(muxArgs, audioPath, isSlice, startSec, renderDur);
-    pushSlicedAudioInput(muxArgs, bgmPath, isSlice, startSec, renderDur);
-    muxArgs.push(
-      '-filter_complex', '[1:a][2:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]',
-      '-map', '0:v:0', '-map', '[aout]', '-c:v', 'copy',
-      '-c:a', 'aac', '-b:a', audioBitrate || '128k', '-shortest'
-    );
+    pushDualStemMuxArgs(muxArgs, spec);
   } else if (hasAudio) {
-    pushSlicedAudioInput(muxArgs, audioPath, isSlice, startSec, renderDur);
-    muxArgs.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy');
-    muxArgs.push(...(isSlice ? ['-c:a', 'aac', '-b:a', audioBitrate || '128k', '-shortest'] : ['-c:a', 'copy', '-shortest']));
+    pushVoiceOnlyMuxArgs(muxArgs, audioPath, isSlice, startSec, renderDur, audioBitrate);
+  } else if (hasBgm) {
+    pushBgmOnlyMuxArgs(muxArgs, spec);
   } else {
     muxArgs.push('-c:v', 'copy');
   }
@@ -374,77 +602,79 @@ async function stitchSegmentsAndAudio({ segments, tmpDir, ffmpegBin, hasAudio, a
   await runFfmpeg(ffmpegBin, muxArgs);
 }
 
-const { opts, pos } = parseRenderArgs(process.argv.slice(2));
-const firstIsMp4 = Boolean(pos[0] && pos[0].endsWith('.mp4'));
-const defaultVideo = listVideoIds()[0] || 'starter';
-const VIDEO_ID = firstIsMp4 ? defaultVideo : (pos[0] || defaultVideo);
-
-const { sandbox, videoDir, audioRel, bgmRel } = loadVideoSandbox(ROOT, VIDEO_ID, { ignoreBaked: false, requireTimings: false, lang: opts.lang });
-const cfg = getSandboxCfg(sandbox.V);
-const W = cfg.width || 1920;
-const H = cfg.height || 1080;
-const FPS = Number(opts.fps || process.env.FPS || cfg.fps || 30);
-
-const { outPath, audioPath, hasAudio, bgmPath, hasBgm } = resolveOutAndAudio(VIDEO_ID, videoDir, sandbox, cfg, opts, pos, audioRel, bgmRel);
-const scenes = sandbox.V.scenes || [];
-const fullDur = sandbox.V.totalDuration || sandbox.V.duration || 1;
-const { startSec, endSec, isSlice } = resolveTimeWindow(scenes, fullDur, hasAudio, opts);
-const renderDur = Math.max(1 / FPS, endSec - startSec);
-const totalFrames = Math.max(1, Math.ceil(renderDur * FPS));
-
-const autoWorkers = totalFrames >= 120 ? Math.min(4, Math.max(1, os.cpus().length - 1)) : 1;
-const envWorkers = process.env.WORKERS ? Math.max(1, parseInt(process.env.WORKERS, 10) || 1) : null;
-const workerCount = Math.min(totalFrames, opts.workers || envWorkers || autoWorkers);
-
-const tmpDir = path.join(ROOT, '.runtime', `render-${VIDEO_ID}-${process.pid}`);
-const ffmpegBin = resolveFfmpeg(ROOT);
-const tStartWall = Date.now();
-
-try {
-  const useSceneCache = !isSlice && !opts.noCache && scenes.length > 0;
-  const segments = useSceneCache
-    ? buildCachedSceneSegments(sandbox.V, VIDEO_ID, videoDir, totalFrames, W, H, FPS, opts.lang)
-    : buildUncachedChunks(totalFrames, workerCount, tmpDir);
-  const misses = segments.filter(s => !s.cached);
-  const hitCount = segments.length - misses.length;
-  const cacheInfo = useSceneCache ? ` [cache ${hitCount}/${segments.length} scenes hit]` : '';
-
-  const audioDesc = hasAudio ? (hasBgm ? ' + audio+bgm' : ' + audio') : ' (silent)';
-  console.log(
-    `Rendering [${VIDEO_ID}] ${W}x${H} @ ${FPS}fps · ${totalFrames} frames ` +
-    `(${startSec.toFixed(2)}s..${endSec.toFixed(2)}s)${cacheInfo}${audioDesc} -> ${outPath}`
-  );
-
-  await renderMissingSegments({
-    misses,
-    workerCount,
-    videoId: VIDEO_ID,
-    W,
-    H,
-    fps: FPS,
-    lang: opts.lang,
-    startSec,
-    ffmpegBin,
-    tStartWall,
-    reuseFrames: !opts.noFrameReuse,
-  });
-
-  await stitchSegmentsAndAudio({
-    segments,
-    tmpDir,
-    ffmpegBin,
-    hasAudio,
-    audioPath,
-    hasBgm,
-    bgmPath,
-    audioBitrate: cfg.audioBitrate || '128k',
-    isSlice,
-    startSec,
-    renderDur,
-    outPath,
-  });
-
-  console.log(`Done in ${((Date.now() - tStartWall) / 1000).toFixed(1)}s: ${outPath}`);
-} finally {
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+function resolveTargetVideoId(pos) {
+  const firstIsMp4 = Boolean(pos[0] && pos[0].endsWith('.mp4'));
+  const defaultVideo = listVideoIds()[0] || 'starter';
+  return firstIsMp4 ? defaultVideo : (pos[0] || defaultVideo);
 }
+
+function resolveWorkerCount(totalFrames, opts) {
+  const autoWorkers = totalFrames >= 120 ? Math.min(4, Math.max(1, os.cpus().length - 1)) : 1;
+  const envWorkers = process.env.WORKERS ? Math.max(1, parseInt(process.env.WORKERS, 10) || 1) : null;
+  return Math.min(totalFrames, opts.workers || envWorkers || autoWorkers);
+}
+
+function describeRenderAudio(hasAudio, hasBgm) {
+  if (hasAudio) return hasBgm ? ' + audio+bgm' : ' + audio';
+  return hasBgm ? ' + bgm' : ' (silent)';
+}
+
+function resolveStageSpec(V, cfg, opts) {
+  return {
+    W: cfg.width || 1920,
+    H: cfg.height || 1080,
+    FPS: Number(opts.fps || process.env.FPS || cfg.fps || 30),
+    scenes: V.scenes || [],
+    fullDur: V.totalDuration || V.duration || 1,
+    audioBitrate: cfg.audioBitrate || '128k',
+  };
+}
+
+async function runRenderCli() {
+  const { opts, pos } = parseRenderArgs(process.argv.slice(2));
+  const VIDEO_ID = resolveTargetVideoId(pos);
+  const { sandbox, videoDir, audioRel, bgmRel } = loadVideoSandbox(ROOT, VIDEO_ID, { ignoreBaked: false, requireTimings: false, lang: opts.lang });
+  const cfg = getSandboxCfg(sandbox.V);
+  const { W, H, FPS, scenes, fullDur, audioBitrate } = resolveStageSpec(sandbox.V, cfg, opts);
+
+  const media = resolveOutAndAudio(VIDEO_ID, videoDir, sandbox, cfg, opts, pos, audioRel, bgmRel);
+  const { startSec, endSec, isSlice } = resolveTimeWindow(scenes, fullDur, media.hasAudio || media.hasBgm, opts);
+  const renderDur = Math.max(1 / FPS, endSec - startSec);
+  const totalFrames = Math.max(1, Math.ceil(renderDur * FPS));
+  const workerCount = resolveWorkerCount(totalFrames, opts);
+
+  const tmpDir = path.join(ROOT, '.runtime', `render-${VIDEO_ID}-${process.pid}`);
+  const ffmpegBin = resolveFfmpeg(ROOT);
+  const tStartWall = Date.now();
+
+  try {
+    const useSceneCache = !isSlice && !opts.noCache && scenes.length > 0;
+    const segments = useSceneCache
+      ? buildCachedSceneSegments(sandbox.V, cfg, VIDEO_ID, videoDir, totalFrames, W, H, FPS, opts.lang)
+      : buildUncachedChunks(totalFrames, workerCount, tmpDir);
+    const misses = segments.filter(s => !s.cached);
+    const cacheInfo = useSceneCache ? ` [cache ${segments.length - misses.length}/${segments.length} scenes hit]` : '';
+
+    console.log(
+      `Rendering [${VIDEO_ID}] ${W}x${H} @ ${FPS}fps · ${totalFrames} frames ` +
+      `(${startSec.toFixed(2)}s..${endSec.toFixed(2)}s)${cacheInfo}${describeRenderAudio(media.hasAudio, media.hasBgm)} -> ${media.outPath}`
+    );
+
+    await renderMissingSegments({
+      misses, workerCount, videoId: VIDEO_ID, W, H, fps: FPS, lang: opts.lang,
+      startSec, ffmpegBin, tStartWall, reuseFrames: !opts.noFrameReuse,
+    });
+
+    await stitchSegmentsAndAudio({
+      segments, tmpDir, ffmpegBin, ...media,
+      audioBitrate, isSlice, startSec, renderDur,
+    });
+
+    console.log(`Done in ${((Date.now() - tStartWall) / 1000).toFixed(1)}s: ${media.outPath}`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+const isDirectRun = process.argv[1] && process.argv[1].endsWith('render.mjs');
+if (isDirectRun) await runRenderCli();

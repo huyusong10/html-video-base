@@ -243,6 +243,9 @@
       mountChapterSearch(ctl);
       bindTimeDeepLinkCopy(ctl);
     },
+    onLayout() {
+      cachedIndex = null;
+    },
     onSeek(t) {
       if (!V._isRecord) syncAddressBarOnSeek(t);
     },

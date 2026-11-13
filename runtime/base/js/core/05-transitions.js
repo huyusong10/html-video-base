@@ -17,7 +17,7 @@
       return { veil };
     },
     update(dom, near, dur) {
-      const k = Math.abs(near) < dur ? 1 - ease.io(Math.abs(near) / dur) : 0;
+      const k = dur > 0 && Math.abs(near) < dur ? 1 - ease.io(Math.abs(near) / dur) : 0;
       dom.veil.style.opacity = String(clamp(k));
     },
   });
@@ -29,7 +29,7 @@
       return { veil };
     },
     update(dom, near, dur, curScene) {
-      const active = Math.abs(near) < dur;
+      const active = dur > 0 && Math.abs(near) < dur;
       const k = active ? 1 - ease.io(Math.abs(near) / dur) : 0;
       dom.veil.style.opacity = String(clamp(k * 0.85));
       if (!curScene || !curScene.root) return;
@@ -47,7 +47,7 @@
       return { curtain };
     },
     update(dom, near, dur) {
-      const active = Math.abs(near) < dur;
+      const active = dur > 0 && Math.abs(near) < dur;
       const k = !active ? 0 : (near < 0 ? ease.in(1 + near / dur) : 1 - ease.out(near / dur));
       dom.curtain.style.transformOrigin = near < 0 ? '0% 50%' : '100% 50%';
       dom.curtain.style.transform = `scaleX(${clamp(k)})`;
@@ -71,9 +71,17 @@
           tiles.push([el, (c + r) / Math.max(1, cols + rows - 2)]);
         }
       }
-      return { tiles };
+      return { tiles, cleared: false };
     },
     update(dom, near, dur) {
+      if (!(dur > 0) || Math.abs(near) >= dur) {
+        if (!dom.cleared) {
+          for (const [el] of dom.tiles) el.style.transform = 'scale(0)';
+          dom.cleared = true;
+        }
+        return;
+      }
+      dom.cleared = false;
       for (const [el, delay] of dom.tiles) {
         const k = near < 0
           ? clamp((near + dur) / dur * 1.6 - delay * 0.6)

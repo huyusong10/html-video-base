@@ -182,8 +182,12 @@
   function sameLangFamily(a, b) {
     if (!a || !b) return false;
     const na = String(a).toLowerCase(), nb = String(b).toLowerCase();
-    return na === nb || na.split('-')[0] === nb.split('-')[0];
+    if (na === nb) return true;
+    if (na.includes('-') && nb.includes('-')) return false;
+    return na.split('-')[0] === nb.split('-')[0];
   }
+
+  V.getBaseLang = resolveBaseLang;
 
   V.isSecondaryLocale = function (lang = V.getActiveLang()) {
     if (!lang) return false;
@@ -847,6 +851,9 @@
       instructions: lineObj.instructions,
       enSlowdown: lineObj.enSlowdown,
       align: lineObj.align,
+      whisperModel: lineObj.whisperModel,
+      volume: lineObj.volume,
+      xmlLang: lineObj.xmlLang,
     };
   }
 
@@ -892,13 +899,15 @@
   }
 
   function buildLocalizedLines(sc, scLoc) {
-    const srcLines = (scLoc && Array.isArray(scLoc.lines) && sc._origLines.length === 0)
-      ? scLoc.lines
-      : sc._origLines;
-    sc.lines = srcLines.map((ln, li) => {
-      const baseObj = typeof ln === 'string' ? { text: ln } : ln;
-      return applyLocaleLine(baseObj, scLoc, li);
-    });
+    const locArr = Array.isArray(scLoc) ? scLoc : (scLoc && Array.isArray(scLoc.lines) ? scLoc.lines : null);
+    const count = locArr ? locArr.length : sc._origLines.length;
+    const out = [];
+    for (let li = 0; li < count; li++) {
+      const orig = sc._origLines[li];
+      const baseObj = orig ? (typeof orig === 'string' ? { text: orig } : orig) : { text: '' };
+      out.push(applyLocaleLine(baseObj, scLoc, li));
+    }
+    sc.lines = out;
   }
 
   function syncSceneLocaleMeta(sc, si) {
@@ -934,13 +943,20 @@
     return sc.start + sc.duration;
   }
 
+  function resolveGlKeyframeT0(k, scStart, at) {
+    if (k.t0 === 'self') return at;
+    if (typeof k.t0 === 'number') return scStart + k.t0;
+    if (k.t0 === undefined && k.shape === 'burst') return at;
+    return k.t0;
+  }
+
   function collectGlKeyframes() {
     V.glKeys = [];
     V.scenes.forEach((sc, si) => {
       if (!sc.gl) return;
       for (const k of sc.gl(makeCtx(sc, si))) {
         const at = sc.start + k.t;
-        V.glKeys.push({ ...k, t: at, t0: k.t0 === 'self' ? at : k.t0 });
+        V.glKeys.push({ ...k, t: at, t0: resolveGlKeyframeT0(k, sc.start, at) });
       }
     });
     V.glKeys.sort((a, b) => a.t - b.t);
@@ -1027,7 +1043,7 @@
       return { veil };
     },
     update(dom, near, dur) {
-      const k = Math.abs(near) < dur ? 1 - ease.io(Math.abs(near) / dur) : 0;
+      const k = dur > 0 && Math.abs(near) < dur ? 1 - ease.io(Math.abs(near) / dur) : 0;
       dom.veil.style.opacity = String(clamp(k));
     },
   });
@@ -1039,7 +1055,7 @@
       return { veil };
     },
     update(dom, near, dur, curScene) {
-      const active = Math.abs(near) < dur;
+      const active = dur > 0 && Math.abs(near) < dur;
       const k = active ? 1 - ease.io(Math.abs(near) / dur) : 0;
       dom.veil.style.opacity = String(clamp(k * 0.85));
       if (!curScene || !curScene.root) return;
@@ -1057,7 +1073,7 @@
       return { curtain };
     },
     update(dom, near, dur) {
-      const active = Math.abs(near) < dur;
+      const active = dur > 0 && Math.abs(near) < dur;
       const k = !active ? 0 : (near < 0 ? ease.in(1 + near / dur) : 1 - ease.out(near / dur));
       dom.curtain.style.transformOrigin = near < 0 ? '0% 50%' : '100% 50%';
       dom.curtain.style.transform = `scaleX(${clamp(k)})`;
@@ -1081,9 +1097,17 @@
           tiles.push([el, (c + r) / Math.max(1, cols + rows - 2)]);
         }
       }
-      return { tiles };
+      return { tiles, cleared: false };
     },
     update(dom, near, dur) {
+      if (!(dur > 0) || Math.abs(near) >= dur) {
+        if (!dom.cleared) {
+          for (const [el] of dom.tiles) el.style.transform = 'scale(0)';
+          dom.cleared = true;
+        }
+        return;
+      }
+      dom.cleared = false;
       for (const [el, delay] of dom.tiles) {
         const k = near < 0
           ? clamp((near + dur) / dur * 1.6 - delay * 0.6)
@@ -1190,9 +1214,12 @@
   let activeCp = null;
   let triggeredKeys = new Map();
 
-  function resolveSceneCheckpoints(sc) {
+  const recordManagedIds = new Set();
+
+  function resolveSceneCheckpoints(sc, si) {
     if (!sc._resolvedCheckpoints) {
-      const raw = typeof sc.checkpoints === 'function' ? sc.checkpoints(sc.ctx) : sc.checkpoints;
+      const ctx = sc.ctx || (V.makeCtx ? V.makeCtx(sc, si) : null);
+      const raw = typeof sc.checkpoints === 'function' ? sc.checkpoints(ctx) : sc.checkpoints;
       sc._resolvedCheckpoints = Array.isArray(raw) ? raw : [];
     }
     return sc._resolvedCheckpoints;
@@ -1248,11 +1275,27 @@
     });
   }
 
-  function applyRecordCheckpoints(list, scStart, curT) {
-    for (const cp of list) {
-      if (!cp || cp.at == null || !cp.id) continue;
-      if (curT >= scStart + Number(cp.at) && V.checkpointState[cp.id] === undefined) {
-        V.checkpointState[cp.id] = cp.defaultValue === undefined ? true : cp.defaultValue;
+  function collectAllRecordCheckpoints() {
+    const all = [];
+    const scenes = V.scenes || [];
+    for (let si = 0; si < scenes.length; si++) {
+      const sc = scenes[si];
+      for (const cp of resolveSceneCheckpoints(sc, si)) {
+        if (cp && cp.at != null && cp.id) {
+          all.push({ gAt: (sc.start || 0) + Number(cp.at), id: cp.id, val: cp.defaultValue === undefined ? true : cp.defaultValue });
+        }
+      }
+    }
+    return all.sort((a, b) => a.gAt - b.gAt);
+  }
+
+  function syncRecordCheckpoints(curT) {
+    for (const id of recordManagedIds) delete V.checkpointState[id];
+    recordManagedIds.clear();
+    for (const item of collectAllRecordCheckpoints()) {
+      if (curT >= item.gAt) {
+        V.checkpointState[item.id] = item.val;
+        recordManagedIds.add(item.id);
       }
     }
   }
@@ -1263,10 +1306,9 @@
   }
 
   function checkSceneCheckpoints(sc, si, prevT, curT, ctl) {
-    const list = resolveSceneCheckpoints(sc);
-    if (!list.length) return;
-    if (ctl.isRecord) { applyRecordCheckpoints(list, sc.start, curT); return; }
-    if (!canCheckInteractive(ctl, prevT, curT)) return;
+    if (ctl.isRecord) { syncRecordCheckpoints(curT); return; }
+    const list = resolveSceneCheckpoints(sc, si);
+    if (!list.length || !canCheckInteractive(ctl, prevT, curT)) return;
     for (let i = 0; i < list.length; i++) {
       const cp = list[i];
       if (!cp || cp.at == null) continue;
@@ -1304,7 +1346,7 @@
     closeCheckpointOverlay();
   };
 
-  V._checkpointsRuntime = { checkSceneCheckpoints, closeCheckpointOverlay, onSeek };
+  V._checkpointsRuntime = { checkSceneCheckpoints, syncRecordCheckpoints, closeCheckpointOverlay, onSeek };
 })(globalThis.V = globalThis.V || {});
 
 /* core/08-plugins.js · 内置可插拔扩展（通过标准 V.use 注册：草稿 WebAudio 微音效 + ?dev 面板 + SSE 保位热重载） */
@@ -1514,10 +1556,17 @@
     return u.resumeMinSec === undefined ? 5 : Math.max(0, Number(u.resumeMinSec) || 0);
   }
 
+  function numDelayOr(val, fallback) {
+    if (val === undefined || val === null || val === '') return fallback;
+    const n = Number(val);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  }
+
   function resolveUiDelays(u) {
+    const rawLeave = u.leaveHideDelay !== undefined ? u.leaveHideDelay : u.autoHideDelay;
     return {
-      idleHideDelay: Number(u.idleHideDelay) || 1500,
-      leaveHideDelay: Number(u.leaveHideDelay || u.autoHideDelay) || 220,
+      idleHideDelay: numDelayOr(u.idleHideDelay, 1500),
+      leaveHideDelay: numDelayOr(rawLeave, 220),
     };
   }
 
@@ -1755,20 +1804,65 @@
     return localizeFallbackMedia(cfg.audioSrc, 'audioSrc') || null;
   }
 
-  function resolveBgmSource(cfg, isRecord) {
-    if (cfg.audioSrc === false || cfg.bgm === false || cfg.bgmSrc === false || isRecord) return null;
-    if (isVoiceLocaleMatch() && V.voice.bgmSrc) return V.voice.bgmSrc;
-    return localizeFallbackMedia(cfg.bgmSrc, 'bgmSrc') || null;
+  function isBgmDisabledInCfg(cfg) {
+    if (!cfg || cfg.bgm === false || cfg.bgm === 'none' || cfg.bgmSrc === false) return true;
+    if (cfg.audioSrc === false && cfg.bgm === undefined && !cfg.bgmSrc) return true;
+    const b = cfg.bgm;
+    if (b && typeof b === 'object') {
+      if (b.preset === false || b.preset === 'none') return true;
+      if (b.volume !== undefined && Number(b.volume) <= 0) return true;
+    }
+    return false;
+  }
+
+  function extractRawBgmSrc(cfg) {
+    if (cfg.bgmSrc) return cfg.bgmSrc;
+    if (cfg.bgm && typeof cfg.bgm === 'object' && cfg.bgm.src) return cfg.bgm.src;
+    if (typeof cfg.bgm === 'string' && cfg.bgm !== 'ambient' && cfg.bgm !== 'chiptune') return cfg.bgm;
+    return null;
+  }
+
+  function resolveRawBgmVolume(cfg) {
+    const b = cfg.bgm;
+    if (b && typeof b === 'object' && b.volume !== undefined) {
+      const v = Number(b.volume);
+      return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.18;
+    }
+    return cfg.bgmSrc ? 1 : 0.18;
+  }
+
+  function resolveBgmTrackSpec(cfg, isRecord) {
+    if (isRecord || isBgmDisabledInCfg(cfg)) return null;
+    if (isVoiceLocaleMatch() && V.voice.bgmSrc) return { src: V.voice.bgmSrc, volume: 1 };
+    const src = localizeFallbackMedia(extractRawBgmSrc(cfg), 'bgmSrc');
+    return src ? { src, volume: resolveRawBgmVolume(cfg) } : null;
+  }
+
+  function resolveBgmTarget(el, refT, loopOn) {
+    const t = Math.max(0, refT || 0);
+    const dur = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null;
+    if (!dur) return { time: t, dur: null, ended: false };
+    if (loopOn) return { time: t % dur, dur, ended: false };
+    if (t >= dur - 0.02) return { time: Math.max(0, dur - 0.01), dur, ended: true };
+    return { time: t, dur, ended: false };
+  }
+
+  function computeBgmDrift(cur, target, dur, loopOn) {
+    const diff = Math.abs(cur - target);
+    return dur && loopOn ? Math.min(diff, Math.max(0, dur - diff)) : diff;
   }
 
   V._createAudioRuntime = function (hooks) {
     const { params, isRecord } = hooks;
-    let audio = null, bgmAudio = null, playbackRate = 1;
+    let audio = null, bgmAudio = null, playbackRate = 1, bgmLoop = true;
     let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm'), muted = false;
     let audioBlocked = false, unlockArmed = false, playPending = false, bgmPlayPending = false, targetSeekTime = null;
 
     function isAllMuted() {
-      return muted || (!voiceOn && (!bgmAudio || !bgmOn));
+      if (muted) return true;
+      const activeVoice = audio ? voiceOn : (!bgmAudio && voiceOn);
+      const activeBgm = Boolean(bgmAudio) && bgmOn;
+      return !activeVoice && !activeBgm;
     }
 
     function resolveRefTime() {
@@ -1829,42 +1923,59 @@
       }
     }
 
+    function alignBgmToTime(refT, tol) {
+      if (!bgmAudio || bgmAudio.readyState < 1) return false;
+      const target = resolveBgmTarget(bgmAudio, refT, bgmLoop);
+      if (target.ended) {
+        if (!bgmAudio.paused) bgmAudio.pause();
+        return false;
+      }
+      if (computeBgmDrift(bgmAudio.currentTime, target.time, target.dur, bgmLoop) > tol) {
+        try { bgmAudio.currentTime = target.time; } catch {}
+      }
+      return true;
+    }
+
     function syncBgmPlaybackNow() {
       if (!bgmAudio) return;
       bgmAudio.muted = isAllMuted() || !bgmOn;
       bgmAudio.playbackRate = playbackRate;
       if (!hooks.isPlaying() || bgmAudio.muted) { bgmAudio.pause(); return; }
       const refT = resolveRefTime();
-      if (bgmAudio.readyState >= 1 && Math.abs(bgmAudio.currentTime - refT) > 0.18) {
-        try { bgmAudio.currentTime = refT; } catch {}
-      }
+      if (bgmAudio.readyState >= 1 && !alignBgmToTime(refT, 0.18)) return;
       safePlayBgm();
     }
 
     function keepBgmInSync(masterTime) {
       if (!bgmAudio || isAllMuted() || !bgmOn || bgmAudio.seeking) return;
+      const target = resolveBgmTarget(bgmAudio, masterTime, bgmLoop);
+      if (target.ended) {
+        if (!bgmAudio.paused) bgmAudio.pause();
+        return;
+      }
       if (bgmAudio.paused) { safePlayBgm(); return; }
-      if (bgmAudio.readyState >= 2 && Math.abs(bgmAudio.currentTime - masterTime) > 0.22) {
-        try { bgmAudio.currentTime = masterTime; } catch {}
+      if (bgmAudio.readyState >= 2 && computeBgmDrift(bgmAudio.currentTime, target.time, target.dur, bgmLoop) > 0.22) {
+        try { bgmAudio.currentTime = target.time; } catch {}
       }
     }
 
     function resolveSoundBtnSpec() {
       const allOff = isAllMuted();
       if (allOff) return ['volumeMute', '取消静音（M）'];
-      if (bgmAudio && !voiceOn && bgmOn) return ['volumeBgm', '声音设置：仅背景音乐（M 静音 / B 开关配乐）'];
+      if (bgmAudio && (!audio || !voiceOn) && bgmOn) return ['volumeBgm', '声音设置：仅背景音乐（M 静音 / B 开关配乐）'];
       if (bgmAudio && voiceOn && !bgmOn) return ['volumeVoice', '声音设置：已关背景乐（M 静音 / B 恢复配乐）'];
       return ['volumeOn', bgmAudio ? '声音设置（M 静音 / B 开关配乐）' : '静音（M）'];
     }
 
     function emitAndSync() {
       const allOff = isAllMuted();
+      const voiceActive = Boolean(audio || !bgmAudio) && !allOff && voiceOn;
       if (audio) audio.muted = allOff || !voiceOn;
       syncBgmPlaybackNow();
       hooks.onSoundUI();
       V.emit('onSoundChange', {
         muted: allOff,
-        voiceOn: !allOff && voiceOn,
+        voiceOn: voiceActive,
         bgmOn: Boolean(bgmAudio) && !allOff && bgmOn,
         rawMuted: muted,
         rawVoiceOn: voiceOn,
@@ -1886,7 +1997,10 @@
 
     function setMuted(nextMuted) {
       muted = Boolean(nextMuted);
-      if (!muted && !voiceOn && (!bgmAudio || !bgmOn)) voiceOn = true;
+      if (!muted && isAllMuted()) {
+        if (audio || !bgmAudio) voiceOn = true;
+        else bgmOn = true;
+      }
       emitAndSync();
     }
 
@@ -1929,9 +2043,7 @@
     }
 
     function seekTracks(nowVal) {
-      if (bgmAudio && bgmAudio.readyState >= 1) {
-        try { bgmAudio.currentTime = nowVal; } catch {}
-      }
+      alignBgmToTime(nowVal, 0.02);
       if (!audio) return;
       if (audio.readyState >= 1) {
         try { audio.currentTime = nowVal; targetSeekTime = null; } catch { targetSeekTime = nowVal; }
@@ -1985,15 +2097,18 @@
       return el;
     }
 
-    function createBgmAudio(src) {
+    function createBgmAudio(spec) {
       const el = new Audio();
       el.preload = 'auto';
+      el.loop = bgmLoop;
+      el.volume = spec.volume;
       el.muted = isAllMuted() || !bgmOn;
       el.addEventListener('loadedmetadata', () => {
         el.playbackRate = playbackRate;
-        const refT = resolveRefTime();
-        if (refT > 0.05) { try { el.currentTime = refT; } catch {} }
-        if (hooks.isPlaying() && !el.muted && el.paused) safePlayBgm();
+        el.loop = bgmLoop;
+        const target = resolveBgmTarget(el, resolveRefTime(), bgmLoop);
+        if (target.time > 0.05) { try { el.currentTime = target.time; } catch {} }
+        if (hooks.isPlaying() && !el.muted && el.paused && !target.ended) safePlayBgm();
       });
       el.addEventListener('error', () => {
         if (bgmAudio !== el) return;
@@ -2001,25 +2116,29 @@
         hooks.onBgmUnavailable();
         hooks.onSoundUI();
       });
-      el.src = src;
+      el.src = spec.src;
       el.load();
       return el;
     }
 
+    function applySavedSoundPrefs(savedPrefs) {
+      if (!savedPrefs) return;
+      if (typeof savedPrefs.muted === 'boolean') muted = savedPrefs.muted;
+      if (typeof savedPrefs.voice === 'boolean' && !params.has('novoice')) voiceOn = savedPrefs.voice;
+      if (typeof savedPrefs.bgm === 'boolean' && !params.has('nobgm') && !params.has('bgm')) bgmOn = savedPrefs.bgm;
+    }
+
     function initTracks(cfg, uiCfg, savedPrefs) {
+      bgmLoop = !(cfg.bgm && typeof cfg.bgm === 'object' && cfg.bgm.loop === false);
       if (uiCfg.bgmDefault === false && !params.has('bgm')) bgmOn = false;
-      if (savedPrefs) {
-        if (typeof savedPrefs.muted === 'boolean') muted = savedPrefs.muted;
-        if (typeof savedPrefs.voice === 'boolean' && !params.has('novoice')) voiceOn = savedPrefs.voice;
-        if (typeof savedPrefs.bgm === 'boolean' && !params.has('nobgm') && !params.has('bgm')) bgmOn = savedPrefs.bgm;
-      }
+      applySavedSoundPrefs(savedPrefs);
       const audioSrc = resolveAudioSource(cfg, isRecord);
       if (audioSrc) {
         audio = createMasterAudio(audioSrc);
         audio.muted = isAllMuted() || !voiceOn;
       }
-      const bgmSrc = resolveBgmSource(cfg, isRecord);
-      if (bgmSrc) bgmAudio = createBgmAudio(bgmSrc);
+      const bgmSpec = resolveBgmTrackSpec(cfg, isRecord);
+      if (bgmSpec) bgmAudio = createBgmAudio(bgmSpec);
     }
 
     function getState(nowVal) {
@@ -2028,7 +2147,7 @@
         hasAudio: Boolean(audio),
         hasBgm: Boolean(bgmAudio),
         muted: allOff,
-        voiceOn: !allOff && voiceOn,
+        voiceOn: Boolean(audio || !bgmAudio) && !allOff && voiceOn,
         bgmOn: Boolean(bgmAudio) && !allOff && bgmOn,
         audioTime: audio ? audio.currentTime : null,
         drift: audio && !audio.paused && targetSeekTime == null ? Math.abs(audio.currentTime - nowVal) : 0,
@@ -2335,9 +2454,10 @@
 
   function updateHud() {
     const el = document.getElementById('hud');
-    if (el && !el.classList.contains('is-off')) {
-      el.querySelector('.hud-bar').style.width = clamp(now / V.duration) * 100 + '%';
-    }
+    if (!el || el.classList.contains('is-off') || !(V.duration > 0)) return;
+    const steps = Math.max(400, (V.stageWidth || 1920) * 2);
+    const q = Math.round(clamp(now / V.duration) * steps) / steps;
+    el.querySelector('.hud-bar').style.width = (q * 100).toFixed(4) + '%';
   }
 
   function syncSceneVideoClips(lt) {
@@ -2452,6 +2572,7 @@
     prevRenderNow = now;
     V._now = now;
     V._clock = clock;
+    if (RECORD) V._checkpointsRuntime.syncRecordCheckpoints(now);
     const sc = sceneAt(now);
     syncSceneCtxAndEndState(sc, idle);
     const lt = now - sc.start;
@@ -2467,7 +2588,7 @@
     syncSceneVideoClips(lt);
     activeCueIdx = V._subtitlesRuntime.updateSubs(sc, idx, lt, now, clock, showSubs);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
-    V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: RECORD, playing, scrubbing, pause, play });
+    if (!RECORD) V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: false, playing, scrubbing, pause, play });
     const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false };
     V.emit('onRender', {
       now, clock, alive: clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
@@ -3198,16 +3319,26 @@
     if (tasks.length) await Promise.all(tasks);
   }
 
+  function consumeHmrTime() {
+    try {
+      const raw = sessionStorage.getItem('__video_hmr_t');
+      if (raw == null) return null;
+      sessionStorage.removeItem('__video_hmr_t');
+      const v = parseFloat(raw);
+      return Number.isFinite(v) ? v : 0;
+    } catch {
+      return null;
+    }
+  }
+
   function resolveInitialTime(uiCfg) {
+    const hmrT = consumeHmrTime();
+    if (hmrT != null) return { t: hmrT, resumed: false };
     if (params.has('t')) return { t: parseFloat(params.get('t')) || 0, resumed: false };
     if (params.has('scene')) {
       const sIdx = clamp(+params.get('scene') || 0, 0, Math.max(0, V.scenes.length - 1));
       return { t: V.scenes[sIdx] ? V.scenes[sIdx].start + 0.01 : 0, resumed: false };
     }
-    try {
-      const hmrT = sessionStorage.getItem('__video_hmr_t');
-      if (hmrT != null) { sessionStorage.removeItem('__video_hmr_t'); return { t: parseFloat(hmrT) || 0, resumed: false }; }
-    } catch {}
     const savedT = V._prefsRuntime ? V._prefsRuntime.resolveSavedResumeTime(params, uiCfg, V.duration) : 0;
     return { t: savedT, resumed: savedT > 0 };
   }
@@ -3226,7 +3357,7 @@
 
   function exposeBridge(cfg) {
     window.__video = {
-      duration: V.duration,
+      get duration() { return V.duration; },
       width: V.stageWidth,
       height: V.stageHeight,
       fps: cfg.fps || 30,
@@ -3275,7 +3406,7 @@
           audioPaused: a.audioPaused,
         };
       },
-      scenes: V.scenes.map(s => ({ title: s.title, start: s.start, duration: s.duration, cues: s.cues })),
+      get scenes() { return V.scenes.map(s => ({ title: s.title, start: s.start, duration: s.duration, cues: s.cues })); },
     };
   }
 
@@ -3369,14 +3500,22 @@
     }
   }
 
+  function shouldProbeLocalePack(lang) {
+    if (!lang || V.locales[lang]) return false;
+    if (V.isSecondaryLocale && V.isSecondaryLocale(lang)) return true;
+    const base = V.getBaseLang ? V.getBaseLang() : '';
+    const explicit = Boolean(V.__activeLang || params.get('lang'));
+    return explicit && Boolean(!base || lang.toLowerCase() !== base.toLowerCase());
+  }
+
   async function ensureDynamicBootAssets() {
     const cfg = V.getCfg();
     if (V.scenes.length === 0 && Array.isArray(cfg.sceneScripts)) {
       for (const rel of cfg.sceneScripts) await loadOptionalScript(rel);
     }
     const lang = V.getActiveLang();
+    if (shouldProbeLocalePack(lang)) await loadOptionalScript(`locales/${lang}.js`);
     if (!lang || (V.isSecondaryLocale && !V.isSecondaryLocale(lang))) return;
-    if (!V.locales[lang]) await loadOptionalScript(`locales/${lang}.js`);
     const baseTimings = cfg.timingsScript || 'assets/voice/timings.js';
     const langTimings = baseTimings.replace(/\.js$/i, `.${lang}.js`);
     if (langTimings !== baseTimings) {
@@ -3642,6 +3781,9 @@
       if (ctl.isRecord) return;
       mountChapterSearch(ctl);
       bindTimeDeepLinkCopy(ctl);
+    },
+    onLayout() {
+      cachedIndex = null;
     },
     onSeek(t) {
       if (!V._isRecord) syncAddressBarOnSeek(t);

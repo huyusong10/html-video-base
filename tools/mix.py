@@ -37,14 +37,26 @@ def place_stereo(buf_st, sig_st, at, gain=1.0):
     buf_st[max(i, 0):j] += sig_st[s0:s0 + j - max(i, 0)] * gain
 
 
+def _build_atempo_chain(speed: float) -> str:
+    rem = max(0.05, min(16.0, float(speed)))
+    filters = []
+    while rem > 2.0 + 1e-4:
+        filters.append('atempo=2.0')
+        rem /= 2.0
+    while rem < 0.5 - 1e-4:
+        filters.append('atempo=0.5')
+        rem *= 2.0
+    filters.append(f'atempo={rem:.4f}')
+    return ','.join(filters)
+
+
 def decode_audio_file(path, channels=2, trim_start=0.0, speed=1.0):
     cmd = [FFMPEG, '-v', 'error']
     if trim_start > 0:
         cmd += ['-ss', f'{trim_start:.3f}']
     cmd += ['-i', path]
     if abs(speed - 1.0) > 0.01:
-        clamped = max(0.5, min(2.0, float(speed)))
-        cmd += ['-af', f'atempo={clamped:.4f}']
+        cmd += ['-af', _build_atempo_chain(speed)]
     cmd += ['-f', 'f32le', '-ac', str(channels), '-ar', str(SR), '-']
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0 or not proc.stdout:
@@ -493,13 +505,20 @@ def write_master_output(mix, out, bitrate='128k'):
     if not out.endswith('.m4a'):
         sf.write(out, mix.astype(np.float32), SR)
         return
-    tmp_wav = out + '.tmp.wav'
+    pid = os.getpid()
+    tmp_wav = f'{out}.{pid}.tmp.wav'
+    tmp_m4a = f'{out}.{pid}.tmp.m4a'
     sf.write(tmp_wav, mix.astype(np.float32), SR)
-    subprocess.run([
-        FFMPEG, '-y', '-loglevel', 'error', '-i', tmp_wav,
-        '-c:a', 'aac', '-b:a', normalize_audio_bitrate(bitrate), '-ac', '2', '-ar', '48000', '-movflags', '+faststart', out,
-    ], check=True)
-    os.remove(tmp_wav)
+    try:
+        subprocess.run([
+            FFMPEG, '-y', '-loglevel', 'error', '-i', tmp_wav,
+            '-c:a', 'aac', '-b:a', normalize_audio_bitrate(bitrate), '-ac', '2', '-ar', '48000', '-movflags', '+faststart', tmp_m4a,
+        ], check=True)
+        os.replace(tmp_m4a, out)
+    finally:
+        for p in (tmp_wav, tmp_m4a):
+            if os.path.exists(p):
+                os.remove(p)
 
 
 def _soft_clip(sig):
@@ -523,32 +542,39 @@ def _clip_preserving_stem(sig, stem_mask):
 
 def _write_dual_stems(fg, m, out, bgm_out, dur, bitrate, bgm_bitrate, stem_mask=None):
     fg_s, m_s = _clip_preserving_stem(fg, stem_mask), _soft_clip(m)
-    ref_peak = float(np.abs(fg_s + m_s).max())
+    has_fg = bool(out)
+    ref_sig = (fg_s + m_s) if has_fg else m_s
+    ref_peak = float(np.abs(ref_sig).max())
     scale = (0.95 / ref_peak) if ref_peak > 1e-6 else 1.0
-    write_master_output(fg_s * scale, out, bitrate)
+    if has_fg:
+        write_master_output(fg_s * scale, out, bitrate)
+    bgm_written = False
     if float(np.abs(m).max()) > 1e-5:
         write_master_output(m_s * scale, bgm_out, bgm_bitrate or '96k')
-        print('written', out, '+', bgm_out, round(dur, 1), 's')
-    else:
-        if os.path.exists(bgm_out):
-            os.remove(bgm_out)
-        print('written', out, '(no bgm)', round(dur, 1), 's')
+        bgm_written = True
+    elif os.path.exists(bgm_out):
+        os.remove(bgm_out)
+    label = f'{out} + {bgm_out}' if (has_fg and bgm_written) else (bgm_out if bgm_written else f'{out} (no bgm)')
+    print('written', label, round(dur, 1), 's')
 
 
 def main():
     cues_path, vdir, out = sys.argv[1:4]
     bgm_out = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] else None
+    if not out and not bgm_out:
+        raise RuntimeError('mix.py requires output soundtrack path or bgm output path')
     with open(cues_path, encoding='utf-8') as f:
         data = json.load(f)
 
     dur = max(0.2, float(data['duration']))
     n = int(dur * SR)
-    video_dir = data.get('videoDir') or os.path.dirname(os.path.dirname(os.path.abspath(out)))
+    ref_out = out or bgm_out
+    video_dir = data.get('videoDir') or os.path.dirname(os.path.dirname(os.path.abspath(ref_out)))
     def_e = [0.45, 0.55, 0.62, 0.68, 0.65]
     secs = [dict(s, energy=s.get('energy', def_e[i] if i < len(def_e) else 0.58)) for i, s in enumerate(data['scenes'])]
 
     voice, active, has_voice, stem_mask = mix_voice_track(
-        data['scenes'], vdir, n, fallback_stem_path=out, baked_scenes=data.get('bakedScenes')
+        data['scenes'], vdir, n, fallback_stem_path=(out or None), baked_scenes=data.get('bakedScenes')
     )
     m = build_bgm_track(parse_bgm_cfg(data.get('bgm')), video_dir, dur, n, secs, active, has_voice)
     f = mix_sfx_bus(data, parse_sfx_cfg(data.get('sfx')), video_dir, n)

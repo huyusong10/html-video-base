@@ -193,10 +193,12 @@ export function createMockElement(tag = 'div') {
   };
 }
 
-function isBgmDisabledCfg(cfg) {
-  if (!cfg || cfg.audioSrc === false) return Boolean(cfg && cfg.audioSrc === false);
+const BUILTIN_BGM_PRESETS = new Set(['ambient', 'chiptune', 'none', '']);
+
+export function isBgmDisabledCfg(cfg) {
+  if (!cfg || cfg.bgm === false || cfg.bgm === 'none' || cfg.bgmSrc === false) return true;
+  if (cfg.audioSrc === false && cfg.bgm === undefined && !cfg.bgmSrc) return true;
   const b = cfg.bgm;
-  if (b === false || b === 'none' || cfg.bgmSrc === false) return true;
   if (b && typeof b === 'object') {
     if (b.preset === false || b.preset === 'none') return true;
     if (b.volume !== undefined && Number(b.volume) <= 0) return true;
@@ -204,7 +206,15 @@ function isBgmDisabledCfg(cfg) {
   return false;
 }
 
-function localizeMediaRel(rel, lang) {
+export function extractRawBgmSrc(cfg) {
+  if (!cfg) return null;
+  if (typeof cfg.bgmSrc === 'string' && cfg.bgmSrc) return cfg.bgmSrc;
+  const b = cfg.bgm;
+  if (b && typeof b === 'object') return typeof b.src === 'string' && b.src ? b.src : null;
+  return typeof b === 'string' && !BUILTIN_BGM_PRESETS.has(b) ? b : null;
+}
+
+export function localizeMediaRel(rel, lang) {
   if (!rel || !lang) return rel;
   return rel.replace(/(\.[a-z0-9]+)$/i, `.${lang}$1`);
 }
@@ -331,7 +341,11 @@ export function loadVideoSandbox(root, videoId, { ignoreBaked = false, requireTi
 
   for (const rel of resolveSceneScriptList(videoDir, effCfg)) {
     const full = path.join(videoDir, rel);
+    const before = sandbox.V.scenes.length;
     vm.runInContext(fs.readFileSync(full, 'utf8'), sandbox, { filename: `videos/${videoId}/${rel}` });
+    for (let i = before; i < sandbox.V.scenes.length; i++) {
+      if (sandbox.V.scenes[i]) sandbox.V.scenes[i]._sourceScript = rel;
+    }
   }
 
   sandbox.V.layout();

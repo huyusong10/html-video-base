@@ -3,7 +3,7 @@
 // 用法：node tools/audit-visual.mjs [video-id ...] [--strict] [--lang en] [--screenshots .runtime/audit]
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable, getSandboxCfg } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable, getSandboxCfg, localizeMediaRel } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
 
 function buildSamplePoints(V) {
@@ -258,6 +258,26 @@ async function inspectSamplePoint(page, ctx, pt) {
   }
 }
 
+function collectConfiguredOptSuffixes(cfg, lang = '') {
+  const out = [];
+  for (const raw of [cfg.audioSrc, cfg.bgmSrc, cfg.timingsScript]) {
+    if (typeof raw !== 'string' || !raw.trim()) continue;
+    const clean = '/' + raw.trim().replace(/^\.?\//, '').replace(/\\/g, '/');
+    out.push(clean);
+    if (lang) out.push(localizeMediaRel(clean, lang));
+  }
+  return out;
+}
+
+function isOptionalAuditResponse(urlStr, optSuffixes) {
+  let pathname = urlStr;
+  try { pathname = new URL(urlStr).pathname; } catch {}
+  if (/\/(soundtrack|bgm)(\.[a-z0-9_-]+)?\.(m4a|mp3|wav|ogg)$/i.test(pathname)) return true;
+  if (/\/timings(\.[a-z0-9_-]+)?\.js$/i.test(pathname)) return true;
+  if (pathname.endsWith('/favicon.ico')) return true;
+  return optSuffixes.some(sfx => pathname.endsWith(sfx));
+}
+
 async function auditSingleVideo(browser, port, id, opts) {
   const { lang = '', screenshotDir = '' } = opts;
   const { sandbox } = loadVideoSandbox(ROOT, id, { ignoreBaked: false, requireTimings: false, lang });
@@ -265,6 +285,7 @@ async function auditSingleVideo(browser, port, id, opts) {
   const cfg = getSandboxCfg(V);
   const auditCfg = cfg.audit || {};
   const minFontPx = auditCfg.minFontSize === undefined ? 18 : Number(auditCfg.minFontSize);
+  const optSuffixes = collectConfiguredOptSuffixes(cfg, lang);
 
   const page = await browser.newPage({ viewport: { width: cfg.width || 1920, height: cfg.height || 1080 }, deviceScaleFactor: 1 });
   await page.addInitScript(installPageAuditHelpers);
@@ -273,10 +294,7 @@ async function auditSingleVideo(browser, port, id, opts) {
   page.on('pageerror', err => vErrors.push(`Runtime error: ${err.message}`));
   page.on('response', resp => {
     const u = resp.url();
-    const isOptMedia = /\/(soundtrack|bgm)(\.[a-z0-9_-]+)?\.m4a(\?|$)/i.test(u)
-      || /\/timings\.[a-z0-9_-]+\.js(\?|$)/i.test(u)
-      || u.endsWith('favicon.ico');
-    if (resp.status() >= 400 && !isOptMedia) {
+    if (resp.status() >= 400 && !isOptionalAuditResponse(u, optSuffixes)) {
       vErrors.push(`HTTP ${resp.status()}: ${u}`);
     }
   });

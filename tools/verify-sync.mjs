@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { ROOT, listVideoIds, loadVideoSandbox, resolveFfmpeg, probeSceneAnchors, getSandboxCfg } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, resolveFfmpeg, probeSceneAnchors, getSandboxCfg, isBgmDisabledCfg, extractRawBgmSrc } from './lib/paths.mjs';
 import { writeSubtitleFiles } from './lib/subtitles.mjs';
 import { auditVideos } from './audit-visual.mjs';
 
@@ -220,8 +220,8 @@ function verifyDecodedWaveform(V, cfg, samples, sr, videoId, totalLines, errors)
   console.log(`[${videoId}] Audio verified: V.duration=${V.duration.toFixed(3)}s, m4a=${actualDur.toFixed(3)}s (diff=${durDiff.toFixed(4)}s), scenes=${V.scenes.length}, lines=${totalLines}`);
 }
 
-function verifyBgmStem(videoDir, V, voice, ffmpegBin, errors) {
-  if (!voice.bgmSrc) return;
+function verifyBgmStem(videoDir, V, cfg, voice, ffmpegBin, errors) {
+  if (isBgmDisabledCfg(cfg) || !voice.bgmSrc) return;
   const bgmPath = path.join(videoDir, voice.bgmSrc);
   if (!fs.existsSync(bgmPath)) { errors.push(`Missing physical BGM stem: ${bgmPath}`); return; }
   const sr = 8000;
@@ -237,7 +237,10 @@ function verifyBgmStem(videoDir, V, voice, ffmpegBin, errors) {
 }
 
 function verifyPhysicalAudio(videoId, videoDir, V, cfg, voice, audioRelFallback, ffmpegBin, totalLines, errors) {
-  if (cfg.audioSrc === false || voice.src === false) return;
+  if (cfg.audioSrc === false || voice.src === false) {
+    verifyBgmStem(videoDir, V, cfg, voice, ffmpegBin, errors);
+    return;
+  }
   const audioPath = path.join(videoDir, voice.src || audioRelFallback || 'assets/soundtrack.m4a');
   if (!fs.existsSync(audioPath)) { errors.push(`Missing physical audio file: ${audioPath}`); return; }
   const sr = 16000;
@@ -248,12 +251,26 @@ function verifyPhysicalAudio(videoId, videoDir, V, cfg, voice, audioRelFallback,
   }
   const samples = new Float32Array(dec.stdout.buffer, dec.stdout.byteOffset, Math.floor(dec.stdout.byteLength / 4));
   verifyDecodedWaveform(V, cfg, samples, sr, videoId, totalLines, errors);
-  verifyBgmStem(videoDir, V, voice, ffmpegBin, errors);
+  verifyBgmStem(videoDir, V, cfg, voice, ffmpegBin, errors);
+}
+
+function isVoiceFreeVerified(videoId, videoDir, V, cfg, bgmRel, totalSceneLines, errors) {
+  if (cfg.audioSrc !== false || totalSceneLines > 0 || V.voice) return false;
+  if (!bgmRel) {
+    if (!errors.length) console.log(`[${videoId}] Pure-visual mode verified: V.duration=${V.duration.toFixed(3)}s, scenes=${V.scenes.length}`);
+    return true;
+  }
+  const rawBgm = !isBgmDisabledCfg(cfg) && extractRawBgmSrc(cfg);
+  if (rawBgm && fs.existsSync(path.join(videoDir, rawBgm))) {
+    if (!errors.length) console.log(`[${videoId}] Pure-visual + external BGM verified: V.duration=${V.duration.toFixed(3)}s, bgm=${rawBgm}`);
+    return true;
+  }
+  return false;
 }
 
 export function verifyVideo(videoId, ffmpegBin, lang = '') {
   const errors = [];
-  const { sandbox: dynamicSb, videoDir, audioRel } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: false, lang });
+  const { sandbox: dynamicSb, videoDir, audioRel, bgmRel } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: false, lang });
   const { sandbox: runtimeSb } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: false, requireTimings: false, lang });
   const V = dynamicSb.V;
   const cfg = getSandboxCfg(V);
@@ -262,10 +279,7 @@ export function verifyVideo(videoId, ffmpegBin, lang = '') {
   for (const ae of probeSceneAnchors(dynamicSb)) errors.push(`Broken anchor: ${ae}`);
 
   const totalSceneLines = V.scenes.reduce((acc, sc) => acc + (sc.lines ? sc.lines.length : 0), 0);
-  if (cfg.audioSrc === false && totalSceneLines === 0) {
-    if (!errors.length) console.log(`[${videoId}] Pure-visual mode verified: V.duration=${V.duration.toFixed(3)}s, scenes=${V.scenes.length}`);
-    return errors;
-  }
+  if (isVoiceFreeVerified(videoId, videoDir, V, cfg, bgmRel, totalSceneLines, errors)) return errors;
   if (!V.voice) {
     errors.push(`Missing timings file for '${videoId}'. Run "html-video build ${videoId}".`);
     return errors;
