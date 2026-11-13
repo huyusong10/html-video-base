@@ -224,6 +224,8 @@
       provider: lineObj.provider,
       style: lineObj.style,
       instructions: lineObj.instructions,
+      enSlowdown: lineObj.enSlowdown,
+      align: lineObj.align,
     };
   }
 

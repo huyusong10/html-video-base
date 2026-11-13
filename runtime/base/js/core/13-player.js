@@ -142,6 +142,11 @@
     return { near, cutSc };
   }
 
+  function resolveCutDur(cutSc, cfg, handler) {
+    if (cutSc && cutSc.transitionDur !== undefined) return cutSc.transitionDur;
+    return cfg.transitionDur === undefined ? (handler.dur || 0.28) : cfg.transitionDur;
+  }
+
   function runTransition() {
     const box = document.getElementById('wipe');
     if (!box || V.scenes.length < 2) return;
@@ -154,8 +159,7 @@
       box.innerHTML = '';
       wipeState = { name, handler, dom: handler.mount ? handler.mount(box, cfg) : {} };
     }
-    const dur = cfg.transitionDur === undefined ? (handler.dur || 0.28) : cfg.transitionDur;
-    handler.update(wipeState.dom, near, dur, current, cfg);
+    handler.update(wipeState.dom, near, resolveCutDur(cutSc, cfg, handler), current, cfg);
   }
 
   function updateHud() {
@@ -364,10 +368,7 @@
     if (scrubbing) {
       lastTs = ts;
       pauseBaseTs = ts;
-      if (audioRt && audioRt.canSyncWhileScrubbing()) {
-        const st = audioRt.getState(now);
-        if (st.audioTime != null) render(st.audioTime, 0);
-      } else if (current && current.live) render(now, 0);
+      if (current && current.live) render(now, 0);
     } else if (playing) {
       if (audioRt && audioRt.canUseMasterClock()) advanceAudioClock(ts);
       else advanceWallClock(ts);
@@ -472,11 +473,15 @@
     V.emit('onSubsChange', showSubs);
   }
 
+  function isRedundantSeek(target, ts) {
+    return Math.abs(target - lastSeekTarget) < 0.015 && Math.abs(target - now) < 0.015 && ts - lastSeekAt < 250;
+  }
+
   function seek(t) {
     if (!Number.isFinite(t)) return;
     const target = clamp(t, 0, V.duration - 0.001);
     const ts = performance.now();
-    if (Math.abs(target - lastSeekTarget) < 0.015 && ts - lastSeekAt < 600) return;
+    if (isRedundantSeek(target, ts)) return;
     lastTs = ts;
     pauseBaseTs = ts;
     lastSeekTarget = target;
@@ -594,12 +599,15 @@
     el.addEventListener('pointerdown', e => {
       e.stopPropagation();
       e.preventDefault();
-      const rect = el.getBoundingClientRect(), startX = e.clientX;
+      const startX = e.clientX;
       let dragged = false, uncommittedT = null, lastAudioSeekTs = performance.now();
       scrubbing = true;
       document.body.classList.add('scrubbing');
       if (el.setPointerCapture) el.setPointerCapture(e.pointerId);
-      const toTime = cx => clamp((cx - rect.left) / rect.width) * V.duration;
+      const toTime = cx => {
+        const rect = el.getBoundingClientRect();
+        return clamp((cx - rect.left) / Math.max(1, rect.width)) * V.duration;
+      };
       seek(toTime(e.clientX));
       const mv = ev => {
         if (!dragged && Math.abs(ev.clientX - startX) < 3) return;
@@ -676,6 +684,7 @@
   }
 
   function jumpChapterDelta(delta) {
+    if (!current) return;
     const idx = V.scenes.indexOf(current);
     if (delta > 0 && idx < V.scenes.length - 1) seek(V.scenes[idx + 1].start + 0.01);
     if (delta < 0) seek(V.scenes[Math.max(0, now - current.start < 1.5 ? idx - 1 : idx)].start + 0.01);
@@ -879,9 +888,11 @@
         return;
       }
       if (Math.abs((vid.currentTime || 0) - targetSec) < 0.008 && !vid.seeking) { resolve(); return; }
-      const timer = setTimeout(resolve, 1500);
-      vid.addEventListener('seeked', () => { clearTimeout(timer); resolve(); }, { once: true });
-      try { vid.currentTime = targetSec; } catch { clearTimeout(timer); resolve(); }
+      const done = () => { clearTimeout(timer); vid.removeEventListener('seeked', done); vid.removeEventListener('error', done); resolve(); };
+      const timer = setTimeout(done, 1500);
+      vid.addEventListener('seeked', done, { once: true });
+      vid.addEventListener('error', done, { once: true });
+      try { vid.currentTime = targetSec; } catch { done(); }
     });
   }
 

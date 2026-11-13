@@ -10,6 +10,7 @@
   ];
 
   let subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
+  let appliedSceneSpec = false;
 
   function getSubCfg() {
     const cfg = V.getCfg();
@@ -59,10 +60,16 @@
     if (subCfg.layout || subCfg.position) applySubLayout(subCfg.layout || subCfg.position);
   }
 
-  function syncSceneSubLayout(sc, lt) {
+  function syncSceneSubLayout(sc, lt, subCfg) {
     const spec = sc.subLayout || sc.subtitles;
-    if (!spec) return;
-    applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
+    if (spec) {
+      appliedSceneSpec = true;
+      applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
+      return;
+    }
+    if (!appliedSceneSpec) return;
+    appliedSceneSpec = false;
+    applySubLayout(subCfg.layout || subCfg.position || 'center');
   }
 
   function updateSubDomText(cue) {
@@ -89,17 +96,20 @@
   function updateSubs(sc, idx, lt, now, clock, showSubs) {
     if (!subs) return -1;
     const subCfg = getSubCfg();
-    syncSceneSubLayout(sc, lt);
+    syncSceneSubLayout(sc, lt, subCfg);
     const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
     let cue = null;
     let activeCueIdx = -1;
     sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
     list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
-    subs.style.visibility = cue && showSubs ? 'visible' : 'hidden';
-    if (cue) {
+    const visible = Boolean(cue && showSubs);
+    subs.style.visibility = visible ? 'visible' : 'hidden';
+    if (cue) updateSubDomText(cue);
+    if (visible) {
       const a = Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
       subs.style.opacity = String(clamp(a));
-      updateSubDomText(cue);
+    } else {
+      subs.style.opacity = '0';
     }
     runSubHook(subCfg, cue, sc, idx, lt, now, clock, activeCueIdx);
     return activeCueIdx;

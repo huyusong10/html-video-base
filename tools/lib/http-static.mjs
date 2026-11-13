@@ -2,7 +2,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR } from './paths.mjs';
+import { VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR, listVideoIds, loadVideoSandbox } from './paths.mjs';
 
 export const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -29,8 +29,50 @@ export const MIME = {
 };
 
 function isInsideDir(filePath, dirPath) {
-  const rel = path.relative(dirPath, filePath);
+  const rel = path.relative(path.resolve(dirPath), path.resolve(filePath));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function safeDecodePath(rawPath) {
+  try { return decodeURIComponent(rawPath); } catch { return null; }
+}
+
+function pipeFileSafe(res, fp, opts) {
+  const stream = fs.createReadStream(fp, opts);
+  stream.on('error', () => {
+    if (!res.headersSent) res.writeHead(500);
+    res.end();
+  });
+  res.on('close', () => stream.destroy());
+  stream.pipe(res);
+}
+
+function buildLiveManifestItem(projectRoot, id) {
+  try {
+    const { sandbox } = loadVideoSandbox(projectRoot, id, { ignoreBaked: false, requireTimings: false });
+    const cfg = Object.assign({}, sandbox.V.themeDefaults || {}, sandbox.V.config || {});
+    return {
+      id,
+      title: cfg.title || id,
+      subtitle: cfg.subtitle || cfg.description || '',
+      description: cfg.description || cfg.subtitle || '',
+      duration: Math.round((sandbox.V.duration || 0) * 10) / 10,
+      scenes: (sandbox.V.scenes || []).length,
+      width: cfg.width || 1920,
+      height: cfg.height || 1080,
+      path: `./${id}/index.html`,
+    };
+  } catch {
+    return { id, title: id, subtitle: '', description: '', duration: 0, scenes: 0, width: 1920, height: 1080, path: `./${id}/index.html` };
+  }
+}
+
+function serveVirtualManifest(res, videosDir) {
+  const projectRoot = path.dirname(path.resolve(videosDir));
+  const items = listVideoIds(videosDir).map(id => buildLiveManifestItem(projectRoot, id));
+  const body = `window.VIDEO_MANIFEST = ${JSON.stringify(items, null, 2)};\n`;
+  res.writeHead(200, { 'Content-Type': MIME['.js'], 'Cache-Control': 'no-cache' });
+  res.end(body);
 }
 
 function resolveVirtualFile(pathname, videosDir) {
@@ -67,7 +109,7 @@ function serveRangeResponse(req, res, fp, size, contentType) {
     'Content-Length': end - start + 1,
     'Cache-Control': 'no-cache',
   });
-  fs.createReadStream(fp, { start, end }).pipe(res);
+  pipeFileSafe(res, fp, { start, end });
   return true;
 }
 
@@ -110,8 +152,14 @@ export function createVideoHttpServer({ videosDir = VIDEOS_DIR, watch = false } 
       return;
     }
 
-    const fp = resolveVirtualFile(decodeURIComponent(u.pathname), videosDir);
-    if (!fp) { res.writeHead(404).end('Not Found'); return; }
+    const decodedPath = safeDecodePath(u.pathname);
+    if (!decodedPath) { res.writeHead(400).end('Bad Request'); return; }
+    const fp = resolveVirtualFile(decodedPath, videosDir);
+    if (!fp) {
+      if (decodedPath === '/manifest.js') { serveVirtualManifest(res, videosDir); return; }
+      res.writeHead(404).end('Not Found');
+      return;
+    }
 
     const stat = fs.statSync(fp);
     if (stat.isDirectory()) { res.writeHead(302, { Location: u.pathname + '/' + u.search }).end(); return; }
@@ -125,7 +173,7 @@ export function createVideoHttpServer({ videosDir = VIDEOS_DIR, watch = false } 
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-cache',
     });
-    fs.createReadStream(fp).pipe(res);
+    pipeFileSafe(res, fp);
   });
 
   const origClose = srv.close.bind(srv);

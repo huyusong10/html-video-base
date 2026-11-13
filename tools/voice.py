@@ -77,15 +77,19 @@ def merge_en_spans(words):
 
 
 def stretch_span(seg, tmp_base, ratio=0.78):
-    if ratio >= 0.99 or len(seg) < int(0.08 * 24000):
+    clamped = max(0.5, min(2.0, float(ratio)))
+    if clamped >= 0.99 or len(seg) < int(0.08 * 24000):
         return seg
     s_in, s_out = tmp_base + '.sin.wav', tmp_base + '.sout.wav'
     sf.write(s_in, seg, 24000)
-    subprocess.run([FFMPEG, '-y', '-loglevel', 'error', '-i', s_in, '-af', f'atempo={ratio}', s_out], check=True)
-    y_st, _ = sf.read(s_out, dtype='float32')
-    os.remove(s_in)
-    os.remove(s_out)
-    return y_st
+    try:
+        subprocess.run([FFMPEG, '-y', '-loglevel', 'error', '-i', s_in, '-af', f'atempo={clamped}', s_out], check=True)
+        y_st, _ = sf.read(s_out, dtype='float32')
+        return y_st
+    finally:
+        for tmp in (s_in, s_out):
+            if os.path.exists(tmp):
+                os.remove(tmp)
 
 
 def _remap_word_time(t0: float, shifts: list) -> float:
@@ -215,11 +219,13 @@ def align_words_acoustic(y: np.ndarray, sr: int, spoken: str, wav_path: str, cfg
 
 
 def post_process_audio(src_audio, raw_wav, out_wav, words, en_ratio, spoken, cfg):
-    subprocess.run([FFMPEG, '-y', '-loglevel', 'error', '-i', src_audio, '-ar', '24000', '-ac', '1', raw_wav], check=True)
-    y, _ = sf.read(raw_wav, dtype='float32')
-    for tmp in (src_audio, raw_wav):
-        if os.path.exists(tmp):
-            os.remove(tmp)
+    try:
+        subprocess.run([FFMPEG, '-y', '-loglevel', 'error', '-i', src_audio, '-ar', '24000', '-ac', '1', raw_wav], check=True)
+        y, _ = sf.read(raw_wav, dtype='float32')
+    finally:
+        for tmp in (src_audio, raw_wav):
+            if os.path.exists(tmp):
+                os.remove(tmp)
     y, adj_words = apply_en_slowdown(y, words, out_wav, en_ratio)
     y, trim_s = trim(y)
     if adj_words:

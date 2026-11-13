@@ -205,7 +205,7 @@
     const k = fn(rawK);
     const snap = d <= 0 || rawK >= (kf.switchAt === undefined ? 0.5 : kf.switchAt);
     for (const [key, val] of Object.entries(kf)) {
-      if (!KF_META.has(key) && val != null) blendKeyframeProp(state, key, val, k, snap);
+      if (!KF_META.has(key) && val !== undefined) blendKeyframeProp(state, key, val, k, snap);
     }
   }
 
@@ -718,6 +718,8 @@
       provider: lineObj.provider,
       style: lineObj.style,
       instructions: lineObj.instructions,
+      enSlowdown: lineObj.enSlowdown,
+      align: lineObj.align,
     };
   }
 
@@ -1442,6 +1444,7 @@
   ];
 
   let subs = null, subLead = null, subTail = null, subSpeaker = null, subText = null;
+  let appliedSceneSpec = false;
 
   function getSubCfg() {
     const cfg = V.getCfg();
@@ -1491,10 +1494,16 @@
     if (subCfg.layout || subCfg.position) applySubLayout(subCfg.layout || subCfg.position);
   }
 
-  function syncSceneSubLayout(sc, lt) {
+  function syncSceneSubLayout(sc, lt, subCfg) {
     const spec = sc.subLayout || sc.subtitles;
-    if (!spec) return;
-    applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
+    if (spec) {
+      appliedSceneSpec = true;
+      applySubLayout(typeof spec === 'function' ? spec(lt, sc.ctx, sc) : spec);
+      return;
+    }
+    if (!appliedSceneSpec) return;
+    appliedSceneSpec = false;
+    applySubLayout(subCfg.layout || subCfg.position || 'center');
   }
 
   function updateSubDomText(cue) {
@@ -1521,17 +1530,20 @@
   function updateSubs(sc, idx, lt, now, clock, showSubs) {
     if (!subs) return -1;
     const subCfg = getSubCfg();
-    syncSceneSubLayout(sc, lt);
+    syncSceneSubLayout(sc, lt, subCfg);
     const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
     let cue = null;
     let activeCueIdx = -1;
     sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
     list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
-    subs.style.visibility = cue && showSubs ? 'visible' : 'hidden';
-    if (cue) {
+    const visible = Boolean(cue && showSubs);
+    subs.style.visibility = visible ? 'visible' : 'hidden';
+    if (cue) updateSubDomText(cue);
+    if (visible) {
       const a = Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
       subs.style.opacity = String(clamp(a));
-      updateSubDomText(cue);
+    } else {
+      subs.style.opacity = '0';
     }
     runSubHook(subCfg, cue, sc, idx, lt, now, clock, activeCueIdx);
     return activeCueIdx;
@@ -1558,10 +1570,32 @@
     const { params, isRecord } = hooks;
     let audio = null, bgmAudio = null, playbackRate = 1;
     let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm'), muted = false;
-    let audioBlocked = false, playPending = false, bgmPlayPending = false, targetSeekTime = null;
+    let audioBlocked = false, unlockArmed = false, playPending = false, bgmPlayPending = false, targetSeekTime = null;
 
     function isAllMuted() {
       return muted || (!voiceOn && (!bgmAudio || !bgmOn));
+    }
+
+    function resolveRefTime() {
+      if (targetSeekTime != null) return targetSeekTime;
+      if (audio && !audio.paused && !audioBlocked && audio.readyState >= 1) return audio.currentTime;
+      return hooks.getNow();
+    }
+
+    function unlockBlockedAudio() {
+      unlockArmed = false;
+      document.removeEventListener('pointerdown', unlockBlockedAudio, true);
+      document.removeEventListener('keydown', unlockBlockedAudio, true);
+      if (!audioBlocked) return;
+      audioBlocked = false;
+      if (hooks.isPlaying()) startPlayback();
+    }
+
+    function armBlockedUnlock() {
+      if (unlockArmed) return;
+      unlockArmed = true;
+      document.addEventListener('pointerdown', unlockBlockedAudio, true);
+      document.addEventListener('keydown', unlockBlockedAudio, true);
     }
 
     function safePlayAudio() {
@@ -1571,7 +1605,10 @@
       const p = audio.play();
       if (p && typeof p.then === 'function') {
         p.then(() => { playPending = false; audioBlocked = false; })
-         .catch(err => { playPending = false; if (err && err.name === 'NotAllowedError') audioBlocked = true; });
+         .catch(err => {
+           playPending = false;
+           if (err && err.name === 'NotAllowedError') { audioBlocked = true; armBlockedUnlock(); }
+         });
       } else {
         playPending = false;
       }
@@ -1594,7 +1631,7 @@
       bgmAudio.muted = isAllMuted() || !bgmOn;
       bgmAudio.playbackRate = playbackRate;
       if (!hooks.isPlaying() || bgmAudio.muted) { bgmAudio.pause(); return; }
-      const refT = audio && audio.readyState >= 1 ? audio.currentTime : hooks.getNow();
+      const refT = resolveRefTime();
       if (bgmAudio.readyState >= 1 && Math.abs(bgmAudio.currentTime - refT) > 0.18) {
         try { bgmAudio.currentTime = refT; } catch {}
       }
@@ -1661,6 +1698,7 @@
     }
 
     function syncAudioBeforePlay() {
+      if (!audio) return;
       const target = targetSeekTime != null ? targetSeekTime : hooks.getNow();
       if (Math.abs(audio.currentTime - target) > 0.15) {
         try { audio.currentTime = target; targetSeekTime = null; hooks.markSeekApplied(target); }
@@ -1709,11 +1747,6 @@
       return Boolean(audio && !audioBlocked);
     }
 
-    function canSyncWhileScrubbing() {
-      if (!hooks.isPlaying() || !audio) return false;
-      return !audio.paused && !audio.seeking && audio.readyState >= 2 && targetSeekTime == null;
-    }
-
     function tickMasterClock() {
       if (targetSeekTime == null && !audio.paused && !audio.seeking && audio.readyState >= 2) {
         keepBgmInSync(audio.currentTime);
@@ -1740,7 +1773,6 @@
       el.addEventListener('ended', () => { if (hooks.isPlaying() && targetSeekTime == null) hooks.onEnded(); });
       el.addEventListener('error', () => {
         if (audio === el) { audio = null; if (!isRecord) hooks.onSoundUI(); }
-        audioBlocked = true;
       });
       document.addEventListener('visibilitychange', () => {
         if (!document.hidden && hooks.isPlaying() && !el.paused && !el.seeking && targetSeekTime == null && el.readyState >= 2) hooks.onVisibilitySync(el.currentTime);
@@ -1756,7 +1788,7 @@
       el.muted = isAllMuted() || !bgmOn;
       el.addEventListener('loadedmetadata', () => {
         el.playbackRate = playbackRate;
-        const refT = audio && audio.readyState >= 1 ? audio.currentTime : hooks.getNow();
+        const refT = resolveRefTime();
         if (refT > 0.05) { try { el.currentTime = refT; } catch {} }
         if (hooks.isPlaying() && !el.muted && el.paused) safePlayBgm();
       });
@@ -1807,7 +1839,7 @@
     return {
       initTracks, startPlayback, pausePlayback, seekTracks, setRate,
       setBgm, setVoice, setMuted, toggleVoiceFromMenu, toggleBgmFromMenu,
-      isAllMuted, resolveSoundBtnSpec, canUseMasterClock, canSyncWhileScrubbing,
+      isAllMuted, resolveSoundBtnSpec, canUseMasterClock,
       tickMasterClock, hasBgm: () => Boolean(bgmAudio), getState,
     };
   };
@@ -2048,6 +2080,11 @@
     return { near, cutSc };
   }
 
+  function resolveCutDur(cutSc, cfg, handler) {
+    if (cutSc && cutSc.transitionDur !== undefined) return cutSc.transitionDur;
+    return cfg.transitionDur === undefined ? (handler.dur || 0.28) : cfg.transitionDur;
+  }
+
   function runTransition() {
     const box = document.getElementById('wipe');
     if (!box || V.scenes.length < 2) return;
@@ -2060,8 +2097,7 @@
       box.innerHTML = '';
       wipeState = { name, handler, dom: handler.mount ? handler.mount(box, cfg) : {} };
     }
-    const dur = cfg.transitionDur === undefined ? (handler.dur || 0.28) : cfg.transitionDur;
-    handler.update(wipeState.dom, near, dur, current, cfg);
+    handler.update(wipeState.dom, near, resolveCutDur(cutSc, cfg, handler), current, cfg);
   }
 
   function updateHud() {
@@ -2270,10 +2306,7 @@
     if (scrubbing) {
       lastTs = ts;
       pauseBaseTs = ts;
-      if (audioRt && audioRt.canSyncWhileScrubbing()) {
-        const st = audioRt.getState(now);
-        if (st.audioTime != null) render(st.audioTime, 0);
-      } else if (current && current.live) render(now, 0);
+      if (current && current.live) render(now, 0);
     } else if (playing) {
       if (audioRt && audioRt.canUseMasterClock()) advanceAudioClock(ts);
       else advanceWallClock(ts);
@@ -2378,11 +2411,15 @@
     V.emit('onSubsChange', showSubs);
   }
 
+  function isRedundantSeek(target, ts) {
+    return Math.abs(target - lastSeekTarget) < 0.015 && Math.abs(target - now) < 0.015 && ts - lastSeekAt < 250;
+  }
+
   function seek(t) {
     if (!Number.isFinite(t)) return;
     const target = clamp(t, 0, V.duration - 0.001);
     const ts = performance.now();
-    if (Math.abs(target - lastSeekTarget) < 0.015 && ts - lastSeekAt < 600) return;
+    if (isRedundantSeek(target, ts)) return;
     lastTs = ts;
     pauseBaseTs = ts;
     lastSeekTarget = target;
@@ -2500,12 +2537,15 @@
     el.addEventListener('pointerdown', e => {
       e.stopPropagation();
       e.preventDefault();
-      const rect = el.getBoundingClientRect(), startX = e.clientX;
+      const startX = e.clientX;
       let dragged = false, uncommittedT = null, lastAudioSeekTs = performance.now();
       scrubbing = true;
       document.body.classList.add('scrubbing');
       if (el.setPointerCapture) el.setPointerCapture(e.pointerId);
-      const toTime = cx => clamp((cx - rect.left) / rect.width) * V.duration;
+      const toTime = cx => {
+        const rect = el.getBoundingClientRect();
+        return clamp((cx - rect.left) / Math.max(1, rect.width)) * V.duration;
+      };
       seek(toTime(e.clientX));
       const mv = ev => {
         if (!dragged && Math.abs(ev.clientX - startX) < 3) return;
@@ -2582,6 +2622,7 @@
   }
 
   function jumpChapterDelta(delta) {
+    if (!current) return;
     const idx = V.scenes.indexOf(current);
     if (delta > 0 && idx < V.scenes.length - 1) seek(V.scenes[idx + 1].start + 0.01);
     if (delta < 0) seek(V.scenes[Math.max(0, now - current.start < 1.5 ? idx - 1 : idx)].start + 0.01);
@@ -2785,9 +2826,11 @@
         return;
       }
       if (Math.abs((vid.currentTime || 0) - targetSec) < 0.008 && !vid.seeking) { resolve(); return; }
-      const timer = setTimeout(resolve, 1500);
-      vid.addEventListener('seeked', () => { clearTimeout(timer); resolve(); }, { once: true });
-      try { vid.currentTime = targetSec; } catch { clearTimeout(timer); resolve(); }
+      const done = () => { clearTimeout(timer); vid.removeEventListener('seeked', done); vid.removeEventListener('error', done); resolve(); };
+      const timer = setTimeout(done, 1500);
+      vid.addEventListener('seeked', done, { once: true });
+      vid.addEventListener('error', done, { once: true });
+      try { vid.currentTime = targetSec; } catch { done(); }
     });
   }
 

@@ -108,7 +108,11 @@
   <script src="manifest.js"></script>
   <script>
     const items = Array.isArray(window.VIDEO_MANIFEST) ? window.VIDEO_MANIFEST : [];
-    const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const fmt = s => {
+      const sec = Math.max(0, Math.round(Number(s) || 0));
+      return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    };
     document.getElementById('count').textContent = `${items.length} 支视频`;
     const list = document.getElementById('list');
 
@@ -116,21 +120,23 @@
       list.innerHTML = '<div class="empty">暂无视频 · 运行 <code>npm run init -- demo</code> 创建第一支视频</div>';
     } else {
       for (const it of items) {
+        const sub = it.subtitle || it.description || '';
+        const idHref = encodeURIComponent(it.id);
         const row = document.createElement('div');
         row.className = 'row';
         row.innerHTML = `
           <div class="row-main">
             <div class="row-head">
-              <span class="row-id">${it.id}</span>
-              <span class="row-title">${it.title || it.id}</span>
+              <span class="row-id">${esc(it.id)}</span>
+              <span class="row-title">${esc(it.title || it.id)}</span>
             </div>
-            ${it.subtitle ? `<div class="row-sub">${it.subtitle}</div>` : ''}
+            ${sub ? `<div class="row-sub">${esc(sub)}</div>` : ''}
           </div>
           <div class="row-tags">
-            <span class="tag">${it.width || 1920}×${it.height || 1080}</span>
-            <span class="tag">${it.scenes || 0} 幕 · ${fmt(it.duration || 0)}</span>
-            <a class="btn" href="${it.id}/?dev=1">调试</a>
-            <a class="btn primary" href="${it.id}/">▶ 播放</a>
+            <span class="tag">${Number(it.width) || 1920}×${Number(it.height) || 1080}</span>
+            <span class="tag">${Number(it.scenes) || 0} 幕 · ${fmt(it.duration)}</span>
+            <a class="btn" href="${idHref}/?dev=1">调试</a>
+            <a class="btn primary" href="${idHref}/">▶ 播放</a>
           </div>`;
         list.appendChild(row);
       }

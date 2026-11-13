@@ -87,11 +87,15 @@ function resolveTimeWindow(scenes, fullDur, hasAudio, opts) {
   return { startSec: 0, endSec: fullDur + (hasAudio ? 0.4 : 0), isSlice: false };
 }
 
-function hashFilesInDir(h, dir, extFilter) {
+function hashFilesInDir(h, dir, extFilter, recursive = false) {
   if (!fs.existsSync(dir)) return;
   for (const name of fs.readdirSync(dir).sort()) {
     const fp = path.join(dir, name);
-    if (fs.statSync(fp).isFile() && (!extFilter || extFilter(name))) {
+    const st = fs.statSync(fp);
+    if (st.isDirectory() && recursive) {
+      h.update(name + '/');
+      hashFilesInDir(h, fp, extFilter, true);
+    } else if (st.isFile() && (!extFilter || extFilter(name))) {
       h.update(name);
       h.update(fs.readFileSync(fp));
     }
@@ -100,7 +104,7 @@ function hashFilesInDir(h, dir, extFilter) {
 
 function computeSharedVideoDigest(videoDir, W, H, fps, lang) {
   const h = crypto.createHash('sha256');
-  h.update(JSON.stringify({ v: '2.0', W, H, fps, lang }));
+  h.update(JSON.stringify({ v: '2.1', W, H, fps, lang }));
   for (const rel of ['css/base.css', 'js/engine.js', 'js/gl.js']) {
     const fp = resolveBaseFile(rel, VIDEOS_DIR);
     if (fs.existsSync(fp)) h.update(fs.readFileSync(fp));
@@ -109,17 +113,23 @@ function computeSharedVideoDigest(videoDir, W, H, fps, lang) {
     const fp = path.join(videoDir, rel);
     if (fs.existsSync(fp)) h.update(fs.readFileSync(fp));
   }
-  hashFilesInDir(h, path.join(videoDir, 'css'), n => n.endsWith('.css'));
-  hashFilesInDir(h, path.join(VIDEOS_DIR, 'themes'), n => n.endsWith('.css') || n.endsWith('.js'));
+  hashFilesInDir(h, videoDir, n => n.endsWith('.css'), false);
+  hashFilesInDir(h, path.join(videoDir, 'css'), n => n.endsWith('.css'), true);
+  hashFilesInDir(h, path.join(VIDEOS_DIR, 'themes'), n => n.endsWith('.css') || n.endsWith('.js'), true);
   const compJs = path.join(videoDir, 'js/components.js');
   if (fs.existsSync(compJs)) h.update(fs.readFileSync(compJs));
   return h.digest('hex');
 }
 
+function serializeSubSpec(spec) {
+  return typeof spec === 'function' ? spec.toString() : JSON.stringify(spec || null);
+}
+
 function serializeSceneCode(V, sc) {
   if (!sc) return '';
   const parts = [
-    sc.id, sc.title, sc.transition, sc.transitionDur,
+    sc.id, sc.title, sc.cls, sc.transition, sc.transitionDur,
+    serializeSubSpec(sc.subLayout || sc.subtitles),
     sc.build && sc.build.toString(),
     sc.update && sc.update.toString(),
     sc.gl && sc.gl.toString(),
@@ -129,6 +139,12 @@ function serializeSceneCode(V, sc) {
     parts.push(typeof fn === 'function' ? fn.toString() : JSON.stringify(fn));
   }
   return parts.join('|');
+}
+
+function nextCutSignature(scenes, si) {
+  const next = si + 1 < scenes.length ? scenes[si + 1] : null;
+  if (!next) return '';
+  return `${next.transition || ''}:${next.transitionDur === undefined ? '' : next.transitionDur}`;
 }
 
 function buildCachedSceneSegments(V, videoId, videoDir, totalFrames, W, H, fps, lang) {
@@ -146,11 +162,12 @@ function buildCachedSceneSegments(V, videoId, videoDir, totalFrames, W, H, fps, 
     const f1 = Math.max(f0, bounds[si + 1]);
     if (f1 <= f0) continue;
     const sc = scenes[si];
-    const prevSc = si > 0 && Number(sc.transitionDur || 0) > 0 ? scenes[si - 1] : null;
+    const prevSc = si > 0 ? scenes[si - 1] : null;
     const h = crypto.createHash('sha256');
     h.update(sharedHash);
     h.update(serializeSceneCode(V, sc));
     h.update(serializeSceneCode(V, prevSc));
+    h.update(nextCutSignature(scenes, si));
     h.update(JSON.stringify({
       frames: f1 - f0,
       phase: Math.round((f0 / fps - sc.start) * 10000),

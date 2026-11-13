@@ -262,8 +262,10 @@ async function auditSingleVideo(browser, port, id, opts) {
 
   page.on('pageerror', err => vErrors.push(`Runtime error: ${err.message}`));
   page.on('response', resp => {
-    if (resp.status() >= 400 && !resp.url().endsWith('soundtrack.m4a') && !resp.url().endsWith('favicon.ico')) {
-      vErrors.push(`HTTP ${resp.status()}: ${resp.url()}`);
+    const u = resp.url();
+    const isOptMedia = /\/(soundtrack|bgm)(\.[a-z0-9_-]+)?\.m4a(\?|$)/i.test(u) || u.endsWith('favicon.ico');
+    if (resp.status() >= 400 && !isOptMedia) {
+      vErrors.push(`HTTP ${resp.status()}: ${u}`);
     }
   });
 

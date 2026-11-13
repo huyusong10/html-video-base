@@ -46,7 +46,7 @@
     const k = fn(rawK);
     const snap = d <= 0 || rawK >= (kf.switchAt === undefined ? 0.5 : kf.switchAt);
     for (const [key, val] of Object.entries(kf)) {
-      if (!KF_META.has(key) && val != null) blendKeyframeProp(state, key, val, k, snap);
+      if (!KF_META.has(key) && val !== undefined) blendKeyframeProp(state, key, val, k, snap);
     }
   }
 

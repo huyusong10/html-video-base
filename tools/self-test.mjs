@@ -107,8 +107,8 @@ function writeTestProjectFiles(videoDir) {
 
   fs.writeFileSync(path.join(videoDir, 'js/s01.js'), [
     'V.scene({',
-    '  id: "s01", title: "微内核架构",',
-    '  lines: ["欢迎体验关键微内核时间轴引擎。"],',
+    '  id: "s01", title: "微内核架构", subLayout: "mascotLeft",',
+    '  lines: [{ text: "欢迎体验关键微内核时间轴引擎。", enSlowdown: 0.9, align: "acoustic" }],',
     '  checkpoints: x => [{ at: 0.45, id: "cp-1", prompt: "继续演示？", actions: [{ label: "继续", resume: true }] }],',
     '  build(root, x) {',
     '    const badge = V.c.badge("OPEN-KERNEL");',
@@ -129,7 +129,7 @@ function writeTestProjectFiles(videoDir) {
     'V.scene({',
     '  id: "s02", title: "纯函数校验", live: true, transition: "zoomFade", transitionDur: 0.35,',
     '  lines: ["所有画面仅由时间纯函数唯一决定。"],',
-    '  build(root) { root.append(V.u.h("div", { class: "s2-box" }, "PURE F(T)")); },',
+    '  build(root) { root.append(V.u.h("div", { class: "s2-box", "data-ref": "../assets/shared.svg" }, "PURE F(T)")); },',
     '  update(t) { window.__s2LiveT = t; },',
     '});',
     '',
@@ -328,15 +328,44 @@ async function verifyPlayerBarContracts(page, port) {
   await verifySearchAndDeepLinkContract(page);
   await verifyDualStemBgmContract(page);
   await verifyV26ExperienceContracts(page);
+  await verifyBugfixRegressions(page, port);
   await verifyIframeWebFullContract(page, port);
+}
+
+async function verifyBugfixRegressions(page, port) {
+  const badUrlRes = await fetch(`http://127.0.0.1:${port}/%E0%A4%A`);
+  assert.equal(badUrlRes.status, 400, 'Malformed URI path must return 400 without crashing HTTP server');
+  const liveManifestRes = await fetch(`http://127.0.0.1:${port}/manifest.js`);
+  assert.equal(liveManifestRes.status, 200, 'Dev server must synthesize virtual /manifest.js for hub index');
+  const liveManifestTxt = await liveManifestRes.text();
+  assert.ok(liveManifestTxt.includes('"demo"'), 'Virtual /manifest.js must include live video entry');
+
+  const rt = await page.evaluate(() => {
+    const subs = document.getElementById('subs');
+    window.__video.seek(0.2);
+    const posS1 = subs.dataset.subPos;
+    window.__video.seek(window.V.scenes[1].start + 0.2);
+    const posS2 = subs.dataset.subPos;
+    window.__video.seek(0.35);
+    window.__video.seekVisual(1.4);
+    window.__video.seek(0.35);
+    const backNow = window.__video.getSyncState().now;
+    const cue0 = window.V.scenes[0].cues[0];
+    return { posS1, posS2, backNow, enSlowdown: cue0.enSlowdown, align: cue0.align };
+  });
+  assert.equal(rt.posS1, 'left', 'Scene 1 declarative subLayout must apply');
+  assert.equal(rt.posS2, 'center', 'Entering Scene 2 without subLayout must reset #subs back to center');
+  assert.ok(Math.abs(rt.backNow - 0.35) < 0.03, `Rapid scrub-back seek must not be dropped by dedupe guard, got ${rt.backNow}`);
+  assert.equal(rt.enSlowdown, 0.9, 'Per-line enSlowdown override must survive timeline buildCueEntry');
+  assert.equal(rt.align, 'acoustic', 'Per-line align override must survive timeline buildCueEntry');
 }
 
 async function verifyV26ExperienceContracts(page) {
   const kf = await page.evaluate(() => {
     const stops = [
-      { at: 0, x: 100, scale: 1, pose: 'wave' },
+      { at: 0, x: 100, scale: 1, pose: 'wave', badge: 'NEW' },
       { at: 1.0, x: 300, scale: 1.5, dur: 0.5, pose: 'point' },
-      { at: 2.2, x: 500, dur: 0.4, pose: 'nod' },
+      { at: 2.2, x: 500, dur: 0.4, pose: 'nod', badge: null },
     ];
     return {
       s0: window.V.u.keyframes(0.4, stops),
@@ -346,10 +375,12 @@ async function verifyV26ExperienceContracts(page) {
   });
   assert.equal(kf.s0.x, 100, 'keyframes() before stop 1 must hold initial numeric value');
   assert.equal(kf.s0.pose, 'wave', 'keyframes() before stop 1 must hold initial string state');
+  assert.equal(kf.s0.badge, 'NEW', 'keyframes() must seed discrete prop');
   assert.ok(kf.s1.x > 140 && kf.s1.x < 260, `keyframes() mid-transition must smoothly interpolate x, got ${kf.s1.x}`);
   assert.equal(kf.s1.pose, 'point', 'keyframes() past midpoint must switch discrete string state');
   assert.equal(kf.s2.x, 500, 'keyframes() after final stop must settle at target x');
   assert.equal(kf.s2.scale, 1.5, 'keyframes() must inherit omitted numeric props from previous stops');
+  assert.equal(kf.s2.badge, null, 'keyframes() must allow resetting discrete prop to null');
 
   await page.evaluate(() => { window.__video.pause(); window.__video.seek(0.2); });
   const trackBox = await page.locator('#controls .track').boundingBox();
@@ -555,6 +586,9 @@ async function main() {
     const out2 = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
     assert.ok(out2.includes('2/2 scenes hit'), `Second render must hit 2/2 scene cache, got:\n${out2}`);
     assert.ok(out2.includes('+ audio+bgm'), `Default render must mix audio+bgm, got:\n${out2}`);
+    fs.appendFileSync(path.join(videoDir, 'style.css'), '\n.s2-box { letter-spacing: 0.02em; }\n', 'utf8');
+    const outCssChanged = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
+    assert.ok(outCssChanged.includes('0/2 scenes hit'), `Editing style.css must invalidate scene render cache, got:\n${outCssChanged}`);
     const outNoBgm = path.join(TEST_ROOT, 'demo-nobgm.mp4');
     const out3 = runCliCmd(['render', 'demo', outNoBgm, '--fps', '10', '--no-bgm']);
     assert.ok(fs.existsSync(outNoBgm) && out3.includes('+ audio ->'), `--no-bgm render must mux voice-only stem, got:\n${out3}`);
@@ -570,6 +604,7 @@ async function main() {
     assert.ok(fs.existsSync(path.join(singleDir, 'index.html')), 'Single bundle root index.html should exist');
     assert.ok(fs.existsSync(path.join(singleDir, 'base/js/engine.js')), 'Single bundle base/js/engine.js should exist');
     assert.ok(fs.readFileSync(path.join(singleDir, 'index.html'), 'utf8').includes('./base/js/engine.js'), 'Single bundle index.html must rewrite ../base/ -> ./base/');
+    assert.ok(fs.readFileSync(path.join(singleDir, 'js/s02.js'), 'utf8').includes('./assets/shared.svg'), 'Single bundle js/* must rewrite document-relative ../assets/ -> ./assets/');
 
     console.log('✅ All html-video-base v2.6 end-to-end self-tests PASSED.');
   } finally {

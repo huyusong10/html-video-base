@@ -30,17 +30,20 @@ function copyIfExists(src, dst) {
 
 function rewriteTextRefs(filePath, replacements) {
   if (!fs.existsSync(filePath)) return;
-  let code = fs.readFileSync(filePath, 'utf8');
+  const code = fs.readFileSync(filePath, 'utf8');
   let next = code;
-  for (const [from, to] of replacements) next = next.replaceAll(from, to);
+  for (const [pattern, to] of replacements) {
+    next = pattern instanceof RegExp ? next.replace(pattern, to) : next.replaceAll(pattern, to);
+  }
   if (next !== code) fs.writeFileSync(filePath, next, 'utf8');
 }
 
-function rewriteDirFiles(dirPath, exts, replacements) {
+function rewriteDirFiles(dirPath, exts, replacements, recursive = false) {
   if (!fs.existsSync(dirPath)) return;
   for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-    if (!entry.isFile() || !exts.some(ext => entry.name.endsWith(ext))) continue;
-    rewriteTextRefs(path.join(dirPath, entry.name), replacements);
+    const full = path.join(dirPath, entry.name);
+    if (entry.isDirectory() && recursive) rewriteDirFiles(full, exts, replacements, true);
+    else if (entry.isFile() && exts.some(ext => entry.name.endsWith(ext))) rewriteTextRefs(full, replacements);
   }
 }
 
@@ -59,18 +62,14 @@ export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
   copyIfExists(path.join(videosDir, 'themes'), path.join(targetOut, 'themes'));
   fs.cpSync(srcVideo, targetOut, { recursive: true, force: true });
 
-  rewriteDirFiles(targetOut, ['.html', '.css', '.js', '.mjs'], [
-    ['../base/', './base/'],
-    ['../assets/', './assets/'],
-    ['../themes/', './themes/'],
-  ]);
+  const docRelRule = [/(?<!\.\.\/)\.\.\/(base|assets|themes)\//g, './$1/'];
+  const subRelRule = [/\.\.\/\.\.\/(base|assets|themes)\//g, '../$1/'];
+  rewriteDirFiles(targetOut, ['.html', '.css', '.js', '.mjs'], [docRelRule], false);
   for (const sub of ['js', 'locales']) {
-    rewriteDirFiles(path.join(targetOut, sub), ['.js', '.mjs', '.css'], [
-      ['../../base/', '../base/'],
-      ['../../assets/', '../assets/'],
-      ['../../themes/', '../themes/'],
-    ]);
+    rewriteDirFiles(path.join(targetOut, sub), ['.js', '.mjs'], [docRelRule, subRelRule], true);
   }
+  rewriteDirFiles(path.join(targetOut, 'css'), ['.css'], [subRelRule], true);
+  rewriteDirFiles(path.join(targetOut, 'themes'), ['.js', '.mjs'], [docRelRule], true);
   console.log(`✅ Bundled single video '${videoId}' -> ${targetOut}`);
   return targetOut;
 }
@@ -82,7 +81,8 @@ function buildManifestEntry(id) {
     return {
       id,
       title: cfg.title || id,
-      description: cfg.description || '',
+      subtitle: cfg.subtitle || cfg.description || '',
+      description: cfg.description || cfg.subtitle || '',
       duration: Math.round((sandbox.V.duration || 0) * 10) / 10,
       scenes: (sandbox.V.scenes || []).length,
       width: cfg.width || 1920,
@@ -90,7 +90,7 @@ function buildManifestEntry(id) {
       path: `./${id}/index.html`,
     };
   } catch {
-    return { id, title: id, description: '', duration: 0, scenes: 0, width: 1920, height: 1080, path: `./${id}/index.html` };
+    return { id, title: id, subtitle: '', description: '', duration: 0, scenes: 0, width: 1920, height: 1080, path: `./${id}/index.html` };
   }
 }
 
