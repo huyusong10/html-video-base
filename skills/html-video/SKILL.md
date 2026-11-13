@@ -45,7 +45,7 @@ project-root/
 2. **语义词锚与多段插值**：视觉动作一律用 `x.at(lineIdx, '关键词', offset)` 或 `x.cue(lineIdx)` 对齐口播重音，禁止硬编码拍脑袋秒数；角色走位、多段运镜或连续状态切换优先用 `V.u.keyframes(t, [{ at: 0, x: 960, pose: 'wave' }, { at: x.at(0, '核心'), x: 420, dur: 0.5, pose: 'point' }])`，避免手写多层 `lerp` 嵌套。
 3. **双时钟暂停呼吸与舞台交互指针场**：
    - **暂停态不死板（`ui.livePause: true` 默认开启）**：暂停时叙事时间轴 `t` 严格冻结，环境时钟 `x.alive` / `x.clock`（在 `V.layer` / `V.subtitle` / `onRender` 中同为 `info.alive`）连续递增且恢复播放零回跳；角色呼吸、眨眼、粒子微动统一读取 `x.alive`，叙事卡点统一读取 `t`。需要终章播完后继续推进尾幕时间或保持可点交互时，在 `V.config` 设 `interactiveEnd: true` 并在尾幕设 `live: true`。
-   - **舞台归一化指针（`V.pointer` / `x.pointer`）与交互元素（`V.u.interactive`）**：框架自动将鼠标逆向映射到 `1920×1080` 舞台坐标（暴露 `x/y`、`-1..1` 归一化 `nx/ny`、带阻尼回中 `sx/sy` 与在场权重 `presence`，并在 `#stage` 注入 `--ptr-x/--ptr-y/--ptr-px/--ptr-py/--ptr-presence`），可零样板实现鼠标跟随视差、聚光灯与吉祥物眼神追踪；画布内可点击卡片/Tab/按钮统一用 `V.u.interactive(el, fnOrEventMap)` 包装，自动开启 `pointer-events` 并阻止点击误触发播放器暂停/播放。`?record=1` 导出态自动归零指针并锁定 `alive === t`，确保逐帧导出 100% 幂等。
+   - **舞台归一化指针（`V.pointer` / `x.pointer`）、交互元素（`V.u.interactive`）与实时微音效（`V.sfx`）**：框架自动将鼠标逆向映射到 `1920×1080` 舞台坐标（暴露 `x/y`、`-1..1` 归一化 `nx/ny`、带阻尼回中 `sx/sy` 与在场权重 `presence`，并在 `#stage` 注入 `--ptr-x/--ptr-y/--ptr-px/--ptr-py/--ptr-presence`），可零样板实现鼠标跟随视差、聚光灯与吉祥物眼神追踪；画布内可点击卡片/Tab/按钮统一用 `V.u.interactive(el, fnOrEventMap, { sfx: 'click' })` 包装，自动开启 `pointer-events`、触发交互音效并阻止点击误触发播放器暂停/播放；也可直接调 `V.sfx('click' | 'key' | 'ping' | 'pop' | 'stamp' | 'alert' | 'whoosh' | 'assets/x.mp3', volume)`，自动跟随主音量与静音状态，并在 `?record=1` 录制态自动静默并归零指针、锁定 `alive === t`，确保逐帧导出 100% 幂等。
 4. **彩蛋沙盒试玩**：调用 `V.tryEgg(targetTime, '操作提示')` 跳入任意幕试玩并自动悬浮返回条，用户点返回或按 `Esc` 调 `V.exitSandbox()` 回到终章。
 
 ```js
@@ -75,7 +75,11 @@ V.scene({
   - 控制栏左右按钮默认统一使用 `32×30` 紧凑矢量图标（返回主界面 `home`、播放/暂停/重播 `play`/`pause`/`replay`、章节箭头 `chapCaret`、倍速 `rate` 在 `1.0x` 显示仪表图标并在非 `1.0x` 动态切换为紧凑数字、字幕 `subsOn`/`subsOff`、声音多态 `volumeOn`/`volumeLow`/`volumeVoice`/`volumeBgm`/`volumeMute`、全屏 `webEnter`/`webExit`/`fullEnter`/`fullExit`）。
   - **业务新增按钮建议一律用图标**：调用 `V.control({ id: 'xray', position: 'right', title: 'X-Ray 透视', icon: ['M...'], onClick(e, V) {} })`，不要塞多字中文撑宽工具栏。
   - **覆盖默认图标**：可通过 `V.icons({ play: '...', subsOn: '...' })` 或 `V.config.ui.icons` 按需覆盖任意内置键名；像素风主题可直接设 `ui: { iconPreset: 'pixel' }` 并加 `--ctrl-ico-render: crispEdges`。图标值支持 `16×16` `<path d>` 数组、内联 SVG 字符串、完整 `<svg>` 字符串或 `(h, V) => Node` 渲染函数。
-- **内置检索、深链、音量调节与双音轨独立控制**：按 `/` 或 `Ctrl+K` 全文检索台词与章节跳转；点击时间码复制当前 `?t=` 深链；点击声音图标打开上拉面板拖动 `0%–100%` 音量滑块（亦可在声音图标上滚轮或按 `↑`/`↓` 键按 `5%` 步进调音并闪出 `#osd` 提示，调用 `V.setVolume(v)` 编程设置），有配乐时可独立开关 BGM（`V.setBgm(on)` / `V.setVoice(on)`，按 `B` 开关配乐，按 `M` 静音）。
+- **内置检索、深链、音量调节、分幕配乐闪避与自动播放解锁**：按 `/` 或 `Ctrl+K` 全文检索台词与章节跳转；点击时间码复制当前 `?t=` 深链；点击声音图标打开上拉面板拖动 `0%–100%` 音量滑块（亦可在声音图标上滚轮或按 `↑`/`↓` 键按 `5%` 步进调音并闪出 `#osd` 提示，调用 `V.setVolume(v)` 编程设置），有配乐时可独立开关 BGM（`V.setBgm(on)` / `V.setVoice(on)`，按 `B` 开关配乐，按 `M` 静音）；浏览器拦截有声自动播放时声音图标自动切为高亮待开启态，点一下即刻解锁发声；单幕可设 `bgm: false | 0.25 | { volume: 0.25 }` 在混音期做 `0.4s` 平滑配乐静默或压低。
+- **全链路多语言（i18n）契约**：
+  - 在 `locales/<lang>.js` 调用 `V.locale('en', { label: 'English', title: '...', tts: { voice: '...', speakers: { host: { label: 'Ling', voice: '...' } } }, strings: { cta: 'Try Now' }, scenes: { intro: { title: '...', strings: { hero: 'HTML First' }, anchors: { 对齐: 'align' }, lines: ['...'] } } })`，并在 `V.config.locales = ['zh-CN', 'en']` 声明可用语种。
+  - 分镜画布文案用 `x.t('hero', 'HTML 原型先行')` 或节点属性 `data-i18n="hero"` 读取当前语种字典；多角色对话通过 `tts.speakers` 统一管理各语种角色名与音色。
+  - 构建期传 `--lang en`（`npx html-video build <id> --lang en` / `verify --lang en` / `render --lang en`）独立生成 `soundtrack.en.m4a`、`bgm.en.m4a`、`timings.en.js` 与外挂 `.en.vtt/.srt`；网页端可通过 `?lang=en`、声音菜单语种项或 `await V.setLang('en')` 实时热切音轨、字幕、画布文案与播放器界面文案，并按当前句内相对进度无缝对齐时间轴。
 
 ## 5. 核心 CSS 主题变量表
 

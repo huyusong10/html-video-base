@@ -118,6 +118,7 @@ const cuesPayload = {
     start: sc.start,
     duration: sc.duration,
     energy: sc.energy !== undefined ? sc.energy : sceneEnergies[si],
+    bgm: sc.bgm !== undefined ? sc.bgm : (sc.bgmVolume !== undefined ? sc.bgmVolume : null),
     cues: sc.cues,
     sfx: resolveSceneSfx(V, sc, si),
   })),

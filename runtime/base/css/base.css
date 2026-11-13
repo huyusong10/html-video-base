@@ -349,6 +349,7 @@ body.record #subs {
   letter-spacing: 0.02em;
   color: var(--sub-color, var(--sub-fg));
   white-space: pre-wrap;
+  unicode-bidi: plaintext;
   text-align: var(--sub-align, center);
 }
 .sub-text > span { grid-area: 1 / 1; }
@@ -453,6 +454,7 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   background: var(--ctrl-bg); color: var(--ctrl-fg);
   border-top: var(--ctrl-border-w) solid var(--ctrl-border);
   font: var(--ctrl-font-size) var(--ctrl-font, var(--font-sans));
+  direction: ltr;
   opacity: 1;
   user-select: none;
 }
@@ -526,6 +528,11 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 }
 #controls :where(button.is-off) {
   opacity: 0.56;
+}
+#controls :where(button.is-blocked) {
+  border-color: var(--accent);
+  color: var(--accent);
+  opacity: 1;
 }
 #controls :where(button.on),
 #controls.chap-open :where(.chap-trigger),

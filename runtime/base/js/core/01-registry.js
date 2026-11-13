@@ -8,6 +8,7 @@
     ['controls', () => []],
     ['presets', () => ({})],
     ['locales', () => ({})],
+    ['voices', () => ({})],
     ['subtitles', () => ({})],
     ['customIcons', () => ({})],
     ['config', () => ({})],
@@ -162,6 +163,7 @@
   };
 
   V.getActiveLang = function () {
+    if (V.__langOverridden) return V.__activeLang || (V.config && V.config.lang) || '';
     if (V.__activeLang) return V.__activeLang;
     if (typeof location !== 'undefined' && location.search) {
       const q = new URLSearchParams(location.search).get('lang');
@@ -223,7 +225,11 @@
 
   function mergeTtsDict(a, b) {
     if (!a && !b) return undefined;
-    return Object.assign({}, a || {}, b || {});
+    const out = Object.assign({}, a || {}, b || {});
+    if ((a && a.speakers) || (b && b.speakers)) {
+      out.speakers = Object.assign({}, (a && a.speakers) || {}, (b && b.speakers) || {});
+    }
+    return out;
   }
 
   V.getCfg = function () {
@@ -237,6 +243,9 @@
     merged.ui = mergeUiDict(mergeUiDict(td.ui, vc.ui), locCfg.ui);
     const tts = mergeTtsDict(mergeTtsDict(td.tts, vc.tts), locCfg.tts);
     if (tts) merged.tts = tts;
+    if (td.strings || vc.strings || (loc && loc.strings)) {
+      merged.strings = Object.assign({}, td.strings || {}, vc.strings || {}, (loc && loc.strings) || {});
+    }
     return merged;
   };
 })(globalThis.V = globalThis.V || {});

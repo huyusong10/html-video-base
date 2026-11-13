@@ -395,6 +395,40 @@ def mix_voice_track(scenes, vdir, n, fallback_stem_path=None, baked_scenes=None)
     return voice, active, has_voice, stem_mask
 
 
+def _resolve_scene_bgm_gain(sc) -> float:
+    spec = sc.get('bgm')
+    if spec is None or spec is True:
+        return 1.0
+    if spec is False or spec == 'none':
+        return 0.0
+    if isinstance(spec, (int, float)):
+        return float(np.clip(spec, 0.0, 2.0))
+    if isinstance(spec, dict) and 'volume' in spec:
+        return float(np.clip(float(spec['volume']), 0.0, 2.0))
+    return 1.0
+
+
+def build_scene_bgm_env(secs, n: int) -> np.ndarray:
+    if n <= 0 or not secs:
+        return np.ones(max(0, n), dtype=np.float32)
+    gains = [_resolve_scene_bgm_gain(sc) for sc in secs]
+    if all(abs(g - 1.0) < 1e-4 for g in gains):
+        return np.ones(n, dtype=np.float32)
+    env = np.ones(n, dtype=np.float32)
+    for sc, g in zip(secs, gains):
+        a = max(0, int(round(float(sc.get('start', 0.0)) * SR)))
+        b = min(n, int(round((float(sc.get('start', 0.0)) + float(sc.get('duration', 0.0))) * SR)))
+        if b > a:
+            env[a:b] = g
+    win = max(1, min(n, int(0.40 * SR)))
+    if win <= 3:
+        return env
+    pad = win // 2
+    env_pad = np.pad(env, (pad, pad), mode='edge')
+    smoothed = fftconvolve(env_pad, np.ones(win, dtype=np.float32) / win, mode='same')[pad:pad + n]
+    return np.clip(smoothed, 0.0, 2.0)
+
+
 def build_bgm_track(bgm_cfg, video_dir, dur, n, secs, active, has_voice):
     if bgm_cfg['mode'] == 'none' or bgm_cfg['volume'] <= 0:
         return np.zeros((n, 2), dtype=np.float32)
@@ -412,7 +446,8 @@ def build_bgm_track(bgm_cfg, video_dir, dur, n, secs, active, has_voice):
         fade[:fi] = np.linspace(0, 1, fi)
     if fo > 0:
         fade[-fo:] = np.linspace(1, 0, fo)
-    return mus[:n] * (duck * fade)[:, None] * bgm_cfg['volume']
+    sc_env = build_scene_bgm_env(secs, n)
+    return mus[:n] * (duck * fade * sc_env)[:, None] * bgm_cfg['volume']
 
 
 def _load_or_synth_pair(custom_path, video_dir, chip_fn, soft_fn, preset):

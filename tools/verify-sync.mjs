@@ -15,7 +15,7 @@ const COMMON_HOMO_MAP = [
 ];
 
 const round3 = n => Math.round(Number(n) * 1000) / 1000;
-const stripPunct = s => String(s || '').replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').toLowerCase();
+const stripPunct = s => String(s || '').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
 
 function buildSpokenNormalizer(pronunciation, enableCommon = true) {
   const customRules = [];
@@ -92,6 +92,7 @@ export function stampBakedLayout(videoId, lang = '') {
     '/* 配音时长（秒）、词边界字幕分段、30Hz 语音包络与固化时间轴，由构建管线生成并校验。 */',
     'window.V = window.V || {};',
     'V.voice = ' + JSON.stringify(V.voice) + ';',
+    'if (V.captureVoice) V.captureVoice(V.voice);',
     '',
   ].join('\n');
   fs.writeFileSync(timingsPath, out, 'utf8');
@@ -265,6 +266,11 @@ function isVoiceFreeVerified(videoId, videoDir, V, cfg, bgmRel, totalSceneLines,
   return false;
 }
 
+function shouldEnableZhCommonFix(ttsCfg, lang) {
+  if (ttsCfg.polyphoneFix === false) return false;
+  return !lang || /^zh\b/i.test(String(lang));
+}
+
 export function verifyVideo(videoId, ffmpegBin, lang = '') {
   const errors = [];
   const { sandbox: dynamicSb, videoDir, audioRel, bgmRel } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: false, lang });
@@ -285,7 +291,7 @@ export function verifyVideo(videoId, ffmpegBin, lang = '') {
   const totalLines = verifyScenesAndTimings(
     V,
     V.voice,
-    buildSpokenNormalizer(ttsCfg.pronunciation || cfg.pronunciation, ttsCfg.polyphoneFix !== false),
+    buildSpokenNormalizer(ttsCfg.pronunciation || cfg.pronunciation, shouldEnableZhCommonFix(ttsCfg, lang)),
     errors
   );
   verifyBakedLayoutMatch(V, V.voice, videoId, errors);

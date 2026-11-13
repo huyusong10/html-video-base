@@ -1,22 +1,28 @@
-/* core/08-plugins.js · 内置可插拔扩展（通过标准 V.use 注册：草稿 WebAudio 微音效 + ?dev 面板 + SSE 保位热重载） */
+/* core/08-plugins.js - 内置可插拔扩展（交互实时微音效 V.sfx + 草稿 WebAudio 微音效 + ?dev 面板 + SSE 保位热重载） */
 (function (V) {
   const { clamp, h, toggle } = V.u;
 
-  // 1. 草稿态动作微音效预览插件（已有正式音轨或录制态自动静默）
+  // 1. 交互实时微音效 V.sfx() 与草稿态动作音效预览插件（录制态/静音态自动静默）
   let draftActx = null;
+  const TONE_PRESETS = {
+    ping: ['sine', 880, 1320, 0.09, 0.24],
+    chime: ['sine', 880, 1320, 0.09, 0.24],
+    success: ['sine', 784, 1175, 0.09, 0.24],
+    stamp: ['sine', 260, 95, 0.055, 0.13],
+    pop: ['sine', 520, 760, 0.04, 0.09],
+    whoosh: ['sine', 340, 140, 0.14, 0.2],
+    alert: ['triangle', 520, 360, 0.1, 0.22],
+    warn: ['triangle', 520, 360, 0.1, 0.22],
+    error: ['sawtooth', 300, 180, 0.11, 0.22],
+    key: ['triangle', 420, 160, 0.045, 0.055],
+    click: ['triangle', 680, 160, 0.045, 0.055],
+  };
 
   function synthTone(ctx, type, g) {
     const t0 = ctx.currentTime;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-    const presets = {
-      ping: ['sine', 880, 1320, 0.09, 0.24],
-      chime: ['sine', 880, 1320, 0.09, 0.24],
-      alert: ['triangle', 520, 420, 0.09, 0.22],
-      key: ['triangle', 420, 160, 0.045, 0.05],
-      click: ['triangle', 680, 160, 0.045, 0.05],
-    };
-    const [wave, f0, f1, rampT, endT] = presets[type] || presets.click;
+    const [wave, f0, f1, rampT, endT] = TONE_PRESETS[type] || TONE_PRESETS.click;
     osc.type = wave;
     osc.frequency.setValueAtTime(f0, t0);
     osc.frequency.exponentialRampToValueAtTime(Math.max(40, f1), t0 + rampT);
@@ -27,14 +33,30 @@
     osc.stop(t0 + endT + 0.01);
   }
 
-  function playDraftSfx(type, vol = 0.5) {
+  function playSynthTone(type, effVol) {
     try {
       const Ctx = globalThis.AudioContext || globalThis.webkitAudioContext;
-      if (!Ctx) return;
+      if (!Ctx) return false;
       if (!draftActx) draftActx = new Ctx();
       if (draftActx.state === 'suspended') draftActx.resume();
-      synthTone(draftActx, type, clamp(vol, 0.05, 1) * 0.12);
-    } catch {}
+      synthTone(draftActx, type, clamp(effVol, 0.02, 1) * 0.14);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function playUrlSfx(src, effVol) {
+    try {
+      if (typeof Audio === 'undefined') return false;
+      const el = new Audio(src);
+      el.volume = clamp(effVol, 0, 1);
+      const p = el.play();
+      if (p && p.catch) p.catch(() => {});
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function resolveDraftSfxGain() {
@@ -46,6 +68,40 @@
     }
     return 1;
   }
+
+  function parseSfxCallArgs(spec, volOrOpts) {
+    if (spec && typeof spec === 'object') {
+      return {
+        src: spec.src || '',
+        type: spec.type || spec.preset || 'click',
+        vol: spec.volume === undefined ? 0.6 : Number(spec.volume),
+      };
+    }
+    const raw = typeof spec === 'string' && spec ? spec : 'click';
+    const isUrl = /[/.]/.test(raw) && /\.(mp3|wav|ogg|m4a|aac|webm)(\?|$)/i.test(raw);
+    const optVol = typeof volOrOpts === 'number' ? volOrOpts : (volOrOpts && volOrOpts.volume);
+    return { src: isUrl ? raw : '', type: raw, vol: optVol === undefined ? 0.6 : Number(optVol) };
+  }
+
+  function computeEffectiveSfxVol(baseVol) {
+    if (V._isRecord || V._allMuted) return 0;
+    const master = V._masterVolume === undefined ? 1 : Number(V._masterVolume);
+    const cfgGain = resolveDraftSfxGain();
+    if (master <= 0.001 || cfgGain <= 0) return 0;
+    return clamp((Number.isFinite(baseVol) ? baseVol : 0.6) * master * cfgGain, 0, 1);
+  }
+
+  function triggerSfx(spec, volOrOpts) {
+    const parsed = parseSfxCallArgs(spec, volOrOpts);
+    const effVol = computeEffectiveSfxVol(parsed.vol);
+    if (effVol <= 0.001) return false;
+    const ok = parsed.src ? playUrlSfx(parsed.src, effVol) : playSynthTone(parsed.type, effVol);
+    if (ok) V._sfxCount = (V._sfxCount || 0) + 1;
+    return ok;
+  }
+
+  V.sfx = triggerSfx;
+  V.sfx.play = triggerSfx;
 
   function canPlayDraftSfx(st) {
     if (!st.playing || st.scrubbing || st.hasAudio || st.isRecord || st.muted || st.voiceOn === false) return false;
@@ -77,7 +133,7 @@
         const gAt = sc.start + Number(ev.at);
         if (didCrossSfxAt(st.prevT, st.now, gAt)) {
           const vol = (ev.volume === undefined ? 0.5 : Number(ev.volume)) * masterGain;
-          if (vol > 0) playDraftSfx(ev.type || ev.preset || 'click', vol);
+          if (vol > 0) playSynthTone(ev.type || ev.preset || 'click', vol);
         }
       }
     },

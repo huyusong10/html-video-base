@@ -56,9 +56,19 @@
 
   function resolveBgmTrackSpec(cfg, isRecord) {
     if (isRecord || isBgmDisabledInCfg(cfg)) return null;
-    if (isVoiceLocaleMatch() && V.voice.bgmSrc) return { src: V.voice.bgmSrc, volume: 1 };
+    if (isVoiceLocaleMatch() && V.voice.bgmSrc) return { src: V.voice.bgmSrc, volume: 1, baked: true };
     const src = localizeFallbackMedia(extractRawBgmSrc(cfg), 'bgmSrc');
-    return src ? { src, volume: resolveRawBgmVolume(cfg) } : null;
+    return src ? { src, volume: resolveRawBgmVolume(cfg), baked: false } : null;
+  }
+
+  function resolveSceneBgmFactor(sc) {
+    if (!sc) return 1;
+    const spec = sc.bgm !== undefined ? sc.bgm : sc.bgmVolume;
+    if (spec === undefined || spec === null || spec === true) return 1;
+    if (spec === false || spec === 'none') return 0;
+    if (typeof spec === 'number') return clampUnitVolume(spec, 1);
+    if (typeof spec === 'object' && spec.volume !== undefined) return clampUnitVolume(spec.volume, 1);
+    return 1;
   }
 
   function resolveBgmTarget(el, refT, loopOn) {
@@ -82,10 +92,11 @@
 
   V._createAudioRuntime = function (hooks) {
     const { params, isRecord } = hooks;
-    let audio = null, bgmAudio = null, playbackRate = 1, bgmLoop = true;
+    let audio = null, bgmAudio = null, playbackRate = 1, bgmLoop = true, bgmIsBaked = false;
     let volume = 1, restoreVolume = 1, bgmBaseVolume = 1;
     let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm'), muted = false;
-    let audioBlocked = false, unlockArmed = false, playPending = false, bgmPlayPending = false, targetSeekTime = null;
+    let audioBlocked = false, unlockArmed = false, lastUnlockTs = 0;
+    let playPending = false, bgmPlayPending = false, targetSeekTime = null;
 
     function isAllMuted() {
       if (muted || volume <= 0.001) return true;
@@ -94,10 +105,15 @@
       return !activeVoice && !activeBgm;
     }
 
+    function computeEffectiveBgmVol() {
+      const scFactor = bgmIsBaked ? 1 : resolveSceneBgmFactor(hooks.getCurrentScene ? hooks.getCurrentScene() : null);
+      return clampUnitVolume(bgmBaseVolume * volume * scFactor, 1);
+    }
+
     function syncTrackVolumes() {
       V._masterVolume = volume;
       if (audio) { try { audio.volume = volume; } catch {} }
-      if (bgmAudio) { try { bgmAudio.volume = clampUnitVolume(bgmBaseVolume * volume, 1); } catch {} }
+      if (bgmAudio) { try { bgmAudio.volume = computeEffectiveBgmVol(); } catch {} }
     }
 
     function ensureActiveTrack() {
@@ -123,9 +139,12 @@
       unlockArmed = false;
       document.removeEventListener('pointerdown', unlockBlockedAudio, true);
       document.removeEventListener('keydown', unlockBlockedAudio, true);
-      if (!audioBlocked) return;
+      if (!audioBlocked) return false;
       audioBlocked = false;
+      lastUnlockTs = performance.now();
+      hooks.onSoundUI();
       if (hooks.isPlaying()) startPlayback();
+      return true;
     }
 
     function armBlockedUnlock() {
@@ -135,17 +154,27 @@
       document.addEventListener('keydown', unlockBlockedAudio, true);
     }
 
+    function markAudioBlocked() {
+      const wasBlocked = audioBlocked;
+      audioBlocked = true;
+      armBlockedUnlock();
+      hooks.onSoundUI();
+      if (!wasBlocked && hooks.onAudioBlocked) hooks.onAudioBlocked();
+    }
+
     function safePlayAudio() {
       if (!audio || !hooks.isPlaying() || !audio.paused || playPending) return;
       playPending = true;
       audio.playbackRate = playbackRate;
       const p = audio.play();
       if (p && typeof p.then === 'function') {
-        p.then(() => { playPending = false; audioBlocked = false; })
-         .catch(err => {
-           playPending = false;
-           if (err && err.name === 'NotAllowedError') { audioBlocked = true; armBlockedUnlock(); }
-         });
+        p.then(() => {
+          playPending = false;
+          if (audioBlocked) { audioBlocked = false; hooks.onSoundUI(); }
+        }).catch(err => {
+          playPending = false;
+          if (err && err.name === 'NotAllowedError') markAudioBlocked();
+        });
       } else {
         playPending = false;
       }
@@ -153,10 +182,7 @@
 
     function handleBgmPlayErr(err) {
       bgmPlayPending = false;
-      if (err && err.name === 'NotAllowedError') {
-        audioBlocked = true;
-        armBlockedUnlock();
-      }
+      if (err && err.name === 'NotAllowedError') markAudioBlocked();
     }
 
     function safePlayBgm() {
@@ -207,16 +233,22 @@
       }
     }
 
+    function uiText(key, vars) {
+      return V.uiStr ? V.uiStr(key, vars) : key;
+    }
+
     function resolveSoundBtnSpec() {
       const pct = Math.round(volume * 100);
-      if (isAllMuted()) return ['volumeMute', '声音设置：已静音（M 取消静音 / ↑↓ 调节音量）'];
-      if (bgmAudio && (!audio || !voiceOn) && bgmOn) return ['volumeBgm', `声音设置：仅背景音乐 ${pct}%（M 静音 / B 开关配乐）`];
-      if (bgmAudio && voiceOn && !bgmOn) return ['volumeVoice', `声音设置：已关背景乐 ${pct}%（M 静音 / B 恢复配乐）`];
-      return [volume < 0.5 ? 'volumeLow' : 'volumeOn', `声音设置 ${pct}%（M 静音 / ↑↓ 调节音量）`];
+      if (isAllMuted()) return ['volumeMute', uiText('soundMutedTip')];
+      if (audioBlocked) return ['volumeMute', uiText('soundBlockedTip')];
+      if (bgmAudio && (!audio || !voiceOn) && bgmOn) return ['volumeBgm', uiText('soundBgmOnlyTip', { pct })];
+      if (bgmAudio && voiceOn && !bgmOn) return ['volumeVoice', uiText('soundNoBgmTip', { pct })];
+      return [volume < 0.5 ? 'volumeLow' : 'volumeOn', uiText('soundOnTip', { pct })];
     }
 
     function emitAndSync() {
       const allOff = isAllMuted();
+      V._allMuted = allOff;
       const voiceActive = Boolean(audio || !bgmAudio) && !allOff && voiceOn;
       if (audio) audio.muted = allOff || !voiceOn;
       syncBgmPlaybackNow();
@@ -331,10 +363,22 @@
       return null;
     }
 
+    let visBound = false;
+    function bindVisibilitySyncOnce() {
+      if (visBound || typeof document === 'undefined') return;
+      visBound = true;
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden || !hooks.isPlaying() || !audio || audio.paused) return;
+        if (!audio.seeking && targetSeekTime == null && audio.readyState >= 2) hooks.onVisibilitySync(audio.currentTime);
+      });
+    }
+
     function createMasterAudio(src) {
+      bindVisibilitySyncOnce();
       const el = new Audio();
       el.preload = 'auto';
       el.addEventListener('loadedmetadata', () => {
+        if (audio !== el) return;
         el.playbackRate = playbackRate;
         const nowVal = hooks.getNow();
         const target = targetSeekTime != null ? targetSeekTime : (nowVal > 0.05 ? nowVal : null);
@@ -343,14 +387,11 @@
         }
         if (hooks.isPlaying() && el.paused) safePlayAudio();
       });
-      el.addEventListener('seeked', () => { if (hooks.isPlaying() && el.paused) safePlayAudio(); });
-      el.addEventListener('canplay', () => { if (hooks.isPlaying() && el.paused && !el.seeking) safePlayAudio(); });
-      el.addEventListener('ended', () => { if (hooks.isPlaying() && targetSeekTime == null) hooks.onEnded(); });
+      el.addEventListener('seeked', () => { if (audio === el && hooks.isPlaying() && el.paused) safePlayAudio(); });
+      el.addEventListener('canplay', () => { if (audio === el && hooks.isPlaying() && el.paused && !el.seeking) safePlayAudio(); });
+      el.addEventListener('ended', () => { if (audio === el && hooks.isPlaying() && targetSeekTime == null) hooks.onEnded(); });
       el.addEventListener('error', () => {
         if (audio === el) { audio = null; if (!isRecord) hooks.onSoundUI(); }
-      });
-      document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && hooks.isPlaying() && !el.paused && !el.seeking && targetSeekTime == null && el.readyState >= 2) hooks.onVisibilitySync(el.currentTime);
       });
       el.src = src;
       el.load();
@@ -364,6 +405,7 @@
       el.volume = spec.volume;
       el.muted = isAllMuted() || !bgmOn;
       el.addEventListener('loadedmetadata', () => {
+        if (bgmAudio !== el) return;
         el.playbackRate = playbackRate;
         el.loop = bgmLoop;
         const target = resolveBgmTarget(el, resolveRefTime(), bgmLoop);
@@ -398,19 +440,49 @@
       V._masterVolume = volume;
     }
 
-    function initTracks(cfg, uiCfg, savedPrefs) {
+    function disposeAudioEl(el) {
+      if (!el) return;
+      try { el.pause(); el.removeAttribute('src'); el.load(); } catch {}
+    }
+
+    function mountTracksFromCfg(cfg) {
       bgmLoop = !(cfg.bgm && typeof cfg.bgm === 'object' && cfg.bgm.loop === false);
-      if (uiCfg.bgmDefault === false && !params.has('bgm')) bgmOn = false;
-      applySavedSoundPrefs(savedPrefs, cfg);
       const audioSrc = resolveAudioSource(cfg, isRecord);
-      if (audioSrc) {
-        audio = createMasterAudio(audioSrc);
-        audio.muted = isAllMuted() || !voiceOn;
-      }
+      audio = audioSrc ? createMasterAudio(audioSrc) : null;
+      if (audio) audio.muted = isAllMuted() || !voiceOn;
       const bgmSpec = resolveBgmTrackSpec(cfg, isRecord);
       bgmBaseVolume = bgmSpec ? bgmSpec.volume : 1;
-      if (bgmSpec) bgmAudio = createBgmAudio(bgmSpec);
+      bgmIsBaked = Boolean(bgmSpec && bgmSpec.baked);
+      bgmAudio = bgmSpec ? createBgmAudio(bgmSpec) : null;
       syncTrackVolumes();
+      V._allMuted = isAllMuted();
+    }
+
+    function initTracks(cfg, uiCfg, savedPrefs) {
+      if (uiCfg.bgmDefault === false && !params.has('bgm')) bgmOn = false;
+      applySavedSoundPrefs(savedPrefs, cfg);
+      mountTracksFromCfg(cfg);
+    }
+
+    function reloadTracks(cfg) {
+      playPending = false;
+      bgmPlayPending = false;
+      targetSeekTime = null;
+      disposeAudioEl(audio);
+      disposeAudioEl(bgmAudio);
+      audio = null;
+      bgmAudio = null;
+      mountTracksFromCfg(cfg);
+      hooks.onSoundUI();
+    }
+
+    function consumeRecentUnlock() {
+      if (audioBlocked) return unlockBlockedAudio();
+      if (lastUnlockTs > 0 && performance.now() - lastUnlockTs < 450) {
+        lastUnlockTs = 0;
+        return true;
+      }
+      return false;
     }
 
     function getState(nowVal) {
@@ -418,6 +490,7 @@
       return {
         hasAudio: Boolean(audio),
         hasBgm: Boolean(bgmAudio),
+        audioBlocked,
         volume,
         muted: allOff,
         voiceOn: Boolean(audio || !bgmAudio) && !allOff && voiceOn,
@@ -432,8 +505,9 @@
     }
 
     return {
-      initTracks, startPlayback, pausePlayback, seekTracks, setRate,
+      initTracks, reloadTracks, startPlayback, pausePlayback, seekTracks, setRate,
       setVolume, setBgm, setVoice, setMuted, toggleVoiceFromMenu, toggleBgmFromMenu,
+      syncSceneVolume: syncTrackVolumes, consumeRecentUnlock,
       isAllMuted, resolveSoundBtnSpec, canUseMasterClock,
       tickMasterClock, syncWithWallClock: keepBgmInSync,
       hasBgm: () => Boolean(bgmAudio), getState,

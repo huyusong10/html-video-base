@@ -15,29 +15,38 @@
     return sc._resolvedCheckpoints;
   }
 
+  function resolveCheckpointChoices(cp) {
+    if (Array.isArray(cp.choices) && cp.choices.length) return cp.choices;
+    if (Array.isArray(cp.actions) && cp.actions.length) return cp.actions;
+    const label = cp.buttonLabel || (V.uiStr ? V.uiStr('cpContinue') : '继续播放');
+    return [{ label, value: true, primary: true }];
+  }
+
+  function buildChoiceBtn(ch, idx, cp, resumeFn) {
+    const label = cp.id && V.t ? V.t(`cp.${cp.id}.choice.${idx}`, ch.label) : ch.label;
+    const b = h('button', { class: 'cp-btn' + (ch.primary || idx === 0 ? ' is-primary' : '') }, label);
+    b.onclick = e => {
+      e.stopPropagation();
+      if (ch.sfx !== false && V.sfx) V.sfx(ch.sfx || 'click', 0.5);
+      if (typeof ch.onSelect === 'function') ch.onSelect(V);
+      const resVal = ch.value !== undefined ? ch.value : (ch.resume !== undefined ? ch.resume : ch.label);
+      resumeFn(cp, resVal);
+    };
+    return b;
+  }
+
   function renderCheckpointCard(overlay, cp, resumeFn) {
     overlay.innerHTML = '';
     if (typeof cp.render === 'function') {
       cp.render(overlay, val => resumeFn(cp, val));
       return;
     }
-    const rawChoices = Array.isArray(cp.choices) && cp.choices.length
-      ? cp.choices
-      : (Array.isArray(cp.actions) && cp.actions.length ? cp.actions : null);
-    const choices = rawChoices || [{ label: cp.buttonLabel || '继续播放', value: true, primary: true }];
-    const btns = choices.map((ch, idx) => {
-      const b = h('button', { class: 'cp-btn' + (ch.primary || idx === 0 ? ' is-primary' : '') }, ch.label);
-      b.onclick = e => {
-        e.stopPropagation();
-        if (typeof ch.onSelect === 'function') ch.onSelect(V);
-        const resVal = ch.value !== undefined ? ch.value : (ch.resume !== undefined ? ch.resume : ch.label);
-        resumeFn(cp, resVal);
-      };
-      return b;
-    });
+    const btns = resolveCheckpointChoices(cp).map((ch, idx) => buildChoiceBtn(ch, idx, cp, resumeFn));
+    const title = cp.title && cp.id && V.t ? V.t(`cp.${cp.id}.title`, cp.title) : cp.title;
+    const prompt = cp.prompt && cp.id && V.t ? V.t(`cp.${cp.id}.prompt`, cp.prompt) : cp.prompt;
     const card = h('div', { class: 'cp-card', 'data-interactive': '1' },
-      cp.title ? h('h4', null, cp.title) : null,
-      cp.prompt ? h('p', null, cp.prompt) : null,
+      title ? h('h4', null, title) : null,
+      prompt ? h('p', null, prompt) : null,
       h('div', { class: 'cp-actions' }, ...btns));
     overlay.appendChild(card);
   }
@@ -56,6 +65,7 @@
     pauseFn();
     const overlay = document.getElementById('checkpoint-overlay');
     if (!overlay) return;
+    if (cp.sfx !== false && V.sfx) V.sfx(cp.sfx || 'ping', 0.45);
     overlay.classList.add('is-open');
     renderCheckpointCard(overlay, cp, (item, val) => {
       if (item.id) V.checkpointState[item.id] = val;

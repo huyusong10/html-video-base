@@ -18,7 +18,9 @@ COMMON_FIX = [
     (r'进行', '进形'), (r'自行', '自形'), (r'推行', '推形'), (r'实行', '实形'), (r'放行', '放形'),
     (r'命令行', '命令航'), (r'一行行', '一航航'), (r'“|”|‘|’|《|》', ''),
 ]
-TOKEN_RE = re.compile(r'[A-Za-z0-9]+|[\u4e00-\u9fa5]')
+CJK_CHARS = r'\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af'
+TOKEN_RE = re.compile(rf'[{CJK_CHARS}]|(?:(?![{CJK_CHARS}])[^\W_])+', re.UNICODE)
+SINGLE_CJK_RE = re.compile(rf'^[{CJK_CHARS}]$')
 PAUSE_CHARS = set('，。；：！？——,.;:!?、')
 _WHISPER_MODELS = {}
 _WHISPER_LOCK = threading.Lock()
@@ -171,7 +173,7 @@ def _tokenize_spoken_with_pauses(spoken: str):
             pending_pause = 0.45
         tok = m.group(0)
         tokens.append(tok)
-        token_weights.append((pending_pause, 1.45 if re.match(r'^[A-Za-z0-9]+$', tok) else 1.0))
+        token_weights.append((pending_pause, 1.0 if SINGLE_CJK_RE.match(tok) else 1.45))
         pending_pause, pos = 0.0, m.end()
     return tokens, token_weights
 
@@ -446,6 +448,7 @@ def _write_timings_js(timings_path, audio_src, bgm_src, voice_label, durs, all_w
         if bgm_src:
             meta['bgmSrc'] = bgm_src
         f.write('V.voice = ' + json.dumps(meta, ensure_ascii=False) + ';\n')
+        f.write('if (V.captureVoice) V.captureVoice(V.voice);\n')
 
 
 def _run_synthesis_stage(scenes, out_dir, tts_cfg, provider, rules, video_dir):
@@ -469,7 +472,8 @@ def main():
     if lang and 'lang' not in tts_cfg:
         tts_cfg['lang'] = lang
     provider = _finalize_tts_defaults(tts_cfg)
-    rules = build_rules(tts_cfg.get('pronunciation', {}), enable_common=bool(tts_cfg.get('polyphoneFix', True)))
+    use_zh_common = bool(tts_cfg.get('polyphoneFix', True)) and (not lang or str(lang).lower().startswith('zh'))
+    rules = build_rules(tts_cfg.get('pronunciation', {}), enable_common=use_zh_common)
 
     if os.environ.get('VOICE_CACHE_ONLY') == '1':
         hydrate_cached_voices(scenes, out_dir, tts_cfg, rules, video_dir=video_dir)

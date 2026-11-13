@@ -54,14 +54,17 @@ function writeTestProjectFiles(videoDir) {
   fs.writeFileSync(path.join(videoDir, 'locales/en.js'), [
     'V.locale("en", {',
     '  title: "Microkernel Demo EN",',
+    '  strings: { globalTag: "MICROKERNEL" },',
     '  scenes: {',
     '    s01: {',
     '      title: "Architecture",',
+    '      strings: { badgeText: "OPEN-KERNEL-EN" },',
     '      lines: ["Welcome to the critical microkernel timeline."],',
     '      anchors: { "关键": "critical" },',
     '    },',
     '    s02: {',
     '      title: "Verification",',
+    '      strings: { boxLabel: "PURE F(T) EN" },',
     '      lines: ["Every pure function stays deterministic."],',
     '    },',
     '  },',
@@ -104,6 +107,9 @@ function writeTestProjectFiles(videoDir) {
     '});',
     'V.config = {',
     '  title: "微内核自检演示",',
+    '  lang: "zh-CN",',
+    '  locales: ["zh-CN", "en"],',
+    '  strings: { globalTag: "微内核" },',
     '  width: 640, height: 360, fps: 10,',
     '  ui: { resumeMinSec: 0.5, idleHideDelay: 420, leaveHideDelay: 120 },',
     '  tts: { provider: "custom", script: "./mock_tts.py" },',
@@ -123,7 +129,7 @@ function writeTestProjectFiles(videoDir) {
     '  lines: [{ text: "欢迎体验关键微内核时间轴引擎。", enSlowdown: 0.9, align: "acoustic", volume: 0.85, whisperModel: "tiny", xmlLang: "zh-CN" }],',
     '  checkpoints: x => [{ at: 0.45, id: "cp-1", defaultValue: "auto-ok", prompt: "继续演示？", actions: [{ label: "继续", resume: true }] }],',
     '  build(root, x) {',
-    '    const badge = V.c.badge("OPEN-KERNEL");',
+    '    const badge = V.c.badge(x.t("badgeText", "OPEN-KERNEL"));',
     '    const clip = V.u.videoClip("assets/clip.mp4", { start: 0.05, volume: 0.25, style: { width: "160px", height: "90px" } });',
     '    root.append(badge, clip);',
     '    this._badge = badge; this._clip = clip;',
@@ -142,7 +148,7 @@ function writeTestProjectFiles(videoDir) {
     '  // 1) don\'t break stripSceneCalls )',
     '  id: "s02", title: "纯函数校验", live: true, transition: "zoomFade", transitionDur: 0.35,',
     '  lines: ["所有画面仅由时间纯函数唯一决定。"],',
-    '  build(root) { root.append(V.u.h("div", { class: "s2-box", "data-ref": "../assets/shared.svg" }, "PURE F(T)")); },',
+    '  build(root) { root.append(V.u.h("div", { class: "s2-box", "data-i18n": "boxLabel", "data-ref": "../assets/shared.svg" }, "PURE F(T)")); },',
     '  update(t) { window.__s2LiveT = t; window.__s2SeenCp = V.checkpointState["cp-1"]; },',
     '});',
     '',
@@ -935,7 +941,7 @@ async function verifyRound3BrowserContracts(page, port) {
   assert.equal(singleStemMenu.vol, 0.4, '?volume=0.4 query parameter must initialize volume to 40%');
   assert.equal(singleStemMenu.valTxt, '40%', '.sound-vol-val must reflect ?volume=0.4');
   assert.equal(singleStemMenu.bgmRowHidden, true, 'Non-BGM video must hide BGM row in .sound-menu');
-  assert.equal(singleStemMenu.muteRowTxt, '静音', 'Non-BGM video must label mute item as 静音');
+  assert.equal(singleStemMenu.muteRowTxt, '靜音', 'Non-BGM video on ?lang=zh-TW must localize mute item as 靜音');
 }
 
 function verifyRound3UnitRegressions() {
@@ -966,6 +972,242 @@ function verifyRound3UnitRegressions() {
     ].join('; '),
   ], { cwd: PKG_ROOT, encoding: 'utf8' });
   assert.equal(pyCheck.status, 0, `Python TTS unit checks failed:\n${pyCheck.stderr}`);
+}
+
+function verifyRound5SoundAndI18nUnit() {
+  const py = resolvePython(PKG_ROOT, true);
+  const tokCheck = spawnSync(py, [
+    '-c',
+    [
+      'import sys; sys.path.insert(0, "tools")',
+      'from voice import TOKEN_RE',
+      'assert TOKEN_RE.findall("AI视频") == ["AI", "视", "频"]',
+      'assert TOKEN_RE.findall("これはAIです") == ["こ", "れ", "は", "AI", "で", "す"]',
+      'assert TOKEN_RE.findall("안녕 AI") == ["안", "녕", "AI"]',
+      'assert TOKEN_RE.findall("Café résumé 2026") == ["Café", "résumé", "2026"]',
+    ].join('; '),
+  ], { cwd: PKG_ROOT, encoding: 'utf8' });
+  assert.equal(tokCheck.status, 0, `Python multi-script TOKEN_RE unit checks failed:\n${tokCheck.stderr}`);
+
+  const bgmScDir = path.join(TEST_ROOT, 'scene-bgm-check');
+  fs.mkdirSync(bgmScDir, { recursive: true });
+  const cuesJson = path.join(bgmScDir, 'cues.json');
+  const bgmWav = path.join(bgmScDir, 'bgm.wav');
+  fs.writeFileSync(cuesJson, JSON.stringify({
+    duration: 4.0,
+    videoDir: bgmScDir,
+    bgm: { preset: 'ambient', volume: 0.2 },
+    sfx: false,
+    scenes: [
+      { title: 'S1', start: 0, duration: 2.0, bgm: 1.0, cues: [] },
+      { title: 'S2', start: 2.0, duration: 2.0, bgm: false, cues: [] },
+    ],
+  }), 'utf8');
+  const mixRes = spawnSync(py, [path.join(PKG_ROOT, 'tools/mix.py'), cuesJson, bgmScDir, '', bgmWav], { encoding: 'utf8' });
+  assert.equal(mixRes.status, 0, `Per-scene BGM mix.py failed:\n${mixRes.stderr}`);
+  const rmsRes = spawnSync(py, [
+    '-c',
+    [
+      `import soundfile as sf, numpy as np`,
+      `y, sr = sf.read(${JSON.stringify(bgmWav)})`,
+      `s1 = float(np.sqrt(np.mean(y[int(0.6*sr):int(1.4*sr)]**2)))`,
+      `s2 = float(np.sqrt(np.mean(y[int(2.6*sr):int(3.4*sr)]**2)))`,
+      `print(f"{s1:.6f},{s2:.6f}")`,
+    ].join('; '),
+  ], { encoding: 'utf8' });
+  const [s1Rms, s2Rms] = (rmsRes.stdout || '').trim().split(',').map(Number);
+  assert.ok(s1Rms > 0.005, `Expected S1 BGM RMS > 0.005, got ${s1Rms}`);
+  assert.ok(s2Rms < 1e-5, `Expected S2 (bgm: false) mid-scene BGM RMS ~ 0, got ${s2Rms}`);
+}
+
+async function verifySfxAndMultiScriptContracts(page, port) {
+  await page.goto(`http://127.0.0.1:${port}/demo/?record=1`, { waitUntil: 'networkidle' });
+  const recSfx = await page.evaluate(() => window.__video.sfx('click'));
+  assert.equal(recSfx, false, 'Record mode must silence V.sfx()');
+
+  await page.goto(`http://127.0.0.1:${port}/demo/`, { waitUntil: 'networkidle' });
+  const sfxRes = await page.evaluate(() => {
+    window.V._sfxCount = 0;
+    const ok1 = window.__video.sfx('click');
+    const btn = window.V.u.interactive(window.V.u.h('button', null, 'HIT'), () => {}, { sfx: 'ping' });
+    document.getElementById('stage').appendChild(btn);
+    btn.click();
+    const countAfterTwo = window.V._sfxCount;
+    window.__video.setMuted(true);
+    const okMuted = window.__video.sfx('click');
+    window.__video.setMuted(false);
+    window.__video.setVolume(0);
+    const okZero = window.__video.sfx('click');
+    window.__video.setVolume(1);
+    btn.remove();
+    return { ok1, countAfterTwo, okMuted, okZero, finalCount: window.V._sfxCount };
+  });
+  assert.equal(sfxRes.ok1, true, 'Audible V.sfx("click") must return true');
+  assert.equal(sfxRes.countAfterTwo, 2, 'V.sfx + interactive({ sfx }) must both trigger WebAudio tone');
+  assert.equal(sfxRes.okMuted, false, 'Muted player must suppress V.sfx()');
+  assert.equal(sfxRes.okZero, false, '0% volume must suppress V.sfx()');
+  assert.equal(sfxRes.finalCount, 2, 'Suppressed V.sfx calls must not increment _sfxCount');
+
+  const multiScript = await page.evaluate(() => {
+    const V = window.V;
+    const savedScenes = V.scenes.slice();
+    const savedLoc = Object.assign({}, V.locales);
+    const savedVoice = V.voice;
+    const savedCfg = Object.assign({}, V.config);
+    V.voice = null;
+    V.config.tts = { speakers: { lead: { label: '小灵耳', voice: 'zh-CN-XiaoxiaoNeural', speed: '+6%' } } };
+    V.locale('ja', {
+      tts: { speakers: { lead: { label: 'リン', voice: 'ja-JP-NanamiNeural' } } },
+      scenes: { ms: { lines: ['これは重要なAIテストです。'], anchors: { 关键: '重要' } } },
+    });
+    V.scenes = [];
+    V.scene({
+      id: 'ms',
+      title: 'MS',
+      lines: [
+        { speaker: 'lead', text: 'First, check logs, then restart the service now.' },
+        { text: 'Café résumé验证通过。' },
+      ],
+      build() {},
+      update() {},
+    });
+    V.__langOverridden = true;
+    V.__activeLang = '';
+    V.layout();
+    const enSub0 = V.scenes[0].subCues[0].text;
+    const speakerZh = V.scenes[0].cues[0].speaker;
+    const voiceZh = V.scenes[0].cues[0].voice;
+    const ctxZh = V.makeCtx(V.scenes[0], 0);
+    const frAt = ctxZh.at(1, 'résumé');
+    V.__activeLang = 'ja';
+    V.layout();
+    const ctxJa = V.makeCtx(V.scenes[0], 0);
+    const jaAt = ctxJa.at(0, '关键');
+    const speakerJa = V.scenes[0].cues[0].speaker;
+    const voiceJa = V.scenes[0].cues[0].voice;
+    const rtlAr = V.isRtlLang('ar');
+    V.scenes = savedScenes;
+    V.locales = savedLoc;
+    V.voice = savedVoice;
+    V.config = savedCfg;
+    V.__langOverridden = false;
+    V.__activeLang = '';
+    V.layout();
+    return { enSub0, speakerZh, voiceZh, frAt, jaAt, speakerJa, voiceJa, rtlAr };
+  });
+  assert.equal(multiScript.enSub0, 'First, check logs', 'English comma subtitle split must preserve space after comma');
+  assert.equal(multiScript.speakerZh, '小灵耳', 'tts.speakers must resolve base speaker label');
+  assert.equal(multiScript.voiceZh, 'zh-CN-XiaoxiaoNeural', 'tts.speakers must inherit speaker voice');
+  assert.ok(multiScript.frAt > 0.15, `Accented Latin x.at("résumé") must resolve > 0.15s, got ${multiScript.frAt}`);
+  assert.ok(multiScript.jaAt > 0.15, `Japanese Kana/Kanji x.at("重要") must resolve > 0.15s, got ${multiScript.jaAt}`);
+  assert.equal(multiScript.speakerJa, 'リン', 'Localized tts.speakers must override speaker label');
+  assert.equal(multiScript.voiceJa, 'ja-JP-NanamiNeural', 'Localized tts.speakers must override speaker voice');
+  assert.equal(multiScript.rtlAr, true, 'Arabic locale must detect RTL direction');
+}
+
+async function verifyAutoplayBlockedUnlock(browser, port) {
+  const ctx = await browser.newContext({ viewport: { width: 640, height: 360 } });
+  const p = await ctx.newPage();
+  await p.addInitScript(() => {
+    let gestureSeen = false;
+    window.addEventListener('pointerdown', () => { gestureSeen = true; }, true);
+    const origPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+      if (!gestureSeen) return Promise.reject(new DOMException('Autoplay blocked', 'NotAllowedError'));
+      return origPlay.call(this);
+    };
+  });
+  await p.goto(`http://127.0.0.1:${port}/demo/?autoplay=1`, { waitUntil: 'networkidle' });
+  await p.waitForTimeout(120);
+  const blockedSt = await p.evaluate(() => ({
+    blocked: window.__video.getSyncState().audioBlocked,
+    btnBlockedCls: document.querySelector('[data-act="mute"]').classList.contains('is-blocked'),
+    mode: document.querySelector('[data-act="mute"]').dataset.soundMode,
+    osd: document.getElementById('osd').textContent,
+  }));
+  assert.equal(blockedSt.blocked, true, 'NotAllowedError on autoplay must set audioBlocked=true');
+  assert.equal(blockedSt.btnBlockedCls, true, 'Blocked autoplay must add .is-blocked on [data-act="mute"]');
+  assert.equal(blockedSt.mode, 'volumeMute', 'Blocked autoplay must show volumeMute icon instead of misleading volumeOn');
+  assert.ok(blockedSt.osd.includes('点击开启声音'), `Blocked autoplay must flash #osd hint, got "${blockedSt.osd}"`);
+
+  await p.locator('[data-act="mute"]').click();
+  await p.waitForTimeout(100);
+  const unlockedSt = await p.evaluate(() => ({
+    blocked: window.__video.getSyncState().audioBlocked,
+    btnBlockedCls: document.querySelector('[data-act="mute"]').classList.contains('is-blocked'),
+    menuOpen: document.getElementById('controls').classList.contains('sound-open'),
+    osd: document.getElementById('osd').textContent,
+  }));
+  assert.equal(unlockedSt.blocked, false, 'Clicking [data-act="mute"] must unlock blocked audio');
+  assert.equal(unlockedSt.btnBlockedCls, false, 'Unlocking audio must clear .is-blocked');
+  assert.equal(unlockedSt.menuOpen, false, 'First click on blocked mute button must unlock audio without popping open .sound-menu');
+  assert.equal(unlockedSt.osd, '音量 100%', 'Unlocking blocked audio must confirm active volume in #osd');
+  await ctx.close();
+}
+
+async function verifyRuntimeSetLangHotSwitch(page, port) {
+  await page.goto(`http://127.0.0.1:${port}/demo/`, { waitUntil: 'networkidle' });
+  const beforeSwitch = await page.evaluate(() => {
+    const s2 = window.V.scenes[1];
+    const c0 = s2.cues[0];
+    const mid = s2.start + (c0.start + c0.end) * 0.5;
+    window.__video.seek(mid);
+    return {
+      langCount: document.querySelectorAll('.sound-lang-item').length,
+      docTitle: document.title,
+      boxTxt: document.querySelector('.s2-box')?.textContent,
+      subTxt: document.querySelector('#subs .sub-text > span:last-child')?.textContent,
+    };
+  });
+  assert.equal(beforeSwitch.langCount, 2, 'Multi-locale config must render 2 language rows in .sound-menu');
+  assert.equal(beforeSwitch.docTitle, '微内核自检演示');
+  assert.equal(beforeSwitch.boxTxt, 'PURE F(T)');
+  assert.ok(beforeSwitch.subTxt.includes('时间纯函数'), `Expected zh-CN subtitle before switch, got "${beforeSwitch.subTxt}"`);
+
+  const enSwitch = await page.evaluate(async () => {
+    await window.__video.setLang('en');
+    const s2 = window.V.scenes[1];
+    const c0 = s2.cues[0];
+    const st = window.__video.getSyncState();
+    const lt = st.now - s2.start;
+    return {
+      lang: st.lang,
+      htmlLang: document.documentElement.getAttribute('lang'),
+      docTitle: document.title,
+      inS2CueMid: lt >= c0.start + 0.1 && lt <= c0.end - 0.1,
+      boxTxt: document.querySelector('.s2-box')?.textContent,
+      subTxt: document.querySelector('#subs .sub-text > span:last-child')?.textContent,
+      chapHd: document.querySelector('.chap-menu-hd')?.textContent,
+      muteTxt: document.querySelector('.sound-menu [data-sound="mute"] span')?.textContent,
+      deepLink: window.__video.getDeepLink(),
+    };
+  });
+  assert.equal(enSwitch.lang, 'en', 'setLang("en") must update active lang');
+  assert.equal(enSwitch.htmlLang, 'en', 'setLang("en") must update <html lang>');
+  assert.equal(enSwitch.docTitle, 'Microkernel Demo EN', 'setLang("en") must update document.title');
+  assert.equal(enSwitch.inS2CueMid, true, 'setLang("en") must preserve logical mid-cue position in S2');
+  assert.equal(enSwitch.boxTxt, 'PURE F(T) EN', 'setLang("en") must re-render [data-i18n] scene DOM');
+  assert.match(enSwitch.subTxt, /Every pure function|deterministic/, `setLang("en") must switch active subtitle, got "${enSwitch.subTxt}"`);
+  assert.equal(enSwitch.chapHd, 'CHAPTERS', 'setLang("en") must localize .chap-menu-hd');
+  assert.equal(enSwitch.muteTxt, 'Mute All', 'setLang("en") must localize sound menu labels');
+  assert.ok(enSwitch.deepLink.includes('lang=en'), `getDeepLink() after setLang("en") must include lang=en, got ${enSwitch.deepLink}`);
+
+  const zhRoundTrip = await page.evaluate(async () => {
+    await window.__video.setLang('zh-CN');
+    window.__video.seek(0.2);
+    return {
+      lang: window.__video.getSyncState().lang,
+      badgeTxt: document.querySelector('.test-preset-badge')?.textContent,
+      chapHd: document.querySelector('.chap-menu-hd')?.textContent,
+      muteTxt: document.querySelector('.sound-menu [data-sound="mute"] span')?.textContent,
+      deepLink: window.__video.getDeepLink(),
+    };
+  });
+  assert.equal(zhRoundTrip.lang, 'zh-CN', 'setLang("zh-CN") must round-trip back to base lang');
+  assert.equal(zhRoundTrip.badgeTxt, 'OPEN-KERNEL', 'x.t() must restore base fallback string after round-trip');
+  assert.equal(zhRoundTrip.chapHd, '章节导航', 'setLang("zh-CN") must restore Chinese UI chrome');
+  assert.equal(zhRoundTrip.muteTxt, '全部静音', 'setLang("zh-CN") must restore Chinese sound menu label');
+  assert.equal(zhRoundTrip.deepLink.includes('lang='), false, 'getDeepLink() on base lang must omit redundant lang param');
 }
 
 async function verifyBrowserCapabilities(videoDir) {
@@ -1016,6 +1258,9 @@ async function verifyBrowserCapabilities(videoDir) {
 
     await verifyRound3BrowserContracts(page, port);
     await verifyPlayerBarContracts(page, port);
+    await verifySfxAndMultiScriptContracts(page, port);
+    await verifyRuntimeSetLangHotSwitch(page, port);
+    await verifyAutoplayBlockedUnlock(browser, port);
     await page.close();
   } finally {
     await browser.close();
@@ -1118,6 +1363,7 @@ async function main() {
 
   try {
     verifyRound3UnitRegressions();
+    verifyRound5SoundAndI18nUnit();
     console.log('[SelfTest 1/5] Scaffolding isolated video project (zero local videos/base)...');
     runCliCmd(['init', 'demo', '--title', '微内核自检演示', '--skill']);
     assert.equal(fs.existsSync(path.join(TEST_ROOT, 'videos/base')), false, 'videos/base must NOT exist locally');
@@ -1192,7 +1438,7 @@ async function main() {
     assert.ok(colThemeCss.includes('../shared-assets/collide.svg') && colThemeCss.includes('my-assets/collide.svg'), 'Theme CSS must rewrite ../assets/ collisions without corrupting substring paths');
     verifyBundleSafetyAndDepth(videoDir, colDir);
 
-    console.log('✅ All html-video-base v2.6 end-to-end self-tests PASSED.');
+    console.log('✅ All html-video-base v2.7 end-to-end self-tests PASSED.');
   } finally {
     fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   }

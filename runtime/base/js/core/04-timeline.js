@@ -13,19 +13,28 @@
     };
   }
 
+  const CJK_CHAR_RE = /[\u3000-\u303f\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af\uff01-\uff60]/;
+  const CJK_GLOBAL_RE = /[\u3000-\u303f\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af\uff01-\uff60]/g;
+  const WORD_GLOBAL_RE = /[\p{L}\p{N}][\p{L}\p{N}.'\-]*/gu;
+
   function weight(s) {
     const str = String(s || '');
-    const words = str.match(/[A-Za-z0-9][A-Za-z0-9.\-]*/g) || [];
+    const cjk = str.match(CJK_GLOBAL_RE) || [];
+    const nonCjk = str.replace(CJK_GLOBAL_RE, ' ');
+    const words = nonCjk.match(WORD_GLOBAL_RE) || [];
     let w = words.length * 1.5;
-    const rest = str.replace(/[A-Za-z0-9][A-Za-z0-9.\-]*/g, '').replace(/\s/g, '');
+    for (const ch of cjk) {
+      w += /[，。、：；！？“”‘’（）《》—…]/.test(ch) ? 0.45 : 1;
+    }
+    const rest = nonCjk.replace(WORD_GLOBAL_RE, '').replace(/\s/g, '');
     for (const ch of rest) {
-      w += /[，。、：；！？“”‘’（）《》—…,!?:;"'()]/.test(ch) ? 0.45 : 1;
+      w += /[,!?:;"'()\-—…]/.test(ch) ? 0.45 : 0.7;
     }
     return w;
   }
 
   function normKey(s) {
-    return String(s || '').replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '').toLowerCase();
+    return String(s || '').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
   }
 
   function findNth(haystack, needle, nth = 1) {
@@ -68,13 +77,13 @@
   }
 
   function estimateCharAnchor(rawText, needle, nth, dur) {
-    let charAcc = '';
+    let charAcc = '', rawPos = 0;
     const charMap = [];
-    for (let i = 0; i < rawText.length; i++) {
-      const k = normKey(rawText[i]);
-      if (!k) continue;
-      for (let j = 0; j < k.length; j++) charMap.push(i);
+    for (const ch of rawText) {
+      const k = normKey(ch);
+      for (let j = 0; j < k.length; j++) charMap.push(rawPos);
       charAcc += k;
+      rawPos += ch.length;
     }
     const pos = findNth(charAcc, needle, nth);
     if (pos < 0) return null;
@@ -128,6 +137,8 @@
       cue: i => (sc.cues[i] ? sc.cues[i].start : 0),
       end: i => (sc.cues[i] ? sc.cues[i].end : sc.duration),
       at: (i, kw, opts) => resolveAnchor(sc, si, i, kw, opts),
+      t: (key, fb, vars) => (V.t ? V.t(key, fb, vars, si) : (fb === undefined ? key : fb)),
+      sfx: (type, vol) => (V.sfx ? V.sfx(type, vol) : false),
       dur: sc.duration,
       clock: 0,
       alive: 0,
@@ -143,20 +154,56 @@
     return c.replace(/(?:[。！？；，、：!?;,:\s]|(?<!\.)\.(?!\.))+$/g, '');
   }
 
+  function measureSubUnits(s) {
+    let u = 0;
+    for (const ch of s) u += CJK_CHAR_RE.test(ch) ? 1 : 0.72;
+    return u;
+  }
+
+  function needsSpaceBetween(a, b) {
+    if (!a || !b || /\s$/.test(a) || /^\s/.test(b)) return false;
+    return !CJK_CHAR_RE.test(a[a.length - 1]) && !CJK_CHAR_RE.test(b[0]);
+  }
+
+  function joinSubFrag(a, b) {
+    if (!a) return b;
+    return needsSpaceBetween(a, b) ? `${a} ${b}` : a + b;
+  }
+
+  function splitLongSubClause(sub) {
+    if (measureSubUnits(sub) <= 28 || !/\s/.test(sub)) return [sub];
+    const out = [];
+    let buf = '';
+    for (const word of sub.split(/\s+/).filter(Boolean)) {
+      const cand = joinSubFrag(buf, word);
+      if (buf && measureSubUnits(cand) > 28) { out.push(buf); buf = word; }
+      else buf = cand;
+    }
+    if (buf) out.push(buf);
+    return out;
+  }
+
+  function packSubClauses(subs, chunks) {
+    let buf = '';
+    for (const rawSub of subs) {
+      for (const piece of splitLongSubClause(rawSub.trim())) {
+        if (!piece) continue;
+        const cand = joinSubFrag(buf, piece);
+        if (buf && measureSubUnits(cand) > 28) { chunks.push(buf); buf = piece; }
+        else buf = cand;
+      }
+    }
+    if (buf) chunks.push(buf);
+  }
+
   function chunkSentences(raw) {
-    const parts = raw.split(/(?<=[。！？；!?]|;|(?<!\.)\.(?![A-Za-z0-9.]))\s*/);
+    const parts = raw.split(/(?<=[。！？；!?]|;|(?<!\.)\.(?![\p{L}\p{N}.]))\s*/u);
     const chunks = [];
     for (const s of parts) {
       const clean = s.trim();
       if (!clean) continue;
-      if (clean.length <= 28) { chunks.push(clean); continue; }
-      const subs = clean.split(/(?<=[，、：,:])\s*/);
-      let buf = '';
-      for (const sub of subs) {
-        if ((buf + sub).length > 28 && buf) { chunks.push(buf); buf = sub; }
-        else buf += sub;
-      }
-      if (buf) chunks.push(buf);
+      if (measureSubUnits(clean) <= 28) { chunks.push(clean); continue; }
+      packSubClauses(clean.split(/(?<=[，、：,:])\s*/), chunks);
     }
     return chunks.map(cleanChunkTail).filter(Boolean);
   }
@@ -293,14 +340,35 @@
     }
   }
 
+  const SPEAKER_INHERIT_KEYS = ['voice', 'speed', 'pitch', 'style', 'instructions', 'model', 'provider', 'volume', 'xmlLang'];
+
+  function resolveSpeakerLabel(sp, key) {
+    if (sp.label === false || sp.label === '') return null;
+    return sp.label || sp.name || key;
+  }
+
+  function applySpeakerPreset(lineObj, speakers) {
+    const key = lineObj.speakerId || lineObj.speaker;
+    const raw = key && speakers ? speakers[key] : null;
+    if (!raw) return lineObj;
+    const sp = typeof raw === 'string' ? { voice: raw } : raw;
+    const out = Object.assign({}, lineObj, { speakerId: key, speaker: resolveSpeakerLabel(sp, key) });
+    for (const k of SPEAKER_INHERIT_KEYS) {
+      if (out[k] === undefined && sp[k] !== undefined) out[k] = sp[k];
+    }
+    return out;
+  }
+
   function buildLocalizedLines(sc, scLoc) {
+    const cfg = V.getCfg();
+    const speakers = cfg.tts && cfg.tts.speakers;
     const locArr = Array.isArray(scLoc) ? scLoc : (scLoc && Array.isArray(scLoc.lines) ? scLoc.lines : null);
     const count = locArr ? locArr.length : sc._origLines.length;
     const out = [];
     for (let li = 0; li < count; li++) {
       const orig = sc._origLines[li];
       const baseObj = orig ? (typeof orig === 'string' ? { text: orig } : orig) : { text: '' };
-      out.push(applyLocaleLine(baseObj, scLoc, li));
+      out.push(applySpeakerPreset(applyLocaleLine(baseObj, scLoc, li), speakers));
     }
     sc.lines = out;
   }

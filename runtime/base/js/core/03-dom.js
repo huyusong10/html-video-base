@@ -103,22 +103,38 @@
     if (el) el.classList.toggle(cls, Boolean(on));
   }
 
-  function bindInteractiveEvent(el, type, fn) {
+  function playInteractiveSfx(sfxSpec) {
+    if (!sfxSpec || !V.sfx) return;
+    V.sfx(sfxSpec === true ? 'click' : sfxSpec);
+  }
+
+  function bindInteractiveEvent(el, type, fn, sfxSpec) {
     if (typeof fn !== 'function') return;
     el.addEventListener(type, e => {
-      if (type === 'click' || type === 'dblclick') e.stopPropagation();
+      if (type === 'click' || type === 'dblclick') {
+        e.stopPropagation();
+        playInteractiveSfx(sfxSpec);
+      }
       fn.call(el, e, el);
     });
   }
 
-  function interactive(el, handlers) {
+  function resolveInteractiveSfx(handlers, opts) {
+    if (opts && opts.sfx !== undefined) return opts.sfx;
+    return handlers && typeof handlers === 'object' ? handlers.sfx : undefined;
+  }
+
+  function interactive(el, handlers, opts) {
     if (!el) return el;
     if (el.setAttribute) el.setAttribute('data-interactive', '1');
     if (el.style && !el.style.pointerEvents) el.style.pointerEvents = 'auto';
+    const sfxSpec = resolveInteractiveSfx(handlers, opts);
     if (typeof handlers === 'function') {
-      bindInteractiveEvent(el, 'click', handlers);
+      bindInteractiveEvent(el, 'click', handlers, sfxSpec);
     } else if (handlers && typeof handlers === 'object') {
-      for (const [k, fn] of Object.entries(handlers)) bindInteractiveEvent(el, k, fn);
+      for (const [k, fn] of Object.entries(handlers)) {
+        if (k !== 'sfx') bindInteractiveEvent(el, k, fn, sfxSpec);
+      }
     }
     return el;
   }

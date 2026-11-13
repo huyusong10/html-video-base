@@ -365,6 +365,7 @@ function collectDryVideoClips(V, si, sceneStart, videoClipsOut) {
 }
 
 function dryRunSingleScene(V, sc, si, videoClipsOut) {
+  V._currentSceneIdx = si;
   const ctx = V.makeCtx ? V.makeCtx(sc, si) : { cue: () => 0, end: () => sc.duration, at: () => 0, dur: sc.duration, holdStart: () => 0.3 };
   sc.root = createMockElement('div');
   sc.ctx = ctx;

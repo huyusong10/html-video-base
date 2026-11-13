@@ -46,35 +46,44 @@
     });
   }
 
+  function uiText(key, vars) {
+    return V.uiStr ? V.uiStr(key, vars) : key;
+  }
+
   function buildControlsBar(cfg, uiCfg) {
-    const homeTitle = cfg.homeLabel || '返回主界面';
+    const homeTitle = cfg.homeLabel || uiText('home');
     const homeLink = cfg.homeUrl === false
       ? null
       : h('a', { class: 'ctrl-home ctrl-icon-btn', href: cfg.homeUrl || '../', title: homeTitle, 'aria-label': homeTitle }, makeCtrlIcon(uiCfg.icons.home));
+    const rateLabel = uiText('rate', { rate: '1.0x' });
     const rateWrap = uiCfg.rate
       ? h('div', { class: 'rate-wrap' },
-          h('button', { class: 'ctrl-rbtn ctrl-icon-btn rate-trigger', 'data-act': 'rate', title: '播放倍速（1.0x）', 'aria-label': '播放倍速（1.0x）' }, makeCtrlIcon(uiCfg.icons.rate)),
+          h('button', { class: 'ctrl-rbtn ctrl-icon-btn rate-trigger', 'data-act': 'rate', title: rateLabel, 'aria-label': rateLabel }, makeCtrlIcon(uiCfg.icons.rate)),
           h('div', { class: 'rate-menu' }))
       : null;
+    const webLabel = uiText('webEnter');
     const webFullBtn = uiCfg.webFull
-      ? h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'webfull', title: '窗口全屏（W）', 'aria-label': '窗口全屏' }, makeCtrlIcon(uiCfg.icons.webEnter))
+      ? h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'webfull', title: webLabel, 'aria-label': webLabel }, makeCtrlIcon(uiCfg.icons.webEnter))
       : null;
+    const playLabel = uiText('play');
+    const subsLabel = uiText('subsHide');
+    const fullLabel = uiText('fullEnter');
     return h('div', { id: 'controls', 'data-interactive': '1' },
       homeLink,
-      h('button', { class: 'ctrl-icon-btn', 'data-act': 'play', 'data-state': 'paused', 'aria-pressed': 'false', title: '播放（空格）', 'aria-label': '播放（空格）' }, makeCtrlIcon(uiCfg.icons.play)),
+      h('button', { class: 'ctrl-icon-btn', 'data-act': 'play', 'data-state': 'paused', 'aria-pressed': 'false', title: playLabel, 'aria-label': playLabel }, makeCtrlIcon(uiCfg.icons.play)),
       ...renderCustomControls('left', uiCfg),
       h('span', { class: 'time' }, '0:00'),
       h('div', { class: 'track' }, h('div', { class: 'fill' }), h('i', { class: 'thumb' }), h('div', { class: 'track-tip' })),
       h('div', { class: 'chap-wrap' },
-        h('button', { class: 'chap-trigger', 'data-act': 'chap', title: '切换章节 / 搜索台词（/）' }, h('span', { class: 'chap-cur-txt' }), h('i', { class: 'chap-caret' }, makeCtrlIcon(uiCfg.icons.chapCaret))),
-        h('div', { class: 'chap-menu' }, h('div', { class: 'chap-menu-hd' }, '章节导航 · CHAPTERS'), h('div', { class: 'chap-list' }))),
+        h('button', { class: 'chap-trigger', 'data-act': 'chap', title: uiText('chapTrigger') }, h('span', { class: 'chap-cur-txt' }), h('i', { class: 'chap-caret' }, makeCtrlIcon(uiCfg.icons.chapCaret))),
+        h('div', { class: 'chap-menu' }, h('div', { class: 'chap-menu-hd' }, uiText('chapHeader')), h('div', { class: 'chap-list' }))),
       ...renderCustomControls('right', uiCfg),
       rateWrap,
-      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'subs', title: '关闭字幕', 'aria-label': '关闭字幕' }, makeCtrlIcon(uiCfg.icons.subsOn)),
-      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'mute', title: '声音设置（M 静音 / ↑↓ 调节音量）', 'aria-label': '声音设置' }, makeCtrlIcon(uiCfg.icons.volumeOn)),
+      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'subs', title: subsLabel, 'aria-label': subsLabel }, makeCtrlIcon(uiCfg.icons.subsOn)),
+      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'mute', title: uiText('soundOnTip', { pct: 100 }), 'aria-label': uiText('soundLabel') }, makeCtrlIcon(uiCfg.icons.volumeOn)),
       h('div', { class: 'sound-menu' }),
       webFullBtn,
-      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'full', title: '全屏（F）', 'aria-label': '全屏' }, makeCtrlIcon(uiCfg.icons.fullEnter)));
+      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'full', title: fullLabel, 'aria-label': fullLabel }, makeCtrlIcon(uiCfg.icons.fullEnter)));
   }
 
   V.mountStage = function () {
@@ -90,8 +99,8 @@
     document.body.classList.toggle('ctrl-overlay', uiCfg.controlsMode === 'overlay');
     if (document.getElementById('stage')) return;
 
-    const sbTxt = h('span', { class: 'v-sandbox-txt egg-ban-txt' }, '🎮 彩蛋试玩中');
-    const sbBack = h('button', { class: 'v-sandbox-back egg-back-btn', 'data-interactive': '1', type: 'button' }, '↩ 返回终章');
+    const sbTxt = h('span', { class: 'v-sandbox-txt egg-ban-txt' }, uiText('sandboxActive'));
+    const sbBack = h('button', { class: 'v-sandbox-back egg-back-btn', 'data-interactive': '1', type: 'button' }, uiText('sandboxBack'));
     const sbBar = h('div', { class: 'v-sandbox-bar egg-banner', 'data-interactive': '1' }, sbTxt, sbBack);
     const osdEl = h('div', { id: 'osd', 'aria-live': 'polite' });
     sandboxState.el = sbBar;
@@ -113,7 +122,7 @@
         h('div', { id: 'wipe' }),
         h('div', { id: 'safe-guide' }, h('div', { class: 'safe-action' }), h('div', { class: 'safe-sub' }, 'SUBTITLE SAFE ZONE'))),
       osdEl,
-      h('div', { id: 'start-hint' }, cfg.startHint || '▶ 点击画面开始播放'));
+      h('div', { id: 'start-hint' }, cfg.startHint || uiText('startHint')));
 
     document.body.prepend(vp, buildControlsBar(cfg, uiCfg));
   };
@@ -130,6 +139,7 @@
       V._subtitlesRuntime.resetSceneSubLayout();
     }
     const si = V.scenes.indexOf(sc);
+    V._currentSceneIdx = si;
     sc.root = h('div', { class: 'scene ' + (sc.cls || '') });
     sc.ctx = V.makeCtx(sc, si);
     stage.appendChild(sc.root);
@@ -137,11 +147,13 @@
     V._inSceneUpdate = true;
     try {
       sc.build(sc.root, sc.ctx);
+      if (V.localizeDom) V.localizeDom(sc.root, si);
     } finally {
       V._inSceneBuild = false;
       V._inSceneUpdate = false;
     }
     current = sc;
+    if (audioRt && audioRt.syncSceneVolume) audioRt.syncSceneVolume();
     V.emit('onSceneEnter', { scene: sc, sceneIndex: si });
   }
 
@@ -227,13 +239,14 @@
   function enterSandbox(opts = {}) {
     const target = Number(opts.targetTime);
     if (!Number.isFinite(target)) return;
-    const prefix = opts.prefix === undefined ? '🎮 彩蛋试玩：' : opts.prefix;
-    const label = opts.hint ? prefix + opts.hint : '🎮 彩蛋试玩中';
+    if (opts.sfx !== false && V.sfx) V.sfx(opts.sfx || 'pop', 0.45);
+    const prefix = opts.prefix === undefined ? uiText('sandboxPrefix') : opts.prefix;
+    const label = opts.hint ? prefix + opts.hint : uiText('sandboxActive');
     const last = V.scenes[V.scenes.length - 1];
     sandboxState.autoExitOnLast = !last || target < last.start;
     sandboxState.returnTime = Number.isFinite(opts.returnTime) ? opts.returnTime : resolveDefaultSandboxReturn();
     sandboxState.entering = true;
-    setSandboxActiveDom(true, label, opts.backLabel || '↩ 返回终章');
+    setSandboxActiveDom(true, label, opts.backLabel || uiText('sandboxBack'));
     seek(target);
     pause();
     sandboxState.entering = false;
@@ -368,6 +381,16 @@
     if (ui.volVal) ui.volVal.textContent = pct + '%';
   }
 
+  function syncSoundLabelsUI(st) {
+    if (ui.volRange) ui.volRange.setAttribute('aria-label', uiText('volAria'));
+    if (ui.soundVoiceTxt) ui.soundVoiceTxt.textContent = uiText('voiceItem');
+    if (ui.soundBgmTxt) ui.soundBgmTxt.textContent = uiText('bgmItem');
+    if (ui.soundMuteTxt) ui.soundMuteTxt.textContent = st.hasBgm ? uiText('muteAllItem') : uiText('muteItem');
+    if (!ui.langItems) return;
+    const active = ((V.getActiveLang && V.getActiveLang()) || (V.getBaseLang && V.getBaseLang()) || '').toLowerCase();
+    ui.langItems.forEach(({ el, code }) => toggle(el, 'on', code.toLowerCase() === active));
+  }
+
   function syncSoundMenuUI() {
     if (!audioRt) return;
     const st = audioRt.getState(now);
@@ -375,17 +398,16 @@
       const icons = getUiCfg(V.getCfg()).icons;
       const [key, label] = audioRt.resolveSoundBtnSpec();
       ui.mute.classList.toggle('is-off', st.muted);
+      ui.mute.classList.toggle('is-blocked', Boolean(st.audioBlocked && !st.muted));
       ui.mute.dataset.soundMode = key;
       swapBtnIcon(ui.mute, key, icons[key], label);
     }
     syncVolumeSliderUI(st);
+    syncSoundLabelsUI(st);
     if (ui.soundVoice) { ui.soundVoice.hidden = !st.hasBgm; toggle(ui.soundVoice, 'on', st.voiceOn); }
     if (ui.soundBgm) { ui.soundBgm.hidden = !st.hasBgm; toggle(ui.soundBgm, 'on', st.bgmOn); }
     if (ui.soundSepBgm) ui.soundSepBgm.hidden = !st.hasBgm;
-    if (ui.soundAllMute) {
-      if (ui.soundMuteTxt) ui.soundMuteTxt.textContent = st.hasBgm ? '全部静音' : '静音';
-      toggle(ui.soundAllMute, 'on', st.muted);
-    }
+    if (ui.soundAllMute) toggle(ui.soundAllMute, 'on', st.muted);
   }
 
   function stepVolumeBy(delta, showOsd = true) {
@@ -396,11 +418,12 @@
     audioRt.setVolume(next);
     if (!showOsd) return;
     const pct = Math.round(next * 100);
-    flashOsd(pct <= 0 ? '已静音 · 0%' : `音量 ${pct}%`);
+    flashOsd(pct <= 0 ? uiText('osdMutedZero') : uiText('osdVol', { pct }));
   }
 
   function bindVolumeWheel(el) {
-    if (!el) return;
+    if (!el || el._wheelBound) return;
+    el._wheelBound = true;
     el.addEventListener('wheel', e => {
       if (!e.deltaY) return;
       e.preventDefault();
@@ -581,7 +604,7 @@
     if (!ui.rate) return;
     const isNormal = Math.abs(playbackRate - 1) < 0.01;
     const txt = fmtRate(playbackRate);
-    const label = `播放倍速（${txt}）`;
+    const label = uiText('rate', { rate: txt });
     ui.rate.classList.toggle('on', !isNormal);
     ui.rate.classList.toggle('ctrl-icon-btn', isNormal);
     if (isNormal) {
@@ -709,25 +732,45 @@
     };
   }
 
+  function appendSoundLangItems(menu, bar) {
+    const locales = V.getAvailableLocales ? V.getAvailableLocales() : [];
+    ui.langItems = [];
+    if (locales.length <= 1) return;
+    menu.appendChild(h('div', { class: 'sound-sep sound-lang-sep' }));
+    ui.langItems = locales.map(entry => {
+      const el = h('div', { class: 'sound-item sound-lang-item', 'data-lang': entry.code }, h('span', null, entry.label), h('i', null, '✓'));
+      el.onclick = e => {
+        e.stopPropagation();
+        setOpenMenu(bar, '');
+        setLang(entry.code);
+      };
+      menu.appendChild(el);
+      return { el, code: entry.code };
+    });
+  }
+
   function buildSoundMenu(bar) {
     const menu = bar.querySelector('.sound-menu');
     ui.soundMenu = menu;
     if (!menu) return;
     menu.innerHTML = '';
-    ui.volRange = h('input', { class: 'sound-vol-range', type: 'range', min: '0', max: '100', step: '1', value: '100', 'aria-label': '音量' });
+    ui.volRange = h('input', { class: 'sound-vol-range', type: 'range', min: '0', max: '100', step: '1', value: '100', 'aria-label': uiText('volAria') });
     ui.volVal = h('span', { class: 'sound-vol-val' }, '100%');
     const volRow = h('div', { class: 'sound-vol-row' }, ui.volRange, ui.volVal);
     volRow.onclick = e => e.stopPropagation();
     ui.volRange.oninput = () => audioRt.setVolume(Number(ui.volRange.value) / 100);
-    ui.soundVoice = h('div', { class: 'sound-item', 'data-sound': 'voice' }, h('span', null, '解说声音'), h('i', null, '✓'));
-    ui.soundBgm = h('div', { class: 'sound-item', 'data-sound': 'bgm' }, h('span', null, '背景音乐'), h('i', null, '✓'));
+    ui.soundVoiceTxt = h('span', null, uiText('voiceItem'));
+    ui.soundBgmTxt = h('span', null, uiText('bgmItem'));
+    ui.soundVoice = h('div', { class: 'sound-item', 'data-sound': 'voice' }, ui.soundVoiceTxt, h('i', null, '✓'));
+    ui.soundBgm = h('div', { class: 'sound-item', 'data-sound': 'bgm' }, ui.soundBgmTxt, h('i', null, '✓'));
     ui.soundSepBgm = h('div', { class: 'sound-sep' });
-    ui.soundMuteTxt = h('span', null, '全部静音');
+    ui.soundMuteTxt = h('span', null, uiText('muteAllItem'));
     ui.soundAllMute = h('div', { class: 'sound-item', 'data-sound': 'mute' }, ui.soundMuteTxt, h('i', null, '✓'));
     ui.soundVoice.onclick = e => { e.stopPropagation(); audioRt.toggleVoiceFromMenu(); };
     ui.soundBgm.onclick = e => { e.stopPropagation(); audioRt.toggleBgmFromMenu(); };
     ui.soundAllMute.onclick = e => { e.stopPropagation(); audioRt.setMuted(!audioRt.isAllMuted()); };
     menu.append(volRow, h('div', { class: 'sound-sep' }), ui.soundVoice, ui.soundBgm, ui.soundSepBgm, ui.soundAllMute);
+    appendSoundLangItems(menu, bar);
     bindVolumeWheel(menu);
     syncSoundMenuUI();
   }
@@ -804,8 +847,8 @@
     const icons = getUiCfg(V.getCfg()).icons;
     document.body.classList.toggle('os-full', osOn);
     document.body.classList.toggle('web-full', webFull);
-    setBtnIcon(ui.webfull, webFull ? 'webExit' : 'webEnter', webFull ? icons.webExit : icons.webEnter, webFull ? '退出窗口全屏（W / Esc）' : '窗口全屏（W）', webFull);
-    setBtnIcon(ui.full, osOn ? 'fullExit' : 'fullEnter', osOn ? icons.fullExit : icons.fullEnter, osOn ? '退出全屏（F / Esc）' : '全屏（F）', osOn);
+    setBtnIcon(ui.webfull, webFull ? 'webExit' : 'webEnter', webFull ? icons.webExit : icons.webEnter, uiText(webFull ? 'webExit' : 'webEnter'), webFull);
+    setBtnIcon(ui.full, osOn ? 'fullExit' : 'fullEnter', osOn ? icons.fullExit : icons.fullEnter, uiText(osOn ? 'fullExit' : 'fullEnter'), osOn);
     releaseBarHold();
     fit();
   }
@@ -861,14 +904,14 @@
     const next = !audioRt.isAllMuted();
     audioRt.setMuted(next);
     const pct = Math.round(audioRt.getState(now).volume * 100);
-    flashOsd(next ? '已静音' : `音量 ${pct}%`);
+    flashOsd(next ? uiText('osdMuted') : uiText('osdVol', { pct }));
   }
 
   function toggleBgmShortcut() {
     if (!audioRt.hasBgm()) return;
     const next = !audioRt.getState(now).bgmOn;
     audioRt.setBgm(next);
-    flashOsd(next ? '背景音乐已开' : '背景音乐已关');
+    flashOsd(uiText(next ? 'osdBgmOn' : 'osdBgmOff'));
   }
 
   function seekDeltaShortcut(stepSec) {
@@ -1037,7 +1080,7 @@
     const icons = getUiCfg(V.getCfg()).icons;
     const state = playing ? 'playing' : (ended ? 'ended' : 'paused');
     const key = playing ? 'pause' : (ended ? 'replay' : 'play');
-    const label = playing ? '暂停（空格）' : (ended ? '重播（空格）' : '播放（空格）');
+    const label = uiText(key);
     ui.play.dataset.state = state;
     ui.play.setAttribute('aria-pressed', String(playing));
     swapBtnIcon(ui.play, key, icons[key], label);
@@ -1048,7 +1091,7 @@
     const icons = getUiCfg(V.getCfg()).icons;
     const key = showSubs ? 'subsOn' : 'subsOff';
     ui.subs.classList.toggle('is-off', !showSubs);
-    swapBtnIcon(ui.subs, key, icons[key], showSubs ? '关闭字幕' : '开启字幕');
+    swapBtnIcon(ui.subs, key, icons[key], uiText(showSubs ? 'subsHide' : 'subsShow'));
   }
 
   function buildUI(uiCfg) {
@@ -1082,6 +1125,11 @@
     bindVolumeWheel(ui.mute);
     ui.mute.onclick = e => {
       e.stopPropagation();
+      if (audioRt && audioRt.consumeRecentUnlock && audioRt.consumeRecentUnlock()) {
+        const pct = Math.round(audioRt.getState(now).volume * 100);
+        flashOsd(uiText('osdVol', { pct }));
+        return;
+      }
       setOpenMenu(bar, bar.dataset.menu === 'sound' ? '' : 'sound');
     };
     if (ui.webfull) ui.webfull.onclick = () => setWebFull(!webFull);
@@ -1209,6 +1257,138 @@
     }
   }
 
+  function captureCuePos(cues, lt, scDur) {
+    const last = cues[cues.length - 1];
+    if (lt > last.end) {
+      return { mode: 'tail', li: cues.length - 1, frac: clamp((lt - last.end) / Math.max(0.05, scDur - last.end), 0, 1) };
+    }
+    const li = Math.max(0, cues.findIndex(c => lt <= c.end));
+    const c = cues[li];
+    if (lt < c.start) {
+      const prevEnd = li > 0 ? cues[li - 1].end : 0;
+      return { mode: 'gap', li, frac: clamp((lt - prevEnd) / Math.max(0.05, c.start - prevEnd), 0, 1) };
+    }
+    return { mode: 'cue', li, frac: clamp((lt - c.start) / Math.max(0.05, c.end - c.start), 0, 1) };
+  }
+
+  function captureLogicalPos() {
+    const si = Math.max(0, V.scenes.indexOf(current));
+    const sc = V.scenes[si];
+    if (!sc) return { si: 0, mode: 'scene', li: 0, frac: 0 };
+    const lt = clamp(now - sc.start, 0, sc.duration);
+    if (!sc.cues || !sc.cues.length) {
+      return { si, mode: 'scene', li: 0, frac: clamp(lt / Math.max(0.1, sc.duration), 0, 1) };
+    }
+    return Object.assign({ si }, captureCuePos(sc.cues, lt, sc.duration));
+  }
+
+  function resolveMappedCueLt(cues, scDur, pos) {
+    const li = clamp(pos.li, 0, cues.length - 1);
+    const c = cues[li];
+    if (pos.mode === 'tail') {
+      const last = cues[cues.length - 1];
+      return last.end + pos.frac * Math.max(0, scDur - last.end);
+    }
+    if (pos.mode === 'gap') {
+      const prevEnd = li > 0 ? cues[li - 1].end : 0;
+      return prevEnd + pos.frac * Math.max(0, c.start - prevEnd);
+    }
+    return c.start + pos.frac * Math.max(0, c.end - c.start);
+  }
+
+  function resolveMappedPos(pos) {
+    if (!V.scenes.length) return 0;
+    const sc = V.scenes[clamp(pos.si, 0, V.scenes.length - 1)];
+    if (!sc) return 0;
+    if (pos.mode === 'scene' || !sc.cues || !sc.cues.length) {
+      return sc.start + pos.frac * sc.duration;
+    }
+    return sc.start + resolveMappedCueLt(sc.cues, sc.duration, pos);
+  }
+
+  async function ensureLocaleAssetsLoaded(target) {
+    if (shouldProbeLocalePack(target)) await loadOptionalScript(`locales/${target}.js`);
+    if (V.activateCachedVoice && V.activateCachedVoice(target)) return;
+    const cfg0 = V.getCfg();
+    const baseTimings = cfg0.timingsScript || 'assets/voice/timings.js';
+    const isSec = V.isSecondaryLocale ? V.isSecondaryLocale(target) : false;
+    const targetTimings = isSec ? baseTimings.replace(/\.js$/i, `.${target}.js`) : baseTimings;
+    const ok = await loadOptionalScript(targetTimings);
+    if (ok && V.captureVoice) V.captureVoice(V.voice);
+    else clearStaleVoiceIfNeeded();
+  }
+
+  function syncStaticBarLabels(bar, cfg) {
+    const home = bar.querySelector('.ctrl-home');
+    if (home) {
+      const ht = cfg.homeLabel || uiText('home');
+      home.title = ht;
+      home.setAttribute('aria-label', ht);
+    }
+    const chapTrig = bar.querySelector('.chap-trigger');
+    if (chapTrig) chapTrig.title = uiText('chapTrigger');
+    const chapHd = bar.querySelector('.chap-menu-hd');
+    if (chapHd) chapHd.textContent = uiText('chapHeader');
+    if (ui.mute) ui.mute.setAttribute('aria-label', uiText('soundLabel'));
+  }
+
+  function refreshLocalizedChrome(cfg, uiCfg) {
+    if (sandboxState.txtEl && !sandboxState.active) sandboxState.txtEl.textContent = uiText('sandboxActive');
+    if (sandboxState.backEl) sandboxState.backEl.textContent = uiText('sandboxBack');
+    const hintEl = document.getElementById('start-hint');
+    if (hintEl) hintEl.textContent = cfg.startHint || uiText('startHint');
+    if (RECORD) return;
+    const bar = document.getElementById('controls');
+    if (!bar) return;
+    syncStaticBarLabels(bar, cfg);
+    mountTrackMarks(bar.querySelector('.track'), uiCfg);
+    buildChapters(bar);
+    buildSoundMenu(bar);
+    syncRateBtnUI();
+    syncSubsBtnUI();
+    syncFullUI();
+  }
+
+  function resolveTargetLangCode(nextLang) {
+    const trimmed = String(nextLang || '').trim();
+    if (trimmed) return trimmed;
+    return (V.getBaseLang && V.getBaseLang()) || '';
+  }
+
+  function applyPostLocaleReload(pos, wasPlaying, target) {
+    if (V.syncDocLangAttrs) V.syncDocLangAttrs();
+    if (current && current.root) current.root.remove();
+    current = null;
+    V.layout();
+    const cfg = V.getCfg(), uiCfg = getUiCfg(cfg);
+    if (cfg.title) document.title = cfg.title;
+    mountHudTicks(uiCfg);
+    if (audioRt) audioRt.reloadTracks(cfg);
+    refreshLocalizedChrome(cfg, uiCfg);
+    lastSeekTarget = -1;
+    seek(resolveMappedPos(pos), true);
+    if (wasPlaying && audioRt) audioRt.startPlayback();
+    V.emit('onLocaleChange', { lang: V.getActiveLang(), duration: V.duration });
+    const hit = V.getAvailableLocales ? V.getAvailableLocales().find(x => x.code.toLowerCase() === target.toLowerCase()) : null;
+    if (hit) flashOsd(hit.label);
+  }
+
+  async function setLang(nextLang) {
+    const target = resolveTargetLangCode(nextLang);
+    const prevLang = V.getActiveLang();
+    if (target === prevLang) return prevLang;
+    const pos = captureLogicalPos();
+    const wasPlaying = playing;
+    if (wasPlaying && audioRt) audioRt.pausePlayback();
+    V.resetCheckpoints();
+    if (V.captureVoice && V.voice) V.captureVoice(V.voice);
+    V.__langOverridden = true;
+    V.__activeLang = target;
+    await ensureLocaleAssetsLoaded(target);
+    applyPostLocaleReload(pos, wasPlaying, target);
+    return V.getActiveLang();
+  }
+
   function exposeBridge(cfg) {
     window.__video = {
       get duration() { return V.duration; },
@@ -1220,6 +1400,9 @@
       seekAsync: V.seekToAsync,
       setRate,
       setSubs,
+      setLang,
+      getLang: () => V.getActiveLang(),
+      sfx: (k, o) => (V.sfx ? V.sfx(k, o) : false),
       setVolume: v => audioRt.setVolume(v),
       getVolume: () => audioRt.getState(now).volume,
       setBgm: on => audioRt.setBgm(on),
@@ -1250,6 +1433,8 @@
           playing,
           playbackRate,
           subsEnabled: showSubs,
+          lang: V.getActiveLang(),
+          audioBlocked: Boolean(a.audioBlocked),
           volume: a.volume,
           muted: a.muted,
           hasBgm: a.hasBgm,
@@ -1267,7 +1452,13 @@
     };
   }
 
+  function syncInitialLocaleState() {
+    if (V.captureVoice && V.voice) V.captureVoice(V.voice);
+    if (V.syncDocLangAttrs) V.syncDocLangAttrs();
+  }
+
   V.start = function () {
+    syncInitialLocaleState();
     V.mountStage();
     const cfg = V.getCfg();
     const uiCfg = getUiCfg(cfg);
@@ -1286,8 +1477,10 @@
       isRecord: RECORD,
       isPlaying: () => playing,
       getNow: () => now,
+      getCurrentScene: () => current,
       markSeekApplied: target => { lastSeekTarget = target; lastSeekAt = performance.now(); },
       onSoundUI: syncSoundMenuUI,
+      onAudioBlocked: () => flashOsd(uiText('osdBlocked'), 1800),
       onEnded: finishPlayback,
       onVisibilitySync: t => render(t, 0),
       onBgmUnavailable: syncSoundMenuUI,
@@ -1298,6 +1491,7 @@
     V.seekTo = t => render(t, 0);
     V.seekToAsync = async t => { render(t, 0); await waitStageAssets(); };
     V.setSubs = setSubs;
+    V.setLang = setLang;
     V.setVolume = v => audioRt.setVolume(v);
     V.getVolume = () => audioRt.getState(now).volume;
     V.setBgm = on => audioRt.setBgm(on);
@@ -1308,7 +1502,7 @@
     V.tryEgg = tryEgg;
     V.replay = replay;
     V._playerCtl = {
-      play, pause, replay, seek, setRate, setSubs,
+      play, pause, replay, seek, setRate, setSubs, setLang,
       setVolume: V.setVolume, getVolume: V.getVolume,
       setBgm: V.setBgm, setVoice: V.setVoice, setMuted: V.setMuted,
       enterSandbox, exitSandbox, tryEgg,
@@ -1332,7 +1526,7 @@
     const initPos = resolveInitialTime(uiCfg);
     if (initPos.t > 0) {
       seek(initPos.t);
-      if (initPos.resumed) flashOsd(`已续播 ${fmtTime(initPos.t)}`, 1200);
+      if (initPos.resumed) flashOsd(uiText('osdResumed', { time: fmtTime(initPos.t) }), 1200);
     } else {
       render(0, 0);
     }
@@ -1365,20 +1559,25 @@
     return explicit && Boolean(!base || lang.toLowerCase() !== base.toLowerCase());
   }
 
+  async function loadBootLocaleTimings(cfg, lang) {
+    if (!lang || (V.isSecondaryLocale && !V.isSecondaryLocale(lang))) return;
+    const baseTimings = cfg.timingsScript || 'assets/voice/timings.js';
+    const langTimings = baseTimings.replace(/\.js$/i, `.${lang}.js`);
+    if (langTimings === baseTimings) return;
+    const ok = await loadOptionalScript(langTimings);
+    if (ok && V.captureVoice) V.captureVoice(V.voice);
+    else clearStaleVoiceIfNeeded();
+  }
+
   async function ensureDynamicBootAssets() {
+    if (V.captureVoice && V.voice) V.captureVoice(V.voice);
     const cfg = V.getCfg();
     if (V.scenes.length === 0 && Array.isArray(cfg.sceneScripts)) {
       for (const rel of cfg.sceneScripts) await loadOptionalScript(rel);
     }
     const lang = V.getActiveLang();
     if (shouldProbeLocalePack(lang)) await loadOptionalScript(`locales/${lang}.js`);
-    if (!lang || (V.isSecondaryLocale && !V.isSecondaryLocale(lang))) return;
-    const baseTimings = cfg.timingsScript || 'assets/voice/timings.js';
-    const langTimings = baseTimings.replace(/\.js$/i, `.${lang}.js`);
-    if (langTimings !== baseTimings) {
-      const ok = await loadOptionalScript(langTimings);
-      if (!ok) clearStaleVoiceIfNeeded();
-    }
+    await loadBootLocaleTimings(cfg, lang);
   }
 
   V.boot = async function () {

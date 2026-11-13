@@ -5,13 +5,18 @@
 
   let cachedIndex = null;
   let searchInputEl = null;
+  let timeElRef = null;
   let lastUrlSyncTs = 0;
+
+  function uiText(key, vars) {
+    return V.uiStr ? V.uiStr(key, vars) : key;
+  }
 
   function buildSearchIndex() {
     if (cachedIndex) return cachedIndex;
     const entries = [];
     (V.scenes || []).forEach((sc, si) => {
-      const title = sc.title || `第 ${si + 1} 幕`;
+      const title = sc.title || uiText('sceneFallbackTitle', { n: si + 1 });
       entries.push({ sceneIndex: si, sceneTitle: title, text: title, norm: title.toLowerCase(), time: sc.start, isTitle: true });
       for (const c of (sc.cues || [])) {
         if (!c || !c.text) continue;
@@ -70,12 +75,20 @@
     return row;
   }
 
+  function syncDeepLinkLangParam(u) {
+    if (!V.__langOverridden) return;
+    const lang = V.getActiveLang ? V.getActiveLang() : '';
+    if (lang && (!V.isSecondaryLocale || V.isSecondaryLocale(lang))) u.searchParams.set('lang', lang);
+    else u.searchParams.delete('lang');
+  }
+
   function getDeepLink(targetSec) {
     const sec = Math.max(0, Math.floor(Number.isFinite(targetSec) ? targetSec : (V._now || 0)));
     try {
       const u = new URL(location.href);
       u.searchParams.delete('autoplay');
       u.searchParams.delete('_hmr');
+      syncDeepLinkLangParam(u);
       if (sec >= 1) u.searchParams.set('t', String(sec));
       else u.searchParams.delete('t');
       return u.toString();
@@ -106,14 +119,16 @@
   function bindTimeDeepLinkCopy(ctl) {
     const timeEl = document.querySelector('#controls .time');
     if (!timeEl) return;
+    timeElRef = timeEl;
     let copyTimer = null;
-    timeEl.title = '点击复制当前时间点链接 (?t=)';
+    timeEl.title = uiText('copyTimeTip');
     timeEl.onclick = async e => {
       e.stopPropagation();
+      if (V.sfx) V.sfx('click', 0.45);
       const sec = Math.max(0, Math.floor(V._now || 0));
       await copyToClipboard(getDeepLink(sec));
       timeEl.dataset.copied = '1';
-      timeEl.textContent = `✓ 已复制 ${ctl.fmtTime(sec)}`;
+      timeEl.textContent = uiText('copiedTime', { time: ctl.fmtTime(sec) });
       clearTimeout(copyTimer);
       copyTimer = setTimeout(() => {
         delete timeEl.dataset.copied;
@@ -146,8 +161,8 @@
     const input = h('input', {
       class: 'chap-search',
       type: 'search',
-      placeholder: '搜索台词或章节 ( / )',
-      'aria-label': '搜索视频台词或章节',
+      placeholder: uiText('searchPlaceholder'),
+      'aria-label': uiText('searchAria'),
     });
     const resultsBox = h('div', { class: 'chap-search-results', hidden: 'true' });
     menu.insertBefore(h('div', { class: 'chap-search-row' }, input), chapList);
@@ -185,7 +200,7 @@
     function paintHits(q) {
       resultsBox.innerHTML = '';
       if (!hits.length) {
-        resultsBox.appendChild(h('div', { class: 'chap-empty' }, '未找到匹配的台词或章节'));
+        resultsBox.appendChild(h('div', { class: 'chap-empty' }, uiText('searchEmpty')));
         return;
       }
       hits.forEach((hit, i) => resultsBox.appendChild(renderHitRow(hit, i, activeIdx, q, ctl, pickHit)));
@@ -245,6 +260,15 @@
     },
     onLayout() {
       cachedIndex = null;
+    },
+    onLocaleChange() {
+      cachedIndex = null;
+      if (searchInputEl) {
+        searchInputEl.placeholder = uiText('searchPlaceholder');
+        searchInputEl.setAttribute('aria-label', uiText('searchAria'));
+        if (searchInputEl.value) searchInputEl.dispatchEvent(new Event('input'));
+      }
+      if (timeElRef) timeElRef.title = uiText('copyTimeTip');
     },
     onSeek(t) {
       if (!V._isRecord) syncAddressBarOnSeek(t);
