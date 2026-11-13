@@ -130,8 +130,11 @@
       at: (i, kw, opts) => resolveAnchor(sc, si, i, kw, opts),
       dur: sc.duration,
       clock: 0,
+      alive: 0,
       idle: 0,
+      playing: false,
       ended: false,
+      pointer: V.pointer,
       holdStart: () => (sc.cues.length ? sc.cues[sc.cues.length - 1].end + 0.3 : 0.3),
     };
   }

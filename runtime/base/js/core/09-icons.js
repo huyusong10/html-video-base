@@ -89,6 +89,8 @@
       idleHideDelay: delays.idleHideDelay,
       leaveHideDelay: delays.leaveHideDelay,
       persist: u.persist !== false,
+      resume: Boolean(u.resume),
+      livePause: u.livePause !== false,
       resumeMinSec: resolveResumeMinSec(u),
       osd: u.osd !== false,
       chapterMarks: resolveChapterMarks(u, cfg),

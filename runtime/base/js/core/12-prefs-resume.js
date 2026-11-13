@@ -1,8 +1,9 @@
-/* core/12-prefs-resume.js · 观看偏好（倍速/字幕/声音/配乐）与断点续播极简 localStorage 记忆 */
+/* core/12-prefs-resume.js · 观看偏好（倍速/字幕/声音/配乐）持久化与按需断点续播（默认关闭 resume: false） */
 (function (V) {
   if (typeof location === 'undefined') return;
 
   let lastFlushTs = 0;
+  let lastSavedT = null;
   let boundPageHide = false;
 
   function getStorageKey() {
@@ -13,6 +14,10 @@
 
   function canPersist(uiCfg) {
     return !V._isRecord && Boolean(uiCfg && uiCfg.persist !== false);
+  }
+
+  function canResume(uiCfg) {
+    return canPersist(uiCfg) && Boolean(uiCfg && uiCfg.resume);
   }
 
   function readSaved(uiCfg) {
@@ -34,11 +39,12 @@
   }
 
   function clearSavedState() {
+    lastSavedT = null;
     try { localStorage.removeItem(getStorageKey()); } catch {}
   }
 
   function resolveSavedResumeTime(params, uiCfg, duration) {
-    if (!canPersist(uiCfg) || params.has('from0')) return 0;
+    if (!canResume(uiCfg) || params.has('from0')) return 0;
     const saved = readSaved(uiCfg);
     const t = saved && Number(saved.t);
     if (!Number.isFinite(t)) return 0;
@@ -47,14 +53,18 @@
     return t >= minSec && t < maxSec ? t : 0;
   }
 
+  function resolveProgressTimestamp(curNow, isEnded, minSec, duration) {
+    if (isEnded || curNow >= duration - 2) return 0;
+    return curNow >= minSec ? Math.round(curNow * 10) / 10 : null;
+  }
+
   function flushProgress(curNow, isEnded) {
     const uiCfg = V._getUiCfg ? V._getUiCfg(V.getCfg()) : null;
-    if (!canPersist(uiCfg) || !V.duration) return;
-    if (isEnded || curNow >= V.duration - 2) {
-      writeSaved(uiCfg, { t: 0 });
-    } else if (curNow >= uiCfg.resumeMinSec) {
-      writeSaved(uiCfg, { t: Math.round(curNow * 10) / 10 });
-    }
+    if (!canResume(uiCfg) || !V.duration) return;
+    const nextT = resolveProgressTimestamp(curNow, isEnded, uiCfg.resumeMinSec, V.duration);
+    if (nextT === null || nextT === lastSavedT) return;
+    lastSavedT = nextT;
+    writeSaved(uiCfg, { t: nextT });
   }
 
   V.clearSavedState = clearSavedState;
@@ -77,7 +87,10 @@
       writeSaved(V._getUiCfg(V.getCfg()), { subs });
     },
     onEnded() {
-      writeSaved(V._getUiCfg(V.getCfg()), { t: 0 });
+      const uiCfg = V._getUiCfg(V.getCfg());
+      if (!canResume(uiCfg)) return;
+      lastSavedT = 0;
+      writeSaved(uiCfg, { t: 0 });
     },
     onRender(st) {
       if (st.isRecord || st.sandbox) return;

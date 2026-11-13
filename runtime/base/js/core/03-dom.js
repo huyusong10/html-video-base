@@ -103,6 +103,26 @@
     if (el) el.classList.toggle(cls, Boolean(on));
   }
 
+  function bindInteractiveEvent(el, type, fn) {
+    if (typeof fn !== 'function') return;
+    el.addEventListener(type, e => {
+      if (type === 'click' || type === 'dblclick') e.stopPropagation();
+      fn.call(el, e, el);
+    });
+  }
+
+  function interactive(el, handlers) {
+    if (!el) return el;
+    if (el.setAttribute) el.setAttribute('data-interactive', '1');
+    if (el.style && !el.style.pointerEvents) el.style.pointerEvents = 'auto';
+    if (typeof handlers === 'function') {
+      bindInteractiveEvent(el, 'click', handlers);
+    } else if (handlers && typeof handlers === 'object') {
+      for (const [k, fn] of Object.entries(handlers)) bindInteractiveEvent(el, k, fn);
+    }
+    return el;
+  }
+
   function toIndexList(activeIdx) {
     if (Array.isArray(activeIdx)) return activeIdx;
     return activeIdx != null && activeIdx >= 0 ? [activeIdx] : null;
@@ -279,7 +299,7 @@
 
   V.u = Object.assign(V.u || {}, {
     h, svg, set, pop, typeText, type, scramble, countUp,
-    drawPath, toggle, spotlight, camera, makeCursor, cursor,
+    drawPath, toggle, interactive, spotlight, camera, makeCursor, cursor,
     videoClip, syncVideoClip,
   });
 })(globalThis.V = globalThis.V || {});

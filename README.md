@@ -59,12 +59,14 @@ python -m venv .runtime/venv
 | `V.subtitle({ position, modes, lead, tail, onUpdate })` + `V.setSubLayout(spec)` | 定制字幕位置（`center`/`left`/`right`/`top` 或任意坐标避让吉祥物）、挂载前置/后置吉祥物与角标插槽（`.sub-lead` / `.sub-tail`），并支持按幕 `scene.subLayout` 或逐帧 `f(t)` 动态联动 |
 | `V.locale(lang, { title, scenes: { [id]: { title, lines, anchors } } })` | 注册多语种台词与 `x.at()` 语义词锚映射（`?lang=en` / `--lang en`） |
 | `V.u.keyframes(t, stops, opts)` | 多段纯函数关键帧插值：数值属性平滑过渡（默认 `smooth`），字符串/布尔状态按停靠点离散切换，避免手写多层 `lerp` 嵌套 |
+| `V.pointer` / `x.pointer` + `V.u.interactive(el, handlers)` | 舞台归一化指针场（自动抵消 `scale` 缩放、黑边与全屏偏移，暴露 `x/y/nx/ny`、阻尼平滑 `sx/sy/presence` 及 `#stage` `--ptr-x/--ptr-y/--ptr-px/--ptr-py/--ptr-presence` 变量；`?record=1` 自动归零保证 `f(t)` 确定性）与免冒泡抢播的舞台交互元素绑定 |
+| `x.alive` / `x.clock` + `ui.livePause` | 双时钟呼吸引擎：暂停或播完驻留时叙事时间轴 `t` 冻结，环境时钟 `x.alive` / `x.clock` 连续流淌（恢复播放零回跳，后台标签页自动休眠，`?record=1` 自动锁定 `alive === t`） |
 | `V.u.videoClip(src, opts)` + `V.u.syncVideoClip(el, t)` | 受控内嵌 `<video>` 录屏：Web 播放同步、`seekToAsync` 精确锁帧、`mix.py` 原声混音 |
 | `scene.checkpoints` | Web 交互驻点暂停与分支问答（`?record=1` 导出模式自动直通） |
 | `V.tryEgg(targetSec, hint)` / `V.enterSandbox` / `V.exitSandbox` | 终章彩蛋与沙盒试玩跳转及悬浮返回条 |
 | `V.search(query)` / `V.openSearch()` / `V.getDeepLink(t)` | 内置全文台词与章节检索跳转（快捷键 `/` 或 `Ctrl+K`）及时间码点击复制 `?t=` 深链 |
 | `V.setBgm(on)` / `V.setVoice(on)` / `V.setMuted(on)` / `V.clearSavedState()` | 解说主轨与 BGM 伴奏轨独立开关（上拉菜单 / `B` 键开关配乐、`M` 键静音），以及偏好记忆与断点续播清理 |
-| `V.config.ui` / `V.themeDefaults.ui` | 定制播放器模式（默认 `controlsMode: 'overlay'`：鼠标进入或移动于视频内即显控制栏、静止 `1.5s` 自动隐退、移出窗口 `0.22s` 速隐、全屏同步隐鼠；悬停进度条实时跟随 `.track-tip` 章节时间预览；键盘操作仅在右上角闪出 `#osd` 胶囊而不弹底栏顶跳字幕；内置 `persist: true` 偏好与断点续播记忆）、图标预设（`iconPreset: 'default' \| 'pixel'`）与倍速档位（`rates`） |
+| `V.config.ui` / `V.themeDefaults.ui` | 定制播放器模式（默认 `controlsMode: 'overlay'`：鼠标进入或移动于视频内即显控制栏、静止 `1.5s` 自动隐退、移出窗口 `0.22s` 速隐、全屏同步隐鼠；悬停进度条实时跟随 `.track-tip` 章节时间预览；键盘操作仅在右上角闪出 `#osd` 胶囊而不弹底栏顶跳字幕；`persist: true` 默认仅记忆倍速/字幕/音轨偏好，断点续播默认关闭，长视频可显式开启 `resume: true`）、图标预设（`iconPreset: 'default' \| 'pixel'`）与倍速档位（`rates`） |
 
 ## 主题与控制栏 CSS 变量槽位
 

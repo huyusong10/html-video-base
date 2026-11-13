@@ -542,15 +542,25 @@ async function verifyV26ExperienceContracts(page) {
     window.V._prefsRuntime.flushProgress(1.2, false);
   });
   await page.reload({ waitUntil: 'networkidle' });
-  const resumed = await page.evaluate(() => ({
-    sync: window.__video.getSyncState(),
-    osdText: document.getElementById('osd').textContent,
-  }));
-  assert.equal(resumed.sync.playbackRate, 1.25, 'Reload must restore persisted playbackRate');
-  assert.equal(resumed.sync.subsEnabled, false, 'Reload must restore persisted subtitle visibility');
-  assert.equal(resumed.sync.bgmEnabled, false, 'Reload must restore persisted BGM toggle');
-  assert.ok(Math.abs(resumed.sync.now - 1.2) < 0.15, `Reload must resume at saved timestamp (~1.2s), got ${resumed.sync.now}`);
-  assert.ok(resumed.osdText.includes('已续播'), `Reload resume must flash OSD indicator, got "${resumed.osdText}"`);
+  const reloaded = await page.evaluate(() => {
+    const sync = window.__video.getSyncState();
+    const osdText = document.getElementById('osd').textContent;
+    window.V.config.ui.resume = true;
+    window.V._prefsRuntime.flushProgress(1.2, false);
+    const optInResumeT = window.V._prefsRuntime.resolveSavedResumeTime(
+      new URLSearchParams(),
+      window.V._getUiCfg(window.V.getCfg()),
+      window.V.duration
+    );
+    window.V.config.ui.resume = false;
+    return { sync, osdText, optInResumeT };
+  });
+  assert.equal(reloaded.sync.playbackRate, 1.25, 'Reload must restore persisted playbackRate');
+  assert.equal(reloaded.sync.subsEnabled, false, 'Reload must restore persisted subtitle visibility');
+  assert.equal(reloaded.sync.bgmEnabled, false, 'Reload must restore persisted BGM toggle');
+  assert.ok(reloaded.sync.now < 0.05, `Default ui.resume=false must start from 0 on reload, got ${reloaded.sync.now}`);
+  assert.equal(reloaded.osdText.includes('已续播'), false, 'Default ui.resume=false must NOT flash resume OSD');
+  assert.equal(reloaded.optInResumeT, 1.2, 'Opt-in ui.resume=true must persist and resolve saved timestamp');
 
   await page.evaluate(() => {
     window.__video.clearSavedState();
@@ -559,6 +569,55 @@ async function verifyV26ExperienceContracts(page) {
     window.__video.setBgm(true);
     window.__video.seek(0.2);
   });
+  await verifyLivePauseAndPointerContract(page);
+}
+
+async function verifyLivePauseAndPointerContract(page) {
+  const clockFlow = await page.evaluate(async () => {
+    window.__video.pause();
+    window.__video.seek(0.22);
+    const s0 = window.__video.getSyncState();
+    await new Promise(r => setTimeout(r, 130));
+    const s1 = window.__video.getSyncState();
+    window.__video.play();
+    await new Promise(r => setTimeout(r, 70));
+    const s2 = window.__video.getSyncState();
+    window.__video.pause();
+    return { s0, s1, s2 };
+  });
+  assert.ok(Math.abs(clockFlow.s1.now - clockFlow.s0.now) < 0.001, 'Paused narrative timeline now must remain frozen');
+  assert.ok(clockFlow.s1.alive > clockFlow.s0.alive + 0.05, `Paused ambient clock/alive must keep flowing, got ${clockFlow.s0.alive} -> ${clockFlow.s1.alive}`);
+  assert.ok(clockFlow.s2.alive >= clockFlow.s1.alive, `Resuming play() must NOT snap ambient clock backward (${clockFlow.s1.alive} -> ${clockFlow.s2.alive})`);
+
+  const stageBox = await page.locator('#stage').boundingBox();
+  await page.mouse.move(stageBox.x + stageBox.width * 0.75, stageBox.y + stageBox.height * 0.25);
+  await page.waitForTimeout(90);
+  const ptrState = await page.evaluate(() => {
+    const scRoot = document.querySelector('#stage .scene');
+    window.__intClicks = 0;
+    const btn = window.V.u.interactive(
+      window.V.u.h('button', { id: 'test-int-btn', type: 'button', style: 'left:24px;top:24px;width:64px;height:28px;z-index:20' }, 'ACT'),
+      () => { window.__intClicks++; }
+    );
+    scRoot.appendChild(btn);
+    return {
+      p: Object.assign({}, window.V.pointer),
+      ptrInsideVar: document.getElementById('stage').style.getPropertyValue('--ptr-inside'),
+    };
+  });
+  assert.equal(ptrState.p.inside, true, 'Moving mouse inside #stage must set V.pointer.inside = true');
+  assert.ok(Math.abs(ptrState.p.x - 480) < 6 && Math.abs(ptrState.p.y - 90) < 6, `Stage-space V.pointer.(x,y) must inverse-map CSS scale to (480,90), got (${ptrState.p.x},${ptrState.p.y})`);
+  assert.ok(ptrState.p.nx > 0.45 && ptrState.p.ny < -0.45, `Normalized V.pointer.(nx,ny) must map to (+0.5,-0.5), got (${ptrState.p.nx},${ptrState.p.ny})`);
+  assert.ok(ptrState.p.sx > 0.1 && ptrState.p.presence > 0.2, 'Damped V.pointer.sx & presence must smoothly ramp up');
+  assert.equal(ptrState.ptrInsideVar, '1', '#stage --ptr-inside CSS variable must reflect active pointer');
+
+  await page.locator('#test-int-btn').click();
+  const intRes = await page.evaluate(() => {
+    document.getElementById('test-int-btn')?.remove();
+    return { clicks: window.__intClicks, playing: window.__video.getSyncState().playing };
+  });
+  assert.equal(intRes.clicks, 1, 'V.u.interactive() button click handler must fire');
+  assert.equal(intRes.playing, false, 'Clicking V.u.interactive() stage element must NOT toggle player play/pause');
 }
 
 async function verifyDualStemBgmContract(page) {
@@ -647,12 +706,16 @@ async function verifyBrowserCapabilities(videoDir) {
       hasControl: Boolean(document.querySelector('[data-custom-ctrl="test-btn"]')),
       maxEnergy: window.__maxLayerEnergy,
       cpActiveInRecord: document.getElementById('checkpoint-overlay')?.classList.contains('is-open') || false,
+      ptrNeutral: window.V.pointer.inside === false && window.V.pointer.nx === 0 && window.V.pointer.presence === 0,
+      clockLocked: window.__video.getSyncState().clock === window.__video.getSyncState().now,
     }));
     assert.equal(recState.pluginInstalled, true, 'Plugin should install');
     assert.equal(recState.hasPreset, true, 'Preset should render');
     assert.equal(recState.hasControl, true, 'Custom control should mount');
     assert.ok(recState.maxEnergy > 0.05, `Expected 30Hz voice energy > 0.05, got ${recState.maxEnergy}`);
     assert.equal(recState.cpActiveInRecord, false, 'Record mode must auto-bypass checkpoints');
+    assert.equal(recState.ptrNeutral, true, 'Record mode must lock V.pointer to neutral center');
+    assert.equal(recState.clockLocked, true, 'Record mode must lock ambient clock === narrative now');
 
     await page.goto(`http://127.0.0.1:${port}/demo/?lang=en&record=1`, { waitUntil: 'networkidle' });
     const enInfo = await page.evaluate(() => ({

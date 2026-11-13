@@ -1,18 +1,24 @@
 /* core/01-registry.js · 微内核注册表与开放扩展契约（Plugin / Transition / Control / Preset / Layer / Locale） */
 (function (V) {
-  V.scenes = V.scenes || [];
-  V.layers = V.layers || [];
-  V.plugins = V.plugins || [];
-  V.transitions = V.transitions || {};
-  V.controls = V.controls || [];
-  V.presets = V.presets || {};
-  V.locales = V.locales || {};
-  V.subtitles = V.subtitles || {};
-  V.customIcons = V.customIcons || {};
-  V.config = V.config || {};
-  V.c = V.c || {};
-  V.checkpointState = V.checkpointState || {};
-  V._videoClips = V._videoClips || new Set();
+  const DEFAULTS = [
+    ['scenes', () => []],
+    ['layers', () => []],
+    ['plugins', () => []],
+    ['transitions', () => ({})],
+    ['controls', () => []],
+    ['presets', () => ({})],
+    ['locales', () => ({})],
+    ['subtitles', () => ({})],
+    ['customIcons', () => ({})],
+    ['config', () => ({})],
+    ['c', () => ({})],
+    ['checkpointState', () => ({})],
+    ['pointer', () => ({ x: 960, y: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, inside: false, down: false })],
+    ['_videoClips', () => new Set()],
+  ];
+  for (const [k, make] of DEFAULTS) {
+    if (!V[k]) V[k] = make();
+  }
 
   function upsertById(list, item) {
     const key = item.id || item.name;

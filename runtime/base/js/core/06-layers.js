@@ -59,12 +59,17 @@
   function updateLayers(sc, idx, lt, now, speaking) {
     if (!V.layers.length) return;
     const energy = V.getSceneEnergy(sc, idx, lt);
+    const clock = V._clock === undefined ? now : V._clock;
     for (const layer of V.layers) {
       if (!layer || !layer._mounted || typeof layer.update !== 'function') continue;
       const f = computeLayerFrame(layer, sc, idx, lt);
       layer.update(f.state, {
         t: now,
         lt,
+        clock,
+        alive: clock,
+        playing: Boolean(V._isPlaying),
+        pointer: V.pointer,
         scene: sc,
         sceneIndex: idx,
         speaking,

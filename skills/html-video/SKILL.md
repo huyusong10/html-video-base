@@ -43,7 +43,9 @@ project-root/
 
 1. **纯函数 `f(t)` 约束**：`update(t, x)` 必须仅由入参时间 `t` 决定 DOM/SVG 状态。严禁使用 `setTimeout`、`setInterval`、自建 `requestAnimationFrame` 或跨帧累加变量；CSS `@keyframes` 在 `?record=1` 录制态下会自动按 `--anim-t` 锁定相位。
 2. **语义词锚与多段插值**：视觉动作一律用 `x.at(lineIdx, '关键词', offset)` 或 `x.cue(lineIdx)` 对齐口播重音，禁止硬编码拍脑袋秒数；角色走位、多段运镜或连续状态切换优先用 `V.u.keyframes(t, [{ at: 0, x: 960, pose: 'wave' }, { at: x.at(0, '核心'), x: 420, dur: 0.5, pose: 'point' }])`，避免手写多层 `lerp` 嵌套。
-3. **终章驻留与持续运动**：需要播放结束后继续交互或保持环境动画时，在 `V.config` 设 `interactiveEnd: true`，对应幕设 `live: true`，可点击控件标记 `data-interactive="1"`。`update(t, x)` 与 `onRender(e)` 中可用 `x.clock` / `e.clock` 驱动暂停态环境微动。
+3. **双时钟暂停呼吸与舞台交互指针场**：
+   - **暂停态不死板（`ui.livePause: true` 默认开启）**：暂停时叙事时间轴 `t` 严格冻结，环境时钟 `x.alive` / `x.clock`（在 `V.layer` / `V.subtitle` / `onRender` 中同为 `info.alive`）连续递增且恢复播放零回跳；角色呼吸、眨眼、粒子微动统一读取 `x.alive`，叙事卡点统一读取 `t`。需要终章播完后继续推进尾幕时间或保持可点交互时，在 `V.config` 设 `interactiveEnd: true` 并在尾幕设 `live: true`。
+   - **舞台归一化指针（`V.pointer` / `x.pointer`）与交互元素（`V.u.interactive`）**：框架自动将鼠标逆向映射到 `1920×1080` 舞台坐标（暴露 `x/y`、`-1..1` 归一化 `nx/ny`、带阻尼回中 `sx/sy` 与在场权重 `presence`，并在 `#stage` 注入 `--ptr-x/--ptr-y/--ptr-px/--ptr-py/--ptr-presence`），可零样板实现鼠标跟随视差、聚光灯与吉祥物眼神追踪；画布内可点击卡片/Tab/按钮统一用 `V.u.interactive(el, fnOrEventMap)` 包装，自动开启 `pointer-events` 并阻止点击误触发播放器暂停/播放。`?record=1` 导出态自动归零指针并锁定 `alive === t`，确保逐帧导出 100% 幂等。
 4. **彩蛋沙盒试玩**：调用 `V.tryEgg(targetTime, '操作提示')` 跳入任意幕试玩并自动悬浮返回条，用户点返回或按 `Esc` 调 `V.exitSandbox()` 回到终章。
 
 ```js
@@ -68,7 +70,7 @@ V.scene({
 - **字幕伴随插槽与避让**：通过 `V.subtitle({ lead: (h, V) => el, tail, position, modes, onUpdate(cue, info, dom) })` 挂载前置吉祥物或角标；单幕可设 `subLayout: 'left' | { pos: 'center', offsetX: 56, maxWidth: 1520 }` 动态避让角色。
 - **PotPlayer 式悬浮控制栏与配置项（`V.config.ui`）**：
   - `controlsMode: 'overlay' | 'docked'`（默认为 `'overlay'`：鼠标移入视频或在画面内移动立即唤醒底栏，在画面上静止 `idleHideDelay: 1500` 毫秒自动隐退，移出视频窗口 `leaveHideDelay: 220` 毫秒速隐，悬停底栏时保持常亮，全屏静止同步隐鼠；悬停进度条实时跟随 `.track-tip` 预览章节与时间；按键盘快进/静音/切章仅在右上角闪出 `#osd` 胶囊，不弹底栏顶跳字幕）
-  - `persist: true`（按路径持久化倍速、字幕、双音轨开关及播放进度，超过 `resumeMinSec: 5` 秒刷新自动断点续播；嵌入弹窗若无需续播可设 `persist: false`）、`osd: true`、`chapterMarks: true`、`hud: true`、`rate: true`、`webFull: true`、`iconPreset: 'default' | 'pixel'`
+  - `persist: true`（默认仅按路径记忆倍速、字幕、双音轨开关等观看偏好）、`resume: false`（断点续播默认关闭，刷新默认从头播放；长时培训课程可显式设 `resume: true`，超过 `resumeMinSec: 5` 秒刷新自动续播）、`livePause: true`、`osd: true`、`chapterMarks: true`、`hud: true`、`rate: true`、`webFull: true`、`iconPreset: 'default' | 'pixel'`
 - **全图标控制栏与业务图标覆盖规范**：
   - 控制栏左右按钮默认统一使用 `32×30` 紧凑矢量图标（返回主界面 `home`、播放/暂停/重播 `play`/`pause`/`replay`、章节箭头 `chapCaret`、倍速 `rate` 在 `1.0x` 显示仪表图标并在非 `1.0x` 动态切换为紧凑数字、字幕 `subsOn`/`subsOff`、声音多态 `volumeOn`/`volumeVoice`/`volumeBgm`/`volumeMute`、全屏 `webEnter`/`webExit`/`fullEnter`/`fullExit`）。
   - **业务新增按钮建议一律用图标**：调用 `V.control({ id: 'xray', position: 'right', title: 'X-Ray 透视', icon: ['M...'], onClick(e, V) {} })`，不要塞多字中文撑宽工具栏。

@@ -2,19 +2,25 @@
 
 /* core/01-registry.js · 微内核注册表与开放扩展契约（Plugin / Transition / Control / Preset / Layer / Locale） */
 (function (V) {
-  V.scenes = V.scenes || [];
-  V.layers = V.layers || [];
-  V.plugins = V.plugins || [];
-  V.transitions = V.transitions || {};
-  V.controls = V.controls || [];
-  V.presets = V.presets || {};
-  V.locales = V.locales || {};
-  V.subtitles = V.subtitles || {};
-  V.customIcons = V.customIcons || {};
-  V.config = V.config || {};
-  V.c = V.c || {};
-  V.checkpointState = V.checkpointState || {};
-  V._videoClips = V._videoClips || new Set();
+  const DEFAULTS = [
+    ['scenes', () => []],
+    ['layers', () => []],
+    ['plugins', () => []],
+    ['transitions', () => ({})],
+    ['controls', () => []],
+    ['presets', () => ({})],
+    ['locales', () => ({})],
+    ['subtitles', () => ({})],
+    ['customIcons', () => ({})],
+    ['config', () => ({})],
+    ['c', () => ({})],
+    ['checkpointState', () => ({})],
+    ['pointer', () => ({ x: 960, y: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, inside: false, down: false })],
+    ['_videoClips', () => new Set()],
+  ];
+  for (const [k, make] of DEFAULTS) {
+    if (!V[k]) V[k] = make();
+  }
 
   function upsertById(list, item) {
     const key = item.id || item.name;
@@ -404,6 +410,26 @@
     if (el) el.classList.toggle(cls, Boolean(on));
   }
 
+  function bindInteractiveEvent(el, type, fn) {
+    if (typeof fn !== 'function') return;
+    el.addEventListener(type, e => {
+      if (type === 'click' || type === 'dblclick') e.stopPropagation();
+      fn.call(el, e, el);
+    });
+  }
+
+  function interactive(el, handlers) {
+    if (!el) return el;
+    if (el.setAttribute) el.setAttribute('data-interactive', '1');
+    if (el.style && !el.style.pointerEvents) el.style.pointerEvents = 'auto';
+    if (typeof handlers === 'function') {
+      bindInteractiveEvent(el, 'click', handlers);
+    } else if (handlers && typeof handlers === 'object') {
+      for (const [k, fn] of Object.entries(handlers)) bindInteractiveEvent(el, k, fn);
+    }
+    return el;
+  }
+
   function toIndexList(activeIdx) {
     if (Array.isArray(activeIdx)) return activeIdx;
     return activeIdx != null && activeIdx >= 0 ? [activeIdx] : null;
@@ -580,7 +606,7 @@
 
   V.u = Object.assign(V.u || {}, {
     h, svg, set, pop, typeText, type, scramble, countUp,
-    drawPath, toggle, spotlight, camera, makeCursor, cursor,
+    drawPath, toggle, interactive, spotlight, camera, makeCursor, cursor,
     videoClip, syncVideoClip,
   });
 })(globalThis.V = globalThis.V || {});
@@ -717,8 +743,11 @@
       at: (i, kw, opts) => resolveAnchor(sc, si, i, kw, opts),
       dur: sc.duration,
       clock: 0,
+      alive: 0,
       idle: 0,
+      playing: false,
       ended: false,
+      pointer: V.pointer,
       holdStart: () => (sc.cues.length ? sc.cues[sc.cues.length - 1].end + 0.3 : 0.3),
     };
   }
@@ -1127,12 +1156,17 @@
   function updateLayers(sc, idx, lt, now, speaking) {
     if (!V.layers.length) return;
     const energy = V.getSceneEnergy(sc, idx, lt);
+    const clock = V._clock === undefined ? now : V._clock;
     for (const layer of V.layers) {
       if (!layer || !layer._mounted || typeof layer.update !== 'function') continue;
       const f = computeLayerFrame(layer, sc, idx, lt);
       layer.update(f.state, {
         t: now,
         lt,
+        clock,
+        alive: clock,
+        playing: Boolean(V._isPlaying),
+        pointer: V.pointer,
         scene: sc,
         sceneIndex: idx,
         speaking,
@@ -1495,6 +1529,8 @@
       idleHideDelay: delays.idleHideDelay,
       leaveHideDelay: delays.leaveHideDelay,
       persist: u.persist !== false,
+      resume: Boolean(u.resume),
+      livePause: u.livePause !== false,
       resumeMinSec: resolveResumeMinSec(u),
       osd: u.osd !== false,
       chapterMarks: resolveChapterMarks(u, cfg),
@@ -1658,7 +1694,10 @@
     const fn = subCfg.onUpdate || subCfg.update;
     if (typeof fn !== 'function') return;
     const lineCue = activeCueIdx >= 0 ? sc.cues[activeCueIdx] : null;
-    const info = { t: now, clock, lt, scene: sc, sceneIndex: idx, lineCue, speaking: Boolean(cue), energy: V.getSceneEnergy(sc, idx, lt) };
+    const info = {
+      t: now, clock, alive: clock, playing: Boolean(V._isPlaying), pointer: V.pointer,
+      lt, scene: sc, sceneIndex: idx, lineCue, speaking: Boolean(cue), energy: V.getSceneEnergy(sc, idx, lt),
+    };
     fn(cue, info, { subs, lead: subLead, tail: subTail, speaker: subSpeaker, text: subText });
   }
 
@@ -2010,11 +2049,12 @@
   };
 })(globalThis.V = globalThis.V || {});
 
-/* core/12-prefs-resume.js · 观看偏好（倍速/字幕/声音/配乐）与断点续播极简 localStorage 记忆 */
+/* core/12-prefs-resume.js · 观看偏好（倍速/字幕/声音/配乐）持久化与按需断点续播（默认关闭 resume: false） */
 (function (V) {
   if (typeof location === 'undefined') return;
 
   let lastFlushTs = 0;
+  let lastSavedT = null;
   let boundPageHide = false;
 
   function getStorageKey() {
@@ -2025,6 +2065,10 @@
 
   function canPersist(uiCfg) {
     return !V._isRecord && Boolean(uiCfg && uiCfg.persist !== false);
+  }
+
+  function canResume(uiCfg) {
+    return canPersist(uiCfg) && Boolean(uiCfg && uiCfg.resume);
   }
 
   function readSaved(uiCfg) {
@@ -2046,11 +2090,12 @@
   }
 
   function clearSavedState() {
+    lastSavedT = null;
     try { localStorage.removeItem(getStorageKey()); } catch {}
   }
 
   function resolveSavedResumeTime(params, uiCfg, duration) {
-    if (!canPersist(uiCfg) || params.has('from0')) return 0;
+    if (!canResume(uiCfg) || params.has('from0')) return 0;
     const saved = readSaved(uiCfg);
     const t = saved && Number(saved.t);
     if (!Number.isFinite(t)) return 0;
@@ -2059,14 +2104,18 @@
     return t >= minSec && t < maxSec ? t : 0;
   }
 
+  function resolveProgressTimestamp(curNow, isEnded, minSec, duration) {
+    if (isEnded || curNow >= duration - 2) return 0;
+    return curNow >= minSec ? Math.round(curNow * 10) / 10 : null;
+  }
+
   function flushProgress(curNow, isEnded) {
     const uiCfg = V._getUiCfg ? V._getUiCfg(V.getCfg()) : null;
-    if (!canPersist(uiCfg) || !V.duration) return;
-    if (isEnded || curNow >= V.duration - 2) {
-      writeSaved(uiCfg, { t: 0 });
-    } else if (curNow >= uiCfg.resumeMinSec) {
-      writeSaved(uiCfg, { t: Math.round(curNow * 10) / 10 });
-    }
+    if (!canResume(uiCfg) || !V.duration) return;
+    const nextT = resolveProgressTimestamp(curNow, isEnded, uiCfg.resumeMinSec, V.duration);
+    if (nextT === null || nextT === lastSavedT) return;
+    lastSavedT = nextT;
+    writeSaved(uiCfg, { t: nextT });
   }
 
   V.clearSavedState = clearSavedState;
@@ -2089,7 +2138,10 @@
       writeSaved(V._getUiCfg(V.getCfg()), { subs });
     },
     onEnded() {
-      writeSaved(V._getUiCfg(V.getCfg()), { t: 0 });
+      const uiCfg = V._getUiCfg(V.getCfg());
+      if (!canResume(uiCfg)) return;
+      lastSavedT = 0;
+      writeSaved(uiCfg, { t: 0 });
     },
     onRender(st) {
       if (st.isRecord || st.sandbox) return;
@@ -2117,11 +2169,14 @@
   V._isRecord = RECORD;
 
   let stage = null, current = null, now = 0, prevRenderNow = 0, playing = false;
-  let lastTs = 0, pauseBaseTs = 0, ended = false, scrubbing = false;
+  let lastTs = 0, lastFrameTs = 0, ambientOffset = 0, idleSec = 0, ended = false, scrubbing = false;
   let showSubs = !params.has('nosubs'), playbackRate = 1, loopScene = false;
   let lastSeekTarget = -1, lastSeekAt = 0, activeCueIdx = -1;
   let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0;
   let inBar = false, lastPtrX = -9999, lastPtrY = -9999;
+  const ptr = (V.pointer = V.pointer || {
+    x: 960, y: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, inside: false, down: false,
+  });
   let wipeState = { name: '', handler: null, dom: null };
   const sandboxState = { active: false, entering: false, autoExitOnLast: true, returnTime: null, el: null, txtEl: null, backEl: null };
   const ui = {};
@@ -2183,6 +2238,7 @@
     const W = cfg.width || 1920, H = cfg.height || 1080;
     V.stageWidth = W;
     V.stageHeight = H;
+    if (!ptr.inside) { ptr.x = W / 2; ptr.y = H / 2; }
     if (cfg.theme && !document.documentElement.dataset.theme) document.documentElement.dataset.theme = cfg.theme;
     document.documentElement.style.setProperty('--stage-w', W + 'px');
     document.documentElement.style.setProperty('--stage-h', H + 'px');
@@ -2340,6 +2396,8 @@
   }
 
   function replay() {
+    ambientOffset = 0;
+    idleSec = 0;
     exitSandbox(false);
     V.resetCheckpoints();
     seek(0);
@@ -2353,8 +2411,8 @@
     return Boolean(current.live || current.interactiveEnd || cfg.interactiveEnd);
   }
 
-  function shouldContinueSceneAtEnd(sc, idleSec) {
-    if (!ended || idleSec <= 0 || !sc.live || sc.freezeTimelineAtEnd) return false;
+  function shouldContinueSceneAtEnd(sc, idle) {
+    if (!ended || idle <= 0 || !sc.live || sc.freezeTimelineAtEnd) return false;
     return sc === V.scenes[V.scenes.length - 1];
   }
 
@@ -2366,8 +2424,11 @@
     }
     if (sc !== current) enter(sc);
     sc.ctx.clock = V._clock;
+    sc.ctx.alive = V._clock;
     sc.ctx.idle = idle;
+    sc.ctx.playing = playing && !scrubbing;
     sc.ctx.ended = ended;
+    sc.ctx.pointer = ptr;
   }
 
   function runSceneUpdate(sc, lt, idle) {
@@ -2381,12 +2442,13 @@
     }
   }
 
-  function render(t, idleSec) {
+  function render(t, nextIdle) {
     if (!V.scenes.length || !Number.isFinite(t)) return;
-    const idle = idleSec || 0;
+    const idle = RECORD ? 0 : (nextIdle === undefined ? idleSec : nextIdle);
+    idleSec = idle;
     const prevT = prevRenderNow;
     now = clamp(t, 0, V.duration - 0.001);
-    const clock = now + idle;
+    const clock = RECORD ? now : now + ambientOffset;
     prevRenderNow = now;
     V._now = now;
     V._clock = clock;
@@ -2408,8 +2470,8 @@
     V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: RECORD, playing, scrubbing, pause, play });
     const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false };
     V.emit('onRender', {
-      now, clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
-      playing, scrubbing, sandbox: sandboxState.active,
+      now, clock, alive: clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
+      playing, scrubbing, sandbox: sandboxState.active, pointer: ptr,
       hasAudio: aState.hasAudio, isRecord: RECORD, muted: aState.muted,
     });
     if (!RECORD) updateUI();
@@ -2477,7 +2539,45 @@
     V.emit('onEnded', { duration: V.duration, scene: current });
   }
 
-  function advanceAudioClock(ts) {
+  function dampAxis(cur, target, k) {
+    const next = cur + (target - cur) * k;
+    return Math.abs(target - next) < 0.0005 ? target : next;
+  }
+
+  function syncStagePointerVars() {
+    if (RECORD || !stage) return;
+    const sig = `${ptr.sx.toFixed(4)}|${ptr.sy.toFixed(4)}|${ptr.presence.toFixed(4)}|${Math.round(ptr.x)}|${Math.round(ptr.y)}|${ptr.inside ? 1 : 0}`;
+    if (stage._ptrSig === sig) return;
+    stage._ptrSig = sig;
+    stage.style.setProperty('--ptr-x', ptr.sx.toFixed(4));
+    stage.style.setProperty('--ptr-y', ptr.sy.toFixed(4));
+    stage.style.setProperty('--ptr-px', Math.round(ptr.x) + 'px');
+    stage.style.setProperty('--ptr-py', Math.round(ptr.y) + 'px');
+    stage.style.setProperty('--ptr-inside', ptr.inside ? '1' : '0');
+    stage.style.setProperty('--ptr-presence', ptr.presence.toFixed(4));
+  }
+
+  function stepPointerSmoothing(dt) {
+    if (RECORD || !stage) return;
+    const k = dt > 0 ? 1 - Math.exp(-dt * 12) : 0.25;
+    ptr.sx = dampAxis(ptr.sx, ptr.inside ? ptr.nx : 0, k);
+    ptr.sy = dampAxis(ptr.sy, ptr.inside ? ptr.ny : 0, k);
+    ptr.presence = dampAxis(ptr.presence, ptr.inside ? 1 : 0, k);
+    syncStagePointerVars();
+  }
+
+  function isDocHidden() {
+    return typeof document !== 'undefined' && Boolean(document.hidden);
+  }
+
+  function shouldTickAmbientPause(sc) {
+    if (RECORD || isDocHidden() || !sc) return false;
+    if (sc.live) return true;
+    const uiCfg = getUiCfg(V.getCfg());
+    return uiCfg.livePause !== false && sc.livePause !== false;
+  }
+
+  function advanceAudioClock(ts, rawDt) {
     lastTs = ts;
     const mTime = audioRt.tickMasterClock();
     if (mTime != null) {
@@ -2486,7 +2586,10 @@
       else render(mTime, 0);
       return;
     }
-    if (current && current.live) render(now, 0);
+    if (shouldTickAmbientPause(current)) {
+      ambientOffset += rawDt;
+      render(now, 0);
+    }
   }
 
   function advanceWallClock(ts) {
@@ -2499,15 +2602,18 @@
   }
 
   function frame(ts) {
+    const rawDt = lastFrameTs > 0 ? clamp((ts - lastFrameTs) / 1000, 0, 0.1) : 0;
+    lastFrameTs = ts;
+    stepPointerSmoothing(rawDt);
     if (scrubbing) {
       lastTs = ts;
-      pauseBaseTs = ts;
       if (current && current.live) render(now, 0);
     } else if (playing) {
-      if (audioRt && audioRt.canUseMasterClock()) advanceAudioClock(ts);
+      if (audioRt && audioRt.canUseMasterClock()) advanceAudioClock(ts, rawDt);
       else advanceWallClock(ts);
-    } else if (current && current.live && !RECORD) {
-      const idleSec = pauseBaseTs > 0 ? Math.max(0, (ts - pauseBaseTs) / 1000) : 0;
+    } else if (shouldTickAmbientPause(current)) {
+      ambientOffset += rawDt;
+      idleSec += rawDt;
       render(now, idleSec);
     }
     requestAnimationFrame(frame);
@@ -2539,9 +2645,15 @@
   }
 
   function play() {
-    if (now >= V.duration - 0.01) { V.resetCheckpoints(); seek(0); }
+    if (now >= V.duration - 0.01) {
+      ambientOffset = 0;
+      idleSec = 0;
+      V.resetCheckpoints();
+      seek(0);
+    }
     setSandboxActiveDom(false);
     ended = false;
+    idleSec = 0;
     document.body.classList.remove('is-ended');
     V._checkpointsRuntime.closeCheckpointOverlay();
     setOpenMenu(document.getElementById('controls'), '');
@@ -2558,7 +2670,7 @@
 
   function pause() {
     playing = false;
-    pauseBaseTs = performance.now();
+    idleSec = 0;
     ended = now >= V.duration - 0.01;
     document.body.classList.remove('playing');
     document.body.classList.toggle('is-ended', ended);
@@ -2619,7 +2731,7 @@
     const ts = performance.now();
     if (!force && isRedundantSeek(target, ts)) return;
     lastTs = ts;
-    pauseBaseTs = ts;
+    idleSec = 0;
     lastSeekTarget = target;
     lastSeekAt = ts;
     if (V._checkpointsRuntime && V._checkpointsRuntime.onSeek) V._checkpointsRuntime.onSeek(target);
@@ -2891,7 +3003,40 @@
     });
   }
 
+  function resetPointerLeave() {
+    ptr.inside = false;
+    ptr.down = false;
+    ptr.nx = 0;
+    ptr.ny = 0;
+  }
+
+  function isEventOverBar(bar, target) {
+    return Boolean(bar && target && bar.contains && bar.contains(target));
+  }
+
+  function hitStageRect(r, cx, cy) {
+    if (r.width <= 0 || r.height <= 0) return false;
+    return cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom;
+  }
+
+  function updatePointerFromEvent(bar, e) {
+    if (RECORD || !stage || !Number.isFinite(e.clientX)) return;
+    const r = stage.getBoundingClientRect();
+    if (isEventOverBar(bar, e.target) || !hitStageRect(r, e.clientX, e.clientY)) {
+      resetPointerLeave();
+      return;
+    }
+    const rx = clamp((e.clientX - r.left) / r.width, 0, 1);
+    const ry = clamp((e.clientY - r.top) / r.height, 0, 1);
+    ptr.inside = true;
+    ptr.x = rx * (V.stageWidth || 1920);
+    ptr.y = ry * (V.stageHeight || 1080);
+    ptr.nx = rx * 2 - 1;
+    ptr.ny = ry * 2 - 1;
+  }
+
   function wakeFromPointer(bar, uiCfg, e, force) {
+    updatePointerFromEvent(bar, e);
     if (!force && Math.abs(e.clientX - lastPtrX) < 1 && Math.abs(e.clientY - lastPtrY) < 1) return;
     lastPtrX = e.clientX;
     lastPtrY = e.clientY;
@@ -2904,16 +3049,22 @@
       inBar = false;
       lastPtrX = -9999;
       lastPtrY = -9999;
+      resetPointerLeave();
       scheduleUiHide(uiCfg.leaveHideDelay);
     };
+    const clearDown = () => { ptr.down = false; };
     document.addEventListener('pointerenter', e => wakeFromPointer(bar, uiCfg, e, true));
     addEventListener('pointermove', e => wakeFromPointer(bar, uiCfg, e, false));
     if (bar) bar.addEventListener('pointerleave', () => { inBar = false; scheduleUiHide(uiCfg.idleHideDelay); });
     document.addEventListener('mouseleave', clearOnLeave);
     addEventListener('blur', clearOnLeave);
     addEventListener('pointerdown', e => {
+      updatePointerFromEvent(bar, e);
+      if (ptr.inside) ptr.down = true;
       if (e.pointerType === 'touch') flashUi(bar && bar.contains(e.target) ? 2200 : uiCfg.idleHideDelay);
     });
+    addEventListener('pointerup', clearDown);
+    addEventListener('pointercancel', clearDown);
     addEventListener('focusin', e => {
       if (bar && bar.contains(e.target)) flashUi(uiCfg.idleHideDelay);
     });
@@ -3104,6 +3255,9 @@
         return {
           now,
           clock: V._clock || now,
+          alive: V._clock || now,
+          idle: idleSec,
+          pointer: Object.assign({}, ptr),
           ended,
           sandbox: sandboxState.active,
           playing,
@@ -3184,7 +3338,9 @@
 
     fit();
     addEventListener('resize', () => { releaseBarHold(); fit(); });
-    pauseBaseTs = performance.now();
+    lastFrameTs = performance.now();
+    ambientOffset = 0;
+    idleSec = 0;
     const initPos = resolveInitialTime(uiCfg);
     if (initPos.t > 0) {
       seek(initPos.t);

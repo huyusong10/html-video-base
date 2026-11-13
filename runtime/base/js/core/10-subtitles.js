@@ -94,7 +94,10 @@
     const fn = subCfg.onUpdate || subCfg.update;
     if (typeof fn !== 'function') return;
     const lineCue = activeCueIdx >= 0 ? sc.cues[activeCueIdx] : null;
-    const info = { t: now, clock, lt, scene: sc, sceneIndex: idx, lineCue, speaking: Boolean(cue), energy: V.getSceneEnergy(sc, idx, lt) };
+    const info = {
+      t: now, clock, alive: clock, playing: Boolean(V._isPlaying), pointer: V.pointer,
+      lt, scene: sc, sceneIndex: idx, lineCue, speaking: Boolean(cue), energy: V.getSceneEnergy(sc, idx, lt),
+    };
     fn(cue, info, { subs, lead: subLead, tail: subTail, speaker: subSpeaker, text: subText });
   }
 
