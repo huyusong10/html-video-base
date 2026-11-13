@@ -2,27 +2,128 @@
 
 **简体中文** | [English](https://github.com/huyusong10/html-video-base/blob/main/README.en.md)
 
-纯函数时间轴（`f(t)`）HTML 交互式视频微内核框架与多模型 TTS 渲染管线。业务项目只需在 `package.json` 中依赖本包，即可直接获得完整播放器运行时、字幕与双音轨混音管线、无头视觉巡检及 MP4 / 纯静态导出能力，无需在业务仓维护 `videos/base/` 与构建脚本。
+用网页技术（HTML / CSS / JS）编写视频的通用底座与渲染工具链。
 
-## 核心特性
-
-- **纯函数时间轴 `f(t)`**：画面状态完全由时间 `t` 决定，支持任意拖拽、倍速、幂等逐帧渲染。
-- **语义词锚与双音轨混音**：支持多模型 TTS 配音、30Hz 语音能量包络提取、词级时间戳对齐，分离输出 `soundtrack.m4a`（解说 + 音效）与 `bgm.m4a`（自动闪避背景音乐）。
-- **双时钟呼吸引擎**：暂停或播完驻留时叙事时间冻结，环境动画时钟 `x.alive` 持续流淌，支持鼠标交互、舞台指针场与实时微音效。
-- **零侵入多语言扩展**：通过 `V.locale()` 与 `--lang` 外挂语种包，无需改写分镜源码。
-- **一键打包与导出**：内置开发热更新服务（虚拟 `/base/*` + 206 Range + SSE）、无头 Chromium 版面巡检、增量缓存 MP4 导出及免 `node_modules` 纯静态打包。
+它把视频变成一套可交互的网页：既能直接在浏览器里播放、点击和拖拽进度条，也能一键合成配音字幕并导出高清 MP4。业务仓库只需安装这一个 npm 包，就能共用播放器运行时、配音管线和打包工具，不用在每个项目里重复维护一套引擎代码。
 
 ---
 
-## 快速开始
+## 为什么这样设计
 
-### 1. 安装依赖
+传统视频剪辑工具很难和代码版本管理、动态数据或网页交互结合；而普通网页动画在录制导出时又常常出现进度不准、音画错位。`html-video-base` 通过三个核心机制解决这些问题：
+
+1. **画面是时间的纯函数**：每一帧怎么画，只由当前时间 `t` 决定（`update(t, x)`）。因此进度条可以任意拖拽、倍速切换，逐帧导出 MP4 也不会漂移。
+2. **动画跟着台词走**：不用死算“第几秒出现哪个元素”，直接用 `x.at(0, '关键词')` 绑定台词里的重音词。之后改文案或调语速，动画卡点会自动重新对齐。
+3. **运行时与业务分离**：业务目录只放分镜脚本、样式和媒体素材，底层播放器通过 `/base/*` 虚拟路由按需加载，需要独立发布时再一键打包成纯静态站点。
+
+---
+
+## 快速上手：从零做出第一支视频
+
+### 第 1 步：安装
+
+在你的项目目录执行：
 
 ```bash
+npm init -y
 npm install html-video-base
 ```
 
-或在业务项目的 `package.json` 中声明依赖与常用脚本：
+> **环境说明**：如果只是**播放或静态打包已有成品视频**（运行 `serve` / `bundle`），只需要 Node.js（20+）；如果要**合成配音或导出 MP4**（运行 `build` / `mix` / `verify` / `render`），再按需安装下文的 Python 与 FFmpeg 环境。
+
+### 第 2 步：初始化并预览草稿
+
+```bash
+# 创建一个名为 demo 的视频骨架，并导出 AI 创作规范
+npx html-video init demo --title "产品介绍" --skill
+
+# 启动本地热更新预览（默认 http://localhost:8765/）
+npx html-video serve
+```
+
+打开 `http://localhost:8765/demo/?dev=1`，就能立刻看到效果。**还没生成配音前也可以直接预览**，框架会自动按台词字数估算时长。
+
+初始化后，你的视频目录非常轻量，只包含 4 个核心文件：
+
+```text
+videos/demo/
+├── index.html       # 页面入口（自动挂载运行时与脚本）
+├── video.config.js  # 画幅、配音音色、BGM、转场等全局配置
+├── style.css        # 分镜样式与主题变量覆盖
+└── js/scenes.js     # 分镜台词与画面更新逻辑
+```
+
+### 第 3 步：编写分镜脚本
+
+在 `videos/demo/js/scenes.js` 中，每一幕只需定义台词（`lines`）、搭建节点（`build`）和按时间更新画面（`update`）：
+
+```js
+const { h, appear, pop } = V.u;
+
+V.scenes.push({
+  title: '核心亮点',
+  lines: [
+    '欢迎使用 html-video-base，只需要声明台词和动画卡点，就能直接预览和导出成片。',
+  ],
+  build(root) {
+    this.card = h('div', { class: 'hero-card' }, '所见即所得');
+    root.append(this.card);
+  },
+  update(t, x) {
+    // 读到“动画卡点”前 0.1 秒触发卡片弹出，无需手算秒数
+    pop(this.card, appear(t, x.at(0, '动画卡点', -0.1), 0.35));
+  },
+});
+```
+
+### 第 4 步：配音、检查与交付
+
+当你写完分镜、准备出片时，按下面顺序执行即可：
+
+1. **准备音频与渲染依赖（首次使用）**：
+
+   ```bash
+   # macOS / Linux
+   python3 -m venv .runtime/venv
+   .runtime/venv/bin/pip install -r node_modules/html-video-base/requirements.txt
+
+   # Windows PowerShell
+   python -m venv .runtime/venv
+   .runtime/venv/Scripts/pip install -r node_modules/html-video-base/requirements.txt
+   ```
+
+2. **合成语音与字幕**：
+
+   ```bash
+   npx html-video build demo
+   ```
+
+   命令会自动调用 TTS 合成语音、提取 30Hz 语音包络（可用于驱动角色口型）、生成 `.vtt`/`.srt` 字幕，并分离输出人声主轨 `soundtrack.m4a` 与自动闪避的背景音乐轨 `bgm.m4a`。
+
+   > **小技巧**：如果只调整了背景音乐、音效或停顿时长，台词原文没变，运行 `npx html-video mix demo` 即可离线秒级重混，不用重新请求 TTS。
+
+3. **同步校验与版面巡检**：
+
+   ```bash
+   npx html-video verify demo   # 校验词锚、字幕与音画时长同步
+   npx html-video audit demo    # 用无头 Chromium 检查破损图、越界、遮挡与字号
+   ```
+
+4. **交付成片（二选一或同时输出）**：
+
+   ```bash
+   # 方式 A：导出高清 MP4（支持增量缓存与多进程并行）
+   npx html-video render demo
+
+   # 方式 B：打包为纯静态网页（不依赖 node_modules，可直接部署到任意静态服务器）
+   npx html-video bundle --all --out dist
+   ```
+
+---
+
+## 在项目里配置常用脚本
+
+为了日常敲命令更顺手，推荐在业务仓的 `package.json` 里加上脚本映射：
 
 ```json
 {
@@ -41,115 +142,71 @@ npm install html-video-base
     "docs": "html-video docs"
   },
   "dependencies": {
-    "html-video-base": "^2.7.2"
+    "html-video-base": "^2.7.3"
   }
 }
 ```
 
-### 2. 初始化视频与文档规范
+---
 
-```bash
-# 新建首个视频骨架，并导出完整创作规范到 .agents/skills/html-video/
-npx html-video init demo --title "产品演示" --skill
+## 进阶能力：按需解锁
 
-# 启动本地预览（默认监听 http://localhost:8765/，支持热更新）
-npx html-video serve
-```
+跑通基础流程后，如果视频需要更丰富的视觉表现、交互体验或跨语言版本，可以按下面分类查阅：
 
-> 仅需**本地播放或静态部署已有成品视频**时，Node.js 环境即可直接运行 `serve` 与 `bundle`。
+### 1. 交互与双时钟呼吸感
+- **暂停时动画不停**：默认开启 `ui.livePause: true`。暂停或播完停留时，叙事时间 `t` 冻结，但环境时钟 `x.alive` / `x.clock` 会继续推进，恢复播放时也不会跳帧。角色眨眼、呼吸、粒子漂浮读取 `x.alive` 即可；录制 MP4（`?record=1`）时会自动锁定 `alive === t`，保证导出幂等。
+- **鼠标跟随与可点击元素**：`x.pointer` 自动把鼠标坐标换算到舞台坐标系（消除缩放、黑边与全屏偏移），适合做视差或眼神追踪；需要响应点击的卡片或按钮用 `V.u.interactive(el, handlers)` 包一层，点击时既能触发 `V.sfx()` 微音效，又不会误触暂停播放。
+- **交互驻点与彩蛋试玩**：长视频可在幕配置 `scene.checkpoints` 做互动停顿或分支问答；结尾可通过 `V.tryEgg(sec, hint)`、`V.enterSandbox()` / `V.exitSandbox()` 跳转到任意幕试玩并返回。
 
-### 3. 安装音频合成与渲染环境（可选）
+### 2. 跨幕角色、转场与字幕排布
+- **持久角色层（`V.layer`）**：用于跨幕不闪烁的吉祥物或悬浮挂件，`update(st, info)` 会实时收到 `0..1` 的语音能量 `info.energy`，可直接驱动口型动画。
+- **字幕避让与插槽（`V.subtitle` / `V.setSubLayout`）**：支持把字幕移到左/右/顶部或指定坐标来避开角色，并在字幕前后挂载 `.sub-lead` / `.sub-tail` 挂件。
+- **多段关键帧（`V.u.keyframes`）**：在多时间点之间平滑过渡数值或切换离散状态，比手写多层 `lerp` 嵌套更清晰。
+- **内嵌录屏同步（`V.u.videoClip` / `V.u.syncVideoClip`）**：把外部 `<video>` 录屏嵌入分镜，网页播放、逐帧截屏与 `mix.py` 原声混音自动对齐。
+- **其他扩展接口**：`V.use(plugin)` 注册生命周期钩子、`V.transition()` 注册自定义转场、`V.preset()` 注册复用组件、`V.control()` / `V.icons()` / `V.makeIcon()` 扩展控制栏按钮与图标、`V.search()` / `V.openSearch()` / `V.getDeepLink()` 提供全文台词检索（`/` 或 `Ctrl+K`）与 `?t=` 时间码分享。
 
-仅在需要**合成配音（`build`）、重混（`mix`）、音画校验（`verify`）或导出 MP4（`render`）**时，需准备 Python 3.10+ 与 FFmpeg：
+### 3. 多语言视频扩展
+分镜代码本身保持单语种编写，需要外语版本时，在 `video.config.js` 声明 `locales`，再新增 `locales/en.js` 用 `V.locale()` 做外挂翻译即可。支持 `npx html-video build demo --lang en` 独立合成外语配音字幕，并在网页端通过 `?lang=en` 或声音菜单实时切换。详细写法见 [多语言扩展指南](skills/html-video/references/i18n.md)。
 
-- **macOS / Linux**：
-
-  ```bash
-  python3 -m venv .runtime/venv
-  .runtime/venv/bin/pip install -r node_modules/html-video-base/requirements.txt
-  ```
-
-- **Windows PowerShell**：
-
-  ```powershell
-  python -m venv .runtime/venv
-  .runtime/venv/Scripts/pip install -r node_modules/html-video-base/requirements.txt
-  ```
+### 4. 主题与播放器外观定制
+- **播放器行为**：通过 `V.config.ui` 或 `V.themeDefaults.ui` 调整控制栏隐显模式（默认 `overlay` 悬停自动显隐）、倍速档位 `rates`、图标风格 `iconPreset`（`'default' | 'pixel'`），以及音轨/断点偏好记忆（`persist` / `resume`）；也支持代码控制音轨：`V.setBgm()`、`V.setVoice()`、`V.setMuted()`、`V.clearSavedState()`。
+- **CSS 变量槽位**：底层样式采用低权重选择器，业务 `style.css` 直接在 `:root` 覆盖变量即可换肤：
+  - 视口与舞台：`--viewport-bg`、`--stage-shadow`、`--stage-bg-image`、`--font-sans`、`--font-smoothing`、`--gl-rendering`
+  - 顶栏分段 `#hud`：`--hud-left/right/top/h`、`--hud-track-h/radius/bg`、`--hud-bar-bg`、`--hud-tick-w/bg`
+  - 字幕胶囊 `#subs`：`--sub-bottom`、`--sub-z`、`--sub-radius`、`--sub-bg/fg/border/border-w`、`--sub-size`
+  - 底部控制栏与菜单：`--ctrl-h`、`--ctrl-font/font-size`、`--ctrl-radius`、`--ctrl-btn-w/h`、`--ctrl-icon-btn-w`、`--ctrl-time-w`、`--ctrl-chap-w`、`--ctrl-track-h/radius/bg`、`--ctrl-fill-bg`、`--ctrl-mark-w/h/bg`、`--ctrl-thumb-w/h/radius/border`、`--ctrl-menu-bg/border/radius/shadow`
 
 ---
 
-## 文档与 AI 规范入口
+## 文档与 AI 协作入口
 
-安装 `html-video-base` 后，完整手册与工程规范已内置在包内，可通过以下方式随时查看或导出：
+安装本包后，所有手册和创作规范都保存在本地 `node_modules/html-video-base/` 中，可以通过以下命令随时查看或导出：
 
-| 方式 | 说明 |
-| :--- | :--- |
-| `npx html-video docs` | 在终端查看本地手册、Skill 规范与多语言指南的绝对路径及常用命令（加 `--en` 输出英文） |
-| `npx html-video --help` | 查看全部 CLI 子命令与参数说明 |
-| `npx html-video skill` | 将内置完整创作规范导出至项目 `.agents/skills/html-video/`（供团队成员与 AI Coding Agent 直接读取） |
-| [创作与工程规范（SKILL.md）](skills/html-video/SKILL.md) | 目录结构、纯函数 `f(t)` 契约、词锚对齐、角色层与视觉巡检细则 |
-| [多语言扩展指南（i18n.md）](skills/html-video/references/i18n.md) | 外挂语种包 `V.locale()`、原文直映与多语种构建说明 |
-| [English Manual（README.en.md）](README.en.md) | 英文版完整使用手册 |
+- `npx html-video docs`：在终端打印本地中文/英文手册及规范文件路径（加 `--en` 输出英文提示）
+- `npx html-video skill`：把完整工程规范 [SKILL.md](skills/html-video/SKILL.md) 导出到项目的 `.agents/skills/html-video/`，方便团队成员或 AI Coding Agent（Cursor / Claude Code / Codex / Antigravity 等）按统一约束编写分镜。
 
 ---
 
 ## CLI 命令速查
 
-| 命令 | 用途 |
+| 命令 | 说明 |
 | :--- | :--- |
-| `html-video init <id> [--title "..."] [--aspect 16:9\|9:16\|1:1] [--skill]` | 初始化新视频骨架（`--skill` 同步导出 Agent 规范至 `.agents/skills/html-video/`） |
-| `html-video skill [--out .agents/skills/html-video]` | 单独导出内置 `SKILL.md` 创作与主题规范 |
-| `html-video docs [--en]` | 查看随包内置的中文/英文文档路径与快速上手提示 |
-| `html-video serve [port] [host] [--no-watch]` | 启动虚拟 `/base/*` 路由 + 206 Range 寻道 + SSE 帧保位热更新服务 |
-| `html-video build [id] [--lang en] [--provider ...] [--bitrate 128k] [--mix-only] [--visual]` | 合成 TTS 语音、30Hz 包络、声学词对齐，分离输出 `soundtrack.m4a`（解说+音效）与 `bgm.m4a`（带闪避配乐）、`.vtt`/`.srt` 字幕并固化时间轴 |
-| `html-video mix [id] [--lang en] [--bitrate 128k] [--visual]` | 免联网极速混音：直接复用本地干声缓存或从现有 `soundtrack.m4a` 切片，重混 `bgm`/`sfx`/停顿节奏并固化时间轴 |
-| `html-video verify [id ...] [--stamp-baked] [--visual] [--strict]` | 语义词锚门禁 + 五维音画与双音轨同步校验 |
-| `html-video audit [id ...] [--strict] [--screenshots <dir>]` | 无头 Chromium 巡检破损图、越界、字幕遮挡、兄弟卡片压盖、最小字号、`f(t)` 幂等并自动落盘告警截图 |
-| `html-video storyboard [id] [out.html] [--per-cue] [--pdf]` | 导出单文件图文分镜审阅单（可选 PDF） |
-| `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--no-bgm] [--no-cache]` | 按幕 SHA-256 增量缓存 + 静止帧自动复用 + 多进程并行导出高清 MP4（`--no-bgm` 可导出纯解说无配乐版） |
-| `html-video bundle [id ... \| --single \| --all] [--out dist]` | 将虚拟 `/base/*` 与视频资源打包为免 `node_modules` 的纯静态站点（`--single` 生成单视频根目录） |
-| `html-video manifest` | 扫描 `videos/` 目录并同步生成 `videos/manifest.js` |
+| `html-video init <id> [--title "..."] [--aspect 16:9\|9:16\|1:1] [--skill]` | 初始化新视频目录（加 `--skill` 同步导出规范） |
+| `html-video skill [--out .agents/skills/html-video]` | 导出内置 `SKILL.md` 创作与工程规范 |
+| `html-video docs [--en]` | 查看随包附带的文档路径与起步命令 |
+| `html-video serve [port] [host] [--no-watch]` | 启动带虚拟 `/base/*`、Range 寻道与热更新的预览服务 |
+| `html-video build [id] [--lang en] [--provider ...] [--bitrate 128k] [--mix-only] [--visual]` | 合成 TTS 语音、词级时间轴、双音轨与字幕 |
+| `html-video mix [id] [--lang en] [--bitrate 128k] [--visual]` | 复用缓存干声快速重混配乐与音效 |
+| `html-video verify [id ...] [--stamp-baked] [--visual] [--strict]` | 校验词锚、字幕与音画同步 |
+| `html-video audit [id ...] [--strict] [--screenshots <dir>]` | 无头浏览器版面、图片与幂等性巡检 |
+| `html-video storyboard [id] [out.html] [--per-cue] [--pdf]` | 导出图文分镜审阅单 |
+| `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--no-bgm] [--no-cache]` | 按幕缓存增量导出高清 MP4 |
+| `html-video bundle [id ... \| --single \| --all] [--out dist]` | 打包免 `node_modules` 的纯静态站点 |
+| `html-video manifest` | 扫描 `videos/` 并更新 `videos/manifest.js` |
 
----
+## 工程门禁（本仓开发）
 
-## 微内核开放扩展 API
-
-| API | 说明 |
-| :--- | :--- |
-| `V.use(plugin)` | 注册生命周期插件（`onBoot` / `onLayout` / `onRender` / `onSeek` / `onPlay` / `onPause` / `onSceneEnter` / `onEnded`，兼容短名 `boot` / `layout` / `tick` / `seek` / `play` / `pause` / `sceneChange` / `ended`） |
-| `V.transition(name, { dur, mount(box, cfg), update(dom, near, dur, current, cfg) })` | 注册自定义跨幕转场（内置 `none` / `fade` / `slide` / `wipe` / `tiles`） |
-| `V.control({ id, icon, title, onClick, sync })` | 向底部控制栏扩展槽注入自定义图标按钮（推荐传 `16×16` SVG 路径数组、SVG 字符串或渲染函数） |
-| `V.icons(dict)` / `V.makeIcon(spec)` | 覆盖控制栏内置图标字典（`home` / `play` / `pause` / `replay` / `rate` / `subsOn` / `subsOff` / `volumeOn` / `volumeVoice` / `volumeBgm` / `volumeMute` / `webEnter` / `webExit` / `fullEnter` / `fullExit`）或生成同规格图标节点 |
-| `V.preset(name, factory)` | 注册可复用视觉原语（挂载于 `V.c[name]`） |
-| `V.layer({ id, prop, zIndex, defaultState, create, update })` | 注册跨幕持久角色/挂件层；`update(st, info)` 实时接收 30Hz 语音能量 `info.energy`（`0..1`）驱动真实口型 |
-| `V.subtitle({ position, modes, lead, tail, onUpdate })` + `V.setSubLayout(spec)` | 定制字幕位置（`center`/`left`/`right`/`top` 或任意坐标避让吉祥物）、挂载前置/后置吉祥物与角标插槽（`.sub-lead` / `.sub-tail`），并支持按幕 `scene.subLayout` 或逐帧 `f(t)` 动态联动 |
-| `V.locale(lang, { title, scenes: { [id]: { title, lines, anchors } } })` | 注册多语种台词与 `x.at()` 语义词锚映射（`?lang=en` / `--lang en`） |
-| `V.u.keyframes(t, stops, opts)` | 多段纯函数关键帧插值：数值属性平滑过渡（默认 `smooth`），字符串/布尔状态按停靠点离散切换，避免手写多层 `lerp` 嵌套 |
-| `V.pointer` / `x.pointer` + `V.u.interactive(el, handlers)` | 舞台归一化指针场（自动抵消 `scale` 缩放、黑边与全屏偏移，暴露 `x/y/nx/ny`、阻尼平滑 `sx/sy/presence` 及 `#stage` `--ptr-x/--ptr-y/--ptr-px/--ptr-py/--ptr-presence` 变量；`?record=1` 自动归零保证 `f(t)` 确定性）与免冒泡抢播的舞台交互元素绑定 |
-| `x.alive` / `x.clock` + `ui.livePause` | 双时钟呼吸引擎：暂停或播完驻留时叙事时间轴 `t` 冻结，环境时钟 `x.alive` / `x.clock` 连续流淌（恢复播放零回跳，后台标签页自动休眠，`?record=1` 自动锁定 `alive === t`） |
-| `V.u.videoClip(src, opts)` + `V.u.syncVideoClip(el, t)` | 受控内嵌 `<video>` 录屏：Web 播放同步、`seekToAsync` 精确锁帧、`mix.py` 原声混音 |
-| `scene.checkpoints` | Web 交互驻点暂停与分支问答（`?record=1` 导出模式自动直通） |
-| `V.tryEgg(targetSec, hint)` / `V.enterSandbox` / `V.exitSandbox` | 终章彩蛋与沙盒试玩跳转及悬浮返回条 |
-| `V.search(query)` / `V.openSearch()` / `V.getDeepLink(t)` | 内置全文台词与章节检索跳转（快捷键 `/` 或 `Ctrl+K`）及时间码点击复制 `?t=` 深链 |
-| `V.setBgm(on)` / `V.setVoice(on)` / `V.setMuted(on)` / `V.clearSavedState()` | 解说主轨与 BGM 伴奏轨独立开关（上拉菜单 / `B` 键开关配乐、`M` 键静音），以及偏好记忆与断点续播清理 |
-| `V.config.ui` / `V.themeDefaults.ui` | 定制播放器模式（默认 `controlsMode: 'overlay'`：鼠标进入或移动于视频内即显控制栏、静止 `1.5s` 自动隐退、移出窗口 `0.22s` 速隐、全屏同步隐鼠；悬停进度条实时跟随 `.track-tip` 章节时间预览；键盘操作仅在右上角闪出 `#osd` 胶囊而不弹底栏顶跳字幕；`persist: true` 默认仅记忆倍速/字幕/音轨偏好，断点续播默认关闭，长视频可显式开启 `resume: true`）、图标预设（`iconPreset: 'default' \| 'pixel'`）与倍速档位（`rates`） |
-
----
-
-## 主题与控制栏 CSS 变量槽位
-
-项目侧通过覆盖 `:root` 变量即可完整切换像素风、建筑编辑风或现代科技风（底座选择器均采用低权重类 / `:where()`，不抢业务权重）：
-
-- **视口与舞台**：`--viewport-bg`、`--stage-shadow`、`--stage-bg-image`、`--font-sans`、`--font-smoothing`、`--gl-rendering`
-- **顶栏分段 `#hud`**：`--hud-left/right/top/h`、`--hud-track-h/radius/bg`、`--hud-bar-bg`、`--hud-tick-w/bg`
-- **字幕胶囊 `#subs`**：`--sub-bottom`、`--sub-z`、`--sub-radius`、`--sub-bg/fg/border/border-w`、`--sub-size`
-- **底部控制栏与上拉菜单**：`--ctrl-h`、`--ctrl-font/font-size`、`--ctrl-radius`、`--ctrl-btn-w/h`、`--ctrl-icon-btn-w`、`--ctrl-time-w`、`--ctrl-chap-w`、`--ctrl-track-h/radius/bg`、`--ctrl-fill-bg`、`--ctrl-mark-w/h/bg`、`--ctrl-thumb-w/h/radius/border`、`--ctrl-menu-bg/border/radius/shadow`
-
----
-
-## 工程门禁
-
-全库所有 JS/MJS 与 Python 函数强制圈复杂度 `< 15`（`<= 14`）：
+本仓库要求所有 JS/MJS 与 Python 函数的圈复杂度 `< 15`（`<= 14`）：
 
 ```bash
 npm run lint:cc
