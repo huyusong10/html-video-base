@@ -119,6 +119,7 @@ function cmdInit(args) {
   console.log(`  Preview draft: npx html-video serve -> http://localhost:8765/${videoId}/?dev=1`);
   console.log(`  Build audio  : npx html-video build ${videoId}`);
   console.log(`  Export MP4   : npx html-video render ${videoId}`);
+  console.log(`  Read docs    : npx html-video docs`);
 }
 
 function collectBuildTtsEnv(args) {
@@ -249,11 +250,55 @@ function cmdBuild(args) {
   console.log(`Build complete for '${videoId}${lang ? ':' + lang : ''}'.`);
 }
 
+function getPkgVersion() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8'));
+    return pkg.version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+function cmdDocs(args) {
+  const isEn = args.includes('--en') || parseFlag(args, '--lang', '') === 'en';
+  const readmeFile = isEn ? 'README.en.md' : 'README.md';
+  const lines = isEn ? [
+    `html-video-base v${getPkgVersion()} — Documentation & Quick Guide`,
+    `  Manual (EN) : ${path.join(PKG_ROOT, 'README.en.md')}`,
+    `  Manual (ZH) : ${path.join(PKG_ROOT, 'README.md')}`,
+    `  Agent Skill : ${path.join(PKG_ROOT, 'skills/html-video/SKILL.md')}`,
+    `  i18n Guide  : ${path.join(PKG_ROOT, 'skills/html-video/references/i18n.md')}`,
+    `  Online Docs : https://github.com/huyusong10/html-video-base#readme`,
+    '  Quick Start :',
+    '    npx html-video init <id> --skill   # Scaffold video + export Agent Skill',
+    '    npx html-video skill               # Export SKILL.md to .agents/skills/html-video/',
+    '    npx html-video serve               # Start local preview server (http://localhost:8765/)',
+    '    npx html-video bundle --all        # Build standalone static site into dist/',
+  ] : [
+    `html-video-base v${getPkgVersion()} — 文档与快速上手指南`,
+    `  中文手册    : ${path.join(PKG_ROOT, 'README.md')}`,
+    `  英文手册    : ${path.join(PKG_ROOT, 'README.en.md')}`,
+    `  Agent 规范  : ${path.join(PKG_ROOT, 'skills/html-video/SKILL.md')}`,
+    `  多语言指南  : ${path.join(PKG_ROOT, 'skills/html-video/references/i18n.md')}`,
+    `  在线文档    : https://github.com/huyusong10/html-video-base#readme`,
+    '  常用起步命令:',
+    '    npx html-video init <id> --skill   # 初始化视频骨架并导出 AI 创作规范',
+    '    npx html-video skill               # 单独导出规范到 .agents/skills/html-video/',
+    '    npx html-video serve               # 启动本地热更新预览服务 (http://localhost:8765/)',
+    '    npx html-video bundle --all        # 打包免 node_modules 的纯静态站点到 dist/',
+  ];
+  if (!fs.existsSync(path.join(PKG_ROOT, readmeFile))) {
+    console.warn(`Warning: ${readmeFile} not found in ${PKG_ROOT}`);
+  }
+  console.log(lines.join('\n'));
+}
+
 function printHelp() {
   console.log([
-    'html-video CLI (v2.6)',
+    `html-video CLI (v${getPkgVersion()})`,
     '  html-video init <id> [--title "..."] [--aspect 16:9|9:16|1:1] [--skill]',
     '  html-video skill [--out .agents/skills/html-video]',
+    '  html-video docs [--en]',
     '  html-video serve [port] [host] [--no-watch]',
     '  html-video build [video-id] [--lang en] [--provider edge|openai|elevenlabs|azure|http|command] [--voice ...] [--speed ...] [--bitrate 128k] [--mix-only] [--visual]',
     '  html-video mix [video-id] [--lang en] [--bitrate 128k] [--visual]',
@@ -263,6 +308,8 @@ function printHelp() {
     '  html-video render [video-id] [output.mp4] [--workers N] [--scene K] [--range t0:t1] [--fps N] [--lang en] [--no-bgm] [--no-cache] [--no-frame-reuse]',
     '  html-video bundle [video-id ... | --single | --all] [--out dist]',
     '  html-video manifest',
+    '',
+    `Docs: npx html-video docs | ${path.join(PKG_ROOT, 'README.md')}`,
   ].join('\n'));
 }
 
@@ -270,6 +317,7 @@ const COMMANDS = {
   init: cmdInit,
   new: cmdInit,
   skill: cmdSkill,
+  docs: cmdDocs,
   build: cmdBuild,
   mix: cmdMix,
   serve: r => run(process.execPath, [path.join(TOOLS_DIR, 'serve.mjs'), ...r]),
