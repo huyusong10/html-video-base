@@ -82,6 +82,7 @@
 
     let pages = [];
     let pageIdx = 0;
+    let hasRendered = false;
     let barEl = null;
     let internalRender = false;
     let wheelLockTs = 0;
@@ -162,6 +163,7 @@
     }
 
     function commitPageSnap(targetPage) {
+      hasRendered = true;
       tween.active = false;
       renderInternal(targetPage.globalT);
       syncUI();
@@ -189,7 +191,7 @@
       if (!pages.length) return 0;
       const nextIdx = clamp(targetIdx, 0, pages.length - 1);
       const next = pages[nextIdx];
-      if (nextIdx === pageIdx) {
+      if (nextIdx === pageIdx && hasRendered && !opts.force) {
         if (tween.active) commitPageSnap(next);
         return pageIdx;
       }
@@ -233,7 +235,7 @@
 
     function seekToNearestPage(t) {
       if (!pages.length) rebuildPages();
-      goToPage(findPageIndexForTime(t), { instant: true });
+      goToPage(findPageIndexForTime(t), { instant: true, force: true });
     }
 
     function buildChapters(bar) {

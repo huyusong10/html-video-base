@@ -1336,6 +1336,7 @@ async function verifyPptDeckMode(page, port) {
       hintDisplay: getComputedStyle(hint).display,
       leadDisplay: getComputedStyle(lead).display,
       energy: window.V.getSceneEnergy(window.V.scenes[0], 0, 0.5),
+      hasPreset: Boolean(document.querySelector('.test-preset-badge')),
       hasVideoCtrls: Boolean(document.querySelector('[data-act="play"], [data-act="rate"], [data-act="mute"]')),
       prevDisabled: document.querySelector('[data-ppt-act="prev"]').disabled,
       pageNumTxt: document.querySelector('.ppt-page-num').textContent,
@@ -1344,6 +1345,8 @@ async function verifyPptDeckMode(page, port) {
   assert.equal(init.st.pptMode, true, '?ppt=1 must enable pptMode');
   assert.equal(init.st.subsEnabled, false, 'PPT mode must hide subtitles/notes by default');
   assert.equal(init.st.page, 1, 'PPT mode must start on Page 1');
+  assert.ok(init.st.now > 0.3, 'PPT Page 1 must render settled cue timestamp on boot');
+  assert.equal(init.hasPreset, true, 'PPT Page 1 must execute Scene 0 build/update on boot');
   assert.equal(init.hintDisplay, 'none', 'PPT mode must hide #start-hint');
   assert.equal(init.leadDisplay, 'none', 'PPT mode must hide #subs .sub-lead mascot slot');
   assert.equal(init.energy, 0, 'PPT mode must keep speech energy at 0');

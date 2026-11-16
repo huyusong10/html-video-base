@@ -1564,7 +1564,7 @@
   function startInitialRender(uiCfg) {
     if (V.pptMode && pptRt) {
       pptRt.rebuildPages();
-      pptRt.goToPage(pptRt.resolveInitialPageIndex(), { instant: true });
+      pptRt.goToPage(pptRt.resolveInitialPageIndex(), { instant: true, force: true });
       return;
     }
     const initPos = resolveInitialTime(uiCfg);
