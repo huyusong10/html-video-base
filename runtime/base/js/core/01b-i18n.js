@@ -44,13 +44,15 @@
     sandboxActive: '🎮 彩蛋试玩中',
     sandboxBack: '↩ 返回终章',
     pptPrev: '上一页（← / PageUp）',
-    pptNext: '下一页（→ / 空格 / PageDown）',
+    pptNext: '下一页（→ / 空格 / 滚轮）',
     pptNotesShow: '开启提词',
     pptNotesHide: '关闭提词',
     pptPageBadge: '第 {cur}/{total} 页',
     pptChapPage: '第 {p} 页',
     copyPageTip: '点击复制当前页链接 (?ppt=1&page=)',
     copiedPage: '✓ 已复制第 {p} 页',
+    switchToPpt: '切换为 PPT 演示',
+    switchToVideo: '切换为视频播放',
   };
 
   const UI_ZH_TW = {
@@ -97,13 +99,15 @@
     sandboxActive: '🎮 互動試玩中',
     sandboxBack: '↩ 返回終章',
     pptPrev: '上一頁（← / PageUp）',
-    pptNext: '下一頁（→ / 空白鍵 / PageDown）',
+    pptNext: '下一頁（→ / 空白鍵 / 滾輪）',
     pptNotesShow: '開啟提詞',
     pptNotesHide: '關閉提詞',
     pptPageBadge: '第 {cur}/{total} 頁',
     pptChapPage: '第 {p} 頁',
     copyPageTip: '點擊複製目前頁連結 (?ppt=1&page=)',
     copiedPage: '✓ 已複製第 {p} 頁',
+    switchToPpt: '切換為 PPT 簡報',
+    switchToVideo: '切換為影片播放',
   };
 
   const UI_EN = {
@@ -150,13 +154,15 @@
     sandboxActive: '🎮 Interactive Mode',
     sandboxBack: '↩ Back to Finale',
     pptPrev: 'Previous Slide (← / PageUp)',
-    pptNext: 'Next Slide (→ / Space / PageDown)',
+    pptNext: 'Next Slide (→ / Space / Wheel)',
     pptNotesShow: 'Show Notes',
     pptNotesHide: 'Hide Notes',
     pptPageBadge: 'Slide {cur}/{total}',
     pptChapPage: 'P.{p}',
     copyPageTip: 'Click to copy slide link (?ppt=1&page=)',
     copiedPage: '✓ Copied Slide {p}',
+    switchToPpt: 'Switch to Slide Deck',
+    switchToVideo: 'Switch to Video Mode',
   };
 
   const NATIVE_LANG_LABELS = {

@@ -904,3 +904,12 @@ body.ppt-mode [data-presenter] { display: none !important; }
 #controls.ppt-bar :where(button:disabled) {
   opacity: 0.36; cursor: default; pointer-events: none;
 }
+body.ppt-mode #subs {
+  --sub-radius: 20px;
+  --sub-padding: 12px 28px;
+  --sub-max-w: min(1560px, calc(var(--stage-w) - 160px));
+}
+body.ppt-mode #subs .sub-text {
+  font-size: 21px;
+  line-height: 1.48;
+}

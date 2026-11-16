@@ -28,15 +28,31 @@
   let audioRt = null;
   let pptRt = null;
 
+  function navigateModeSwitch(toPpt, sceneIdx) {
+    try {
+      const u = new URL(location.href);
+      ['t', 'page', 'autoplay', '_hmr'].forEach(k => u.searchParams.delete(k));
+      if (toPpt) u.searchParams.set('ppt', '1');
+      else u.searchParams.delete('ppt');
+      if (sceneIdx > 0) u.searchParams.set('scene', String(sceneIdx));
+      else u.searchParams.delete('scene');
+      if (V.__langOverridden && V.getActiveLang) {
+        const lang = V.getActiveLang();
+        if (lang && (!V.isSecondaryLocale || V.isSecondaryLocale(lang))) u.searchParams.set('lang', lang);
+      }
+      location.href = u.toString();
+    } catch {}
+  }
+
   function ensurePptRuntime() {
     if (pptRt || !V._createPptRuntime) return pptRt;
     pptRt = V._createPptRuntime({
       params,
-      getNow: () => now,
-      renderAt: t => render(t, 0),
+      renderAt: t => { ambientOffset = 0; render(t, 0); },
       uiText,
       makeCtrlIcon,
       swapBtnIcon,
+      switchMode: navigateModeSwitch,
       renderCustomControls,
       setOpenMenu,
       toggleOsFull,
@@ -86,6 +102,9 @@
           h('div', { class: 'rate-menu' }))
       : null;
     const webLabel = uiText('webEnter');
+    const pptBtn = cfg.ppt
+      ? h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'to-ppt', title: uiText('switchToPpt'), 'aria-label': uiText('switchToPpt') }, makeCtrlIcon(uiCfg.icons.pptMode))
+      : null;
     const webFullBtn = uiCfg.webFull
       ? h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'webfull', title: webLabel, 'aria-label': webLabel }, makeCtrlIcon(uiCfg.icons.webEnter))
       : null;
@@ -106,6 +125,7 @@
       h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'subs', title: subsLabel, 'aria-label': subsLabel }, makeCtrlIcon(uiCfg.icons.subsOn)),
       h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'mute', title: uiText('soundOnTip', { pct: 100 }), 'aria-label': uiText('soundLabel') }, makeCtrlIcon(uiCfg.icons.volumeOn)),
       h('div', { class: 'sound-menu' }),
+      pptBtn,
       webFullBtn,
       h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'full', title: fullLabel, 'aria-label': fullLabel }, makeCtrlIcon(uiCfg.icons.fullEnter)));
   }
@@ -314,6 +334,7 @@
     if (sc !== current) enter(sc);
     sc.ctx.clock = V._clock;
     sc.ctx.alive = V._clock;
+    sc.ctx.sceneClock = V._clock - sc.start;
     sc.ctx.idle = idle;
     sc.ctx.playing = playing && !scrubbing;
     sc.ctx.ended = ended;
@@ -560,7 +581,7 @@
     lastFrameTs = ts;
     stepPointerSmoothing(rawDt);
     if (V.pptMode && pptRt) {
-      if (!pptRt.tick(ts)) stepAmbientIdle(rawDt);
+      stepAmbientIdle(rawDt);
     } else if (scrubbing) {
       lastTs = ts;
       if (current && current.live) render(now, 0);
@@ -1178,6 +1199,7 @@
     ui.rate = bar.querySelector('[data-act=rate]');
     ui.subs = bar.querySelector('[data-act=subs]');
     ui.mute = bar.querySelector('[data-act=mute]');
+    ui.toPpt = bar.querySelector('[data-act=to-ppt]');
     ui.webfull = bar.querySelector('[data-act=webfull]');
     ui.full = bar.querySelector('[data-act=full]');
 
@@ -1205,6 +1227,7 @@
       }
       setOpenMenu(bar, bar.dataset.menu === 'sound' ? '' : 'sound');
     };
+    if (ui.toPpt) ui.toPpt.onclick = e => { e.stopPropagation(); pause(); navigateModeSwitch(true, Math.max(0, V.scenes.indexOf(current))); };
     if (ui.webfull) ui.webfull.onclick = () => setWebFull(!webFull);
     ui.full.onclick = toggleOsFull;
     if (sandboxState.backEl) {
@@ -1404,6 +1427,11 @@
     const chapHd = bar.querySelector('.chap-menu-hd');
     if (chapHd) chapHd.textContent = uiText('chapHeader');
     if (ui.mute) ui.mute.setAttribute('aria-label', uiText('soundLabel'));
+    if (ui.toPpt) {
+      const pt = uiText('switchToPpt');
+      ui.toPpt.title = pt;
+      ui.toPpt.setAttribute('aria-label', pt);
+    }
   }
 
   function refreshLocalizedChrome(cfg, uiCfg) {
@@ -1524,6 +1552,7 @@
           playing,
           playbackRate,
           subsEnabled: showSubs,
+          sceneIndex: V._currentSceneIdx || 0,
           pptMode: Boolean(V.pptMode),
           ...(pptRt ? pptRt.getState() : {}),
           lang: V.getActiveLang(),

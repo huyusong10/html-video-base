@@ -127,10 +127,10 @@
     fn(cue, info, { subs, lead: subLead, tail: subTail, speaker: subSpeaker, text: subText });
   }
 
-  function pickPptCue(sc, lt) {
-    const cues = sc.cues || [];
-    const hit = cues.findIndex(c => lt >= c.start - 0.04 && lt <= c.end + 0.12);
-    if (hit >= 0) return { cue: cues[hit], activeCueIdx: hit };
+  function pickPptCue(sc) {
+    const note = V._pptRuntime && V._pptRuntime.getCurrentNote ? V._pptRuntime.getCurrentNote() : '';
+    const text = note || (sc.cues || []).filter(c => c && !c.pptSkip && c.text).map(c => c.text.trim()).join(' ');
+    if (text) return { cue: { start: 0, end: sc.duration, text, speaker: null }, activeCueIdx: -1 };
     return { cue: null, activeCueIdx: -1 };
   }
 

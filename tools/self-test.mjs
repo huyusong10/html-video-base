@@ -182,7 +182,7 @@ async function verifyIframeWebFullContract(page, port) {
       ctrlTop: c.top,
     };
   });
-  assert.equal(dodge.rbtnCount, 6, 'Single-layer same-origin iframe must auto-render [data-act="webfull"] (6 right icon buttons)');
+  assert.equal(dodge.rbtnCount, 7, 'Single-layer same-origin iframe must auto-render [data-act="webfull"] (7 right icon buttons)');
   for (const w of dodge.iconWidths) assert.equal(w, dodge.iconWidths[0], 'All right-side icon buttons (including injected SVG buttons) must share uniform width');
   assert.equal(dodge.expanded, true, 'Clicking webfull inside single-layer iframe must expand iframe to viewport');
   assert.ok(dodge.subBottom <= dodge.ctrlTop, `Fullscreen #subs (${dodge.subBottom}) must dodge above #controls (${dodge.ctrlTop})`);
@@ -248,7 +248,7 @@ async function verifyPlayerBarContracts(page, port) {
       const el = document.querySelector(sel);
       return Boolean(el && el.textContent.trim() === '' && el.querySelector('svg.ctrl-ico'));
     };
-    const allIconsAt1x = ['.ctrl-home', '[data-act="play"]', '[data-custom-ctrl="test-btn"]', '[data-act="rate"]', '[data-act="subs"]', '[data-act="mute"]', '[data-act="full"]', '.chap-caret']
+    const allIconsAt1x = ['.ctrl-home', '[data-act="play"]', '[data-custom-ctrl="test-btn"]', '[data-act="rate"]', '[data-act="subs"]', '[data-act="mute"]', '[data-act="to-ppt"]', '[data-act="full"]', '.chap-caret']
       .every(isIconNode);
     const rbtnSizes = Array.from(document.querySelectorAll('#controls .ctrl-rbtn')).map(b => {
       const r = b.getBoundingClientRect();
@@ -287,7 +287,7 @@ async function verifyPlayerBarContracts(page, port) {
   assert.equal(barInfo.trackMarks, 1, 'Expected 1 .track .mark for 2 scenes');
   assert.equal(barInfo.w0, barInfo.w1, 'Progress bar width must stay invariant across chapter changes');
   assert.equal(barInfo.allIconsAt1x, true, 'Home, play, custom control, 1.0x rate, subs, mute, fullscreen & chapter caret must all render SVG icons');
-  assert.equal(barInfo.rbtnSizes.length, 5, 'Expected 5 compact right-side icon buttons on standalone page');
+  assert.equal(barInfo.rbtnSizes.length, 6, 'Expected 6 compact right-side icon buttons on ppt-enabled standalone page');
   for (const b of barInfo.rbtnSizes) {
     assert.equal(b.w, 32, 'Compact right-side icon buttons must be 32px wide');
     assert.equal(b.h, 30, 'Compact right-side icon buttons must be 30px tall');
@@ -1287,35 +1287,59 @@ async function assertHubHasPptLink(page, port) {
 }
 
 async function verifyPptNavigationSteps(page) {
+  await page.mouse.click(320, 160);
+  await page.waitForTimeout(80);
+  assert.equal(await page.evaluate(() => window.__video.page), 1, 'Clicking blank canvas in PPT mode must NOT advance slide');
+
   await page.evaluate(() => {
-    window.V.scenes[1].pptSteps = [0.6, 1.4, 2.2];
+    window.V.scenes[1].pptFrames = [0.6, 1.8];
     window.V._pptRuntime.rebuildPages();
     window.V._pptRuntime.syncUI();
   });
-  await page.mouse.click(320, 160);
-  await page.waitForTimeout(340);
-  const afterClick = await page.evaluate(() => window.__video.getSyncState());
-  assert.equal(afterClick.page, 2, 'Clicking blank viewport in PPT mode must advance to Page 2');
-  assert.equal(afterClick.totalPages, 4, 'Rebuilt custom pptSteps must yield 4 slides');
+  await page.locator('[data-ppt-act="next"]').click();
+  const afterNext = await page.evaluate(() => window.__video.getSyncState());
+  assert.equal(afterNext.page, 2, 'Clicking next button must advance to Page 2');
+  assert.equal(afterNext.totalPages, 3, 'Rebuilt custom pptFrames must yield 3 slides');
 
   await page.keyboard.press('ArrowRight');
-  await page.waitForTimeout(30);
-  await page.keyboard.press('ArrowRight');
-  const afterRapid = await page.evaluate(() => window.__video.getSyncState());
-  assert.equal(afterRapid.page, 4, 'Rapid second ArrowRight while tweening must advance to Page 4 without swallowing keypress');
-  assert.equal(afterRapid.tweening, false, 'Rapid second ArrowRight must 0ms instant-snap without lag');
+  assert.equal(await page.evaluate(() => window.__video.page), 3, 'ArrowRight must advance immediately to Page 3');
 
   await page.mouse.move(320, 160);
   await page.mouse.wheel(0, -120);
   await page.waitForTimeout(50);
-  assert.equal(await page.evaluate(() => window.__video.page), 3, 'Wheel up must step back to Page 3');
+  assert.equal(await page.evaluate(() => window.__video.page), 2, 'Wheel up must step back to Page 2');
 
-  await page.keyboard.press('ArrowLeft');
-  assert.equal(await page.evaluate(() => window.__video.page), 2, 'ArrowLeft must step back to Page 2');
   await page.keyboard.press('Home');
   assert.equal(await page.evaluate(() => window.__video.page), 1, 'Home must jump to Page 1');
   await page.keyboard.press('End');
-  assert.equal(await page.evaluate(() => window.__video.page), 4, 'End must jump to last slide');
+  assert.equal(await page.evaluate(() => window.__video.page), 3, 'End must jump to last slide');
+}
+
+async function verifyPptModeSwitch(page) {
+  await page.evaluate(() => window.__video.goToPage(2));
+  assert.equal(await page.evaluate(() => window.__video.getSyncState().sceneIndex), 1);
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'networkidle' }),
+    page.locator('[data-act="to-video"]').click(),
+  ]);
+  const vidSt = await page.evaluate(() => ({
+    url: location.href,
+    st: window.__video.getSyncState(),
+    hasToPpt: Boolean(document.querySelector('[data-act="to-ppt"]')),
+  }));
+  assert.equal(vidSt.st.pptMode, false, 'to-video must switch into video mode');
+  assert.ok(vidSt.url.includes('scene=1') && !vidSt.url.includes('ppt=1'), `to-video URL must carry ?scene=1 without ppt=1, got ${vidSt.url}`);
+  assert.equal(vidSt.st.sceneIndex, 1, 'to-video must preserve Scene 1');
+  assert.equal(vidSt.hasToPpt, true, 'Video mode bar must expose to-ppt button when cfg.ppt is true');
+
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'networkidle' }),
+    page.locator('[data-act="to-ppt"]').click(),
+  ]);
+  const backSt = await page.evaluate(() => ({ url: location.href, st: window.__video.getSyncState() }));
+  assert.equal(backSt.st.pptMode, true, 'to-ppt must switch back to PPT mode');
+  assert.ok(backSt.url.includes('ppt=1') && backSt.url.includes('scene=1'), `to-ppt URL must carry ?ppt=1&scene=1, got ${backSt.url}`);
+  assert.equal(backSt.st.sceneIndex, 1, 'to-ppt must land on Scene 1');
 }
 
 async function verifyPptDeckMode(page, port) {
@@ -1333,28 +1357,33 @@ async function verifyPptDeckMode(page, port) {
     const lead = document.querySelector('#subs .sub-lead');
     return {
       st,
+      s0Dur: window.V.scenes[0].duration,
       hintDisplay: getComputedStyle(hint).display,
       leadDisplay: getComputedStyle(lead).display,
       energy: window.V.getSceneEnergy(window.V.scenes[0], 0, 0.5),
       hasPreset: Boolean(document.querySelector('.test-preset-badge')),
       hasVideoCtrls: Boolean(document.querySelector('[data-act="play"], [data-act="rate"], [data-act="mute"]')),
+      hasToVideo: Boolean(document.querySelector('[data-act="to-video"]')),
       prevDisabled: document.querySelector('[data-ppt-act="prev"]').disabled,
       pageNumTxt: document.querySelector('.ppt-page-num').textContent,
     };
   });
+  await page.waitForTimeout(80);
+  const afterIdle = await page.evaluate(() => window.__video.getSyncState());
   assert.equal(init.st.pptMode, true, '?ppt=1 must enable pptMode');
   assert.equal(init.st.subsEnabled, false, 'PPT mode must hide subtitles/notes by default');
   assert.equal(init.st.page, 1, 'PPT mode must start on Page 1');
-  assert.ok(init.st.now > 0.3, 'PPT Page 1 must render settled cue timestamp on boot');
+  assert.ok(init.st.now > init.s0Dur - 0.3, 'PPT Page 1 must settle near end of Scene 0');
+  assert.ok(afterIdle.clock > init.st.clock, 'PPT mode ambient clock must advance live while timeline stays settled');
+  assert.equal(afterIdle.now, init.st.now, 'PPT mode timeline must remain frozen on settled page');
   assert.equal(init.hasPreset, true, 'PPT Page 1 must execute Scene 0 build/update on boot');
   assert.equal(init.hintDisplay, 'none', 'PPT mode must hide #start-hint');
   assert.equal(init.leadDisplay, 'none', 'PPT mode must hide #subs .sub-lead mascot slot');
   assert.equal(init.energy, 0, 'PPT mode must keep speech energy at 0');
   assert.equal(init.hasVideoCtrls, false, 'PPT mode must replace video bar with clean PPT bar');
+  assert.equal(init.hasToVideo, true, 'PPT mode bar must expose to-video switcher button');
   assert.equal(init.prevDisabled, true, 'Prev button must be disabled on Page 1');
   assert.equal(init.pageNumTxt, '1 / 2', 'PPT page badge must render "1 / 2"');
-
-  await verifyPptNavigationSteps(page);
 
   await page.locator('[data-act="subs"]').click();
   const notes = await page.evaluate(() => ({
@@ -1362,13 +1391,19 @@ async function verifyPptDeckMode(page, port) {
     subVis: getComputedStyle(document.getElementById('subs')).visibility,
     subOp: getComputedStyle(document.getElementById('subs')).opacity,
     subTxt: document.querySelector('#subs .sub-text > span:last-child')?.textContent,
-    deepLink: window.__video.getDeepLink(),
   }));
   assert.equal(notes.subsOn, true, 'Clicking [data-act="subs"] in PPT mode must open speaker teleprompter');
   assert.equal(notes.subVis, 'visible', 'Speaker teleprompter must render #subs visible');
   assert.equal(notes.subOp, '1', 'Speaker teleprompter must stay at opacity 1 without fade-out');
-  assert.equal(notes.subTxt, '所有画面仅由时间纯函数唯一决定。', 'Speaker teleprompter must show full sentence');
-  assert.ok(notes.deepLink.includes('ppt=1') && notes.deepLink.includes('page=4'), `PPT deep link must encode ?ppt=1&page=4, got ${notes.deepLink}`);
+  assert.ok(notes.subTxt && notes.subTxt.includes('微内核时间轴引擎'), 'Speaker teleprompter must show full Scene 0 script');
+
+  await verifyPptNavigationSteps(page);
+  assert.ok(await page.evaluate(() => {
+    const dl = window.__video.getDeepLink();
+    return dl.includes('ppt=1') && dl.includes('page=3');
+  }), 'PPT deep link must encode ?ppt=1&page=3');
+
+  await verifyPptModeSwitch(page);
 }
 
 async function verifyBrowserCapabilities(videoDir) {
