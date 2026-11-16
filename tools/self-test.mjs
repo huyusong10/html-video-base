@@ -362,20 +362,39 @@ async function verifyHttpAndDomRegressions(page, port) {
     const box = document.createElement('div');
     window.V.u.set(box, { opacity: 0.25, scale: 1.5, rotate: 12 });
     const origVoice = window.V.voice;
+    const origPron = window.V.config.pronunciation;
     const origLines0 = window.V.scenes[0]._origLines.slice();
     window.V.voice = null;
     window.V.scenes[0]._origLines = ['Run voice.py v2.6 at 0.2s carefully.'];
     window.V.layout();
     const dotChunks = window.V.scenes[0].subCues.map(c => c.text);
+
+    window.V.config.pronunciation = { '几万行': '几万航', '调用': '掉用' };
+    window.V.scenes[0]._origLines = ['进入几万行的工程仓库；再扣掉工具调用开销；最后保持稳定输出。'];
+    window.V.voice = {
+      durations: [[9.0], [2.0]],
+      words: [[[[0, '进入'], [0.6, '几万航'], [1.4, '的工程仓库'], [3.2, '再扣掉工具'], [4.2, '掉用'], [5.0, '开销'], [6.4, '最后保持稳定输出']]], [[]]],
+    };
+    window.V.__ignoreBakedLayout = true;
+    window.V.layout();
+    const pronSubs = window.V.scenes[0].subCues.map(c => [Number(c.start.toFixed(2)), Number(c.end.toFixed(2)), c.text]);
+    delete window.V.__ignoreBakedLayout;
+
+    window.V.config.pronunciation = origPron;
     window.V.voice = origVoice;
     window.V.scenes[0]._origLines = origLines0;
     window.V.layout();
-    return { opacity: box.style.opacity, transform: box.style.transform, dotChunks };
+    return { opacity: box.style.opacity, transform: box.style.transform, dotChunks, pronSubs };
   });
   assert.equal(domRes.opacity, '0.25', 'V.u.set must accept opacity alias');
   assert.ok(domRes.transform.includes('scale(1.5)') && domRes.transform.includes('rotate(12deg)'), `V.u.set must accept scale/rotate aliases, got ${domRes.transform}`);
   assert.equal(domRes.dotChunks.length, 1, `chunkSentences must not split dots inside tokens: ${JSON.stringify(domRes.dotChunks)}`);
   assert.ok(domRes.dotChunks[0].includes('voice.py v2.6 at 0.2s'), `chunkSentences lost dotted tokens: ${domRes.dotChunks[0]}`);
+  assert.equal(domRes.pronSubs.length, 3, `Expected 3 clause subCues, got ${JSON.stringify(domRes.pronSubs)}`);
+  assert.ok(domRes.pronSubs[0][1] <= domRes.pronSubs[1][0] + 0.01 && domRes.pronSubs[1][1] <= domRes.pronSubs[2][0] + 0.01,
+    `Pronunciation homophones must not cause overlapping subCues: ${JSON.stringify(domRes.pronSubs)}`);
+  assert.ok(Math.abs(domRes.pronSubs[1][0] - (0.35 + 3.2)) < 0.05 && Math.abs(domRes.pronSubs[2][0] - (0.35 + 6.4)) < 0.05,
+    `Pronunciation-mapped chunks must hit exact word boundary timestamps: ${JSON.stringify(domRes.pronSubs)}`);
 }
 
 async function verifyInteractiveRegressions(page) {
@@ -1272,6 +1291,14 @@ async function verifyBrowserCapabilities(videoDir) {
     assert.equal(hmrRes.status, 200);
     assert.ok((hmrRes.headers.get('content-type') || '').includes('text/event-stream'));
     await hmrRes.body.cancel();
+
+    const bigBinPath = path.join(videoDir, 'assets/big-range.bin');
+    fs.writeFileSync(bigBinPath, Buffer.alloc(5 * 1024 * 1024, 0x41));
+    const openRangeRes = await fetch(`http://127.0.0.1:${port}/demo/assets/big-range.bin`, { headers: { Range: 'bytes=0-' } });
+    assert.equal(openRangeRes.status, 206, 'Open-ended Range bytes=0- must return 206');
+    const openRangeBuf = await openRangeRes.arrayBuffer();
+    assert.equal(openRangeBuf.byteLength, 4 * 1024 * 1024, 'Open-ended Range on >4MB asset must bound chunk to 4MB to avoid hung sockets');
+    fs.rmSync(bigBinPath, { force: true });
 
     const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
     await page.goto(`http://127.0.0.1:${port}/demo/?record=1`, { waitUntil: 'networkidle' });

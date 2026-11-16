@@ -208,26 +208,77 @@
     return chunks.map(cleanChunkTail).filter(Boolean);
   }
 
+  const COMMON_SPOKEN_PAIRS = [
+    [/重编排/g, '崇编排'], [/重算/g, '崇算'], [/重放/g, '崇放'], [/重写/g, '崇写'], [/重构/g, '崇构'],
+    [/执行/g, '直形'], [/运行/g, '运形'], [/并行/g, '并形'], [/例行/g, '例形'], [/先行/g, '先形'],
+    [/进行/g, '进形'], [/自行/g, '自形'], [/推行/g, '推形'], [/实行/g, '实形'], [/放行/g, '放形'],
+    [/命令行/g, '命令航'], [/一行行/g, '一航航'],
+  ];
+
+  function buildSpokenKeyFn() {
+    const cfg = V.getCfg ? V.getCfg() : (V.config || {});
+    const pron = (cfg.tts && cfg.tts.pronunciation) || cfg.pronunciation;
+    const rules = [];
+    if (pron && typeof pron === 'object') {
+      for (const [pat, rep] of Object.entries(pron)) {
+        try { rules.push([new RegExp(pat, 'g'), String(rep)]); } catch {}
+      }
+    }
+    return raw => {
+      let s = String(raw || '');
+      for (const [re, rep] of rules) s = s.replace(re, rep);
+      for (const [re, rep] of COMMON_SPOKEN_PAIRS) s = s.replace(re, rep);
+      return normKey(s);
+    };
+  }
+
+  function interpolateChunkGap(starts, weights, lIdx, rIdx, tLeft, tRight) {
+    let wTotal = 0;
+    for (let k = lIdx; k < rIdx; k++) wTotal += weights[k];
+    const denom = wTotal || (rIdx - lIdx);
+    let acc = 0;
+    for (let k = lIdx; k < rIdx; k++) {
+      if (k > lIdx) starts[k] = tLeft + (tRight - tLeft) * (acc / denom);
+      acc += wTotal ? weights[k] : 1;
+    }
+  }
+
+  function fillMissingChunkStarts(starts, chunks, span) {
+    const weights = chunks.map(c => Math.max(0.5, weight(c)));
+    starts[0] = 0;
+    let lIdx = 0;
+    while (lIdx < chunks.length - 1) {
+      let rIdx = lIdx + 1;
+      while (rIdx < chunks.length && starts[rIdx] == null) rIdx++;
+      const tLeft = starts[lIdx];
+      const tRight = rIdx < chunks.length ? Math.max(tLeft, starts[rIdx]) : Math.max(tLeft, span);
+      if (rIdx > lIdx + 1) interpolateChunkGap(starts, weights, lIdx, rIdx, tLeft, tRight);
+      lIdx = rIdx;
+    }
+  }
+
   function mapWordsToChunks(chunks, words, cueStart, cueEnd) {
+    const toSpokenKey = buildSpokenKeyFn();
     let flat = '';
     const charTime = [];
     for (const [t0, w] of words) {
-      const k = normKey(w);
+      const k = toSpokenKey(w);
       for (let i = 0; i < k.length; i++) charTime.push(t0);
       flat += k;
     }
     let searchFrom = 0;
     const starts = chunks.map((c, idx) => {
       if (idx === 0) return 0;
-      const key = normKey(c);
+      const key = toSpokenKey(c);
       const pos = key ? flat.indexOf(key, searchFrom) : -1;
       if (pos >= 0) { searchFrom = pos + key.length; return charTime[pos]; }
       return null;
     });
+    fillMissingChunkStarts(starts, chunks, Math.max(0.25, cueEnd - cueStart));
     return chunks.map((text, i) => {
-      const s = starts[i] != null ? cueStart + starts[i] : (i === 0 ? cueStart : cueStart + (cueEnd - cueStart) * (i / chunks.length));
-      const e = (i + 1 < chunks.length && starts[i + 1] != null) ? cueStart + starts[i + 1] : cueEnd;
-      return { start: s, end: Math.max(s + 0.25, e), text };
+      const s = cueStart + starts[i];
+      const e = i + 1 < chunks.length ? cueStart + starts[i + 1] : cueEnd;
+      return { start: s, end: Math.max(s + 0.2, e), text };
     });
   }
 

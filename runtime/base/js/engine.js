@@ -1199,26 +1199,77 @@
     return chunks.map(cleanChunkTail).filter(Boolean);
   }
 
+  const COMMON_SPOKEN_PAIRS = [
+    [/重编排/g, '崇编排'], [/重算/g, '崇算'], [/重放/g, '崇放'], [/重写/g, '崇写'], [/重构/g, '崇构'],
+    [/执行/g, '直形'], [/运行/g, '运形'], [/并行/g, '并形'], [/例行/g, '例形'], [/先行/g, '先形'],
+    [/进行/g, '进形'], [/自行/g, '自形'], [/推行/g, '推形'], [/实行/g, '实形'], [/放行/g, '放形'],
+    [/命令行/g, '命令航'], [/一行行/g, '一航航'],
+  ];
+
+  function buildSpokenKeyFn() {
+    const cfg = V.getCfg ? V.getCfg() : (V.config || {});
+    const pron = (cfg.tts && cfg.tts.pronunciation) || cfg.pronunciation;
+    const rules = [];
+    if (pron && typeof pron === 'object') {
+      for (const [pat, rep] of Object.entries(pron)) {
+        try { rules.push([new RegExp(pat, 'g'), String(rep)]); } catch {}
+      }
+    }
+    return raw => {
+      let s = String(raw || '');
+      for (const [re, rep] of rules) s = s.replace(re, rep);
+      for (const [re, rep] of COMMON_SPOKEN_PAIRS) s = s.replace(re, rep);
+      return normKey(s);
+    };
+  }
+
+  function interpolateChunkGap(starts, weights, lIdx, rIdx, tLeft, tRight) {
+    let wTotal = 0;
+    for (let k = lIdx; k < rIdx; k++) wTotal += weights[k];
+    const denom = wTotal || (rIdx - lIdx);
+    let acc = 0;
+    for (let k = lIdx; k < rIdx; k++) {
+      if (k > lIdx) starts[k] = tLeft + (tRight - tLeft) * (acc / denom);
+      acc += wTotal ? weights[k] : 1;
+    }
+  }
+
+  function fillMissingChunkStarts(starts, chunks, span) {
+    const weights = chunks.map(c => Math.max(0.5, weight(c)));
+    starts[0] = 0;
+    let lIdx = 0;
+    while (lIdx < chunks.length - 1) {
+      let rIdx = lIdx + 1;
+      while (rIdx < chunks.length && starts[rIdx] == null) rIdx++;
+      const tLeft = starts[lIdx];
+      const tRight = rIdx < chunks.length ? Math.max(tLeft, starts[rIdx]) : Math.max(tLeft, span);
+      if (rIdx > lIdx + 1) interpolateChunkGap(starts, weights, lIdx, rIdx, tLeft, tRight);
+      lIdx = rIdx;
+    }
+  }
+
   function mapWordsToChunks(chunks, words, cueStart, cueEnd) {
+    const toSpokenKey = buildSpokenKeyFn();
     let flat = '';
     const charTime = [];
     for (const [t0, w] of words) {
-      const k = normKey(w);
+      const k = toSpokenKey(w);
       for (let i = 0; i < k.length; i++) charTime.push(t0);
       flat += k;
     }
     let searchFrom = 0;
     const starts = chunks.map((c, idx) => {
       if (idx === 0) return 0;
-      const key = normKey(c);
+      const key = toSpokenKey(c);
       const pos = key ? flat.indexOf(key, searchFrom) : -1;
       if (pos >= 0) { searchFrom = pos + key.length; return charTime[pos]; }
       return null;
     });
+    fillMissingChunkStarts(starts, chunks, Math.max(0.25, cueEnd - cueStart));
     return chunks.map((text, i) => {
-      const s = starts[i] != null ? cueStart + starts[i] : (i === 0 ? cueStart : cueStart + (cueEnd - cueStart) * (i / chunks.length));
-      const e = (i + 1 < chunks.length && starts[i + 1] != null) ? cueStart + starts[i + 1] : cueEnd;
-      return { start: s, end: Math.max(s + 0.25, e), text };
+      const s = cueStart + starts[i];
+      const e = i + 1 < chunks.length ? cueStart + starts[i + 1] : cueEnd;
+      return { start: s, end: Math.max(s + 0.2, e), text };
     });
   }
 
@@ -2450,7 +2501,8 @@
     let volume = 1, restoreVolume = 1, bgmBaseVolume = 1;
     let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm'), muted = false;
     let audioBlocked = false, unlockArmed = false, lastUnlockTs = 0;
-    let playPending = false, bgmPlayPending = false, targetSeekTime = null;
+    let playPending = false, playPendingTs = 0, bgmPlayPending = false, targetSeekTime = null;
+    let lastAudioSample = -1, lastAudioMoveTs = 0, lastRecoverTs = 0, lastBgmSeekTs = 0;
 
     function isAllMuted() {
       if (muted || volume <= 0.001) return true;
@@ -2517,13 +2569,17 @@
     }
 
     function safePlayAudio() {
-      if (!audio || !hooks.isPlaying() || !audio.paused || playPending) return;
+      if (!audio || !hooks.isPlaying() || !audio.paused) return;
+      const nowTs = performance.now();
+      if (playPending && nowTs - playPendingTs < 1500) return;
       playPending = true;
+      playPendingTs = nowTs;
       audio.playbackRate = playbackRate;
       const p = audio.play();
       if (p && typeof p.then === 'function') {
         p.then(() => {
           playPending = false;
+          lastAudioMoveTs = performance.now();
           if (audioBlocked) { audioBlocked = false; hooks.onSoundUI(); }
         }).catch(err => {
           playPending = false;
@@ -2582,7 +2638,9 @@
         return;
       }
       if (bgmAudio.paused) { safePlayBgm(); return; }
-      if (bgmAudio.readyState >= 2 && computeBgmDrift(bgmAudio.currentTime, target.time, target.dur, bgmLoop) > 0.22) {
+      const nowTs = performance.now();
+      if (bgmAudio.readyState >= 2 && nowTs - lastBgmSeekTs > 1200 && computeBgmDrift(bgmAudio.currentTime, target.time, target.dur, bgmLoop) > 0.32) {
+        lastBgmSeekTs = nowTs;
         try { bgmAudio.currentTime = target.time; } catch {}
       }
     }
@@ -2691,6 +2749,7 @@
     function seekTracks(nowVal) {
       alignBgmToTime(nowVal, 0.02);
       if (!audio) return;
+      lastAudioMoveTs = performance.now();
       if (audio.readyState >= 1) {
         try { audio.currentTime = nowVal; targetSeekTime = null; } catch { targetSeekTime = nowVal; }
       } else {
@@ -2708,12 +2767,54 @@
       return Boolean(audio && !audioBlocked);
     }
 
+    function tryApplyPendingSeek() {
+      if (targetSeekTime == null || !audio || audio.readyState < 1 || audio.seeking) return;
+      const t = targetSeekTime;
+      try {
+        audio.currentTime = t;
+        targetSeekTime = null;
+        lastAudioMoveTs = performance.now();
+        hooks.markSeekApplied(t);
+      } catch {}
+    }
+
+    function recoverStalledAudio(nowTs) {
+      if (!audio || audioBlocked || nowTs - lastRecoverTs < 2200) return;
+      lastRecoverTs = nowTs;
+      const refT = hooks.getNow();
+      playPending = false;
+      if (audio.readyState === 0 || audio.error) {
+        targetSeekTime = refT;
+        try { audio.load(); } catch {}
+        return;
+      }
+      try { audio.currentTime = refT; } catch {}
+      safePlayAudio();
+    }
+
+    function observeMasterProgress(nowTs) {
+      const cur = audio.currentTime;
+      if (Math.abs(cur - lastAudioSample) > 0.0005) {
+        lastAudioSample = cur;
+        lastAudioMoveTs = nowTs;
+        return cur;
+      }
+      if (lastAudioMoveTs <= 0) lastAudioMoveTs = nowTs;
+      if (nowTs - lastAudioMoveTs < 700) return cur;
+      recoverStalledAudio(nowTs);
+      return null;
+    }
+
     function tickMasterClock() {
+      const nowTs = performance.now();
+      tryApplyPendingSeek();
       if (targetSeekTime == null && !audio.paused && !audio.seeking && audio.readyState >= 2) {
-        keepBgmInSync(audio.currentTime);
-        return audio.currentTime;
+        const cur = observeMasterProgress(nowTs);
+        if (cur != null) keepBgmInSync(cur);
+        return cur;
       }
       if (audio.paused && audio.readyState >= 1 && !audio.seeking) safePlayAudio();
+      else if (!audio.seeking && nowTs - lastAudioMoveTs > 1400) recoverStalledAudio(nowTs);
       return null;
     }
 
@@ -2727,29 +2828,64 @@
       });
     }
 
+    function handleMasterAudioError(el) {
+      if (audio !== el) return;
+      if (!el._errRetried && hooks.isPlaying()) {
+        el._errRetried = true;
+        targetSeekTime = hooks.getNow();
+        playPending = false;
+        try { el.load(); } catch {}
+        return;
+      }
+      audio = null;
+      if (!isRecord) hooks.onSoundUI();
+    }
+
     function createMasterAudio(src) {
       bindVisibilitySyncOnce();
       const el = new Audio();
       el.preload = 'auto';
       el.addEventListener('loadedmetadata', () => {
         if (audio !== el) return;
+        el._errRetried = false;
         el.playbackRate = playbackRate;
         const nowVal = hooks.getNow();
         const target = targetSeekTime != null ? targetSeekTime : (nowVal > 0.05 ? nowVal : null);
         if (target != null) {
           try { el.currentTime = target; targetSeekTime = null; hooks.markSeekApplied(target); } catch {}
         }
+        lastAudioMoveTs = performance.now();
         if (hooks.isPlaying() && el.paused) safePlayAudio();
       });
-      el.addEventListener('seeked', () => { if (audio === el && hooks.isPlaying() && el.paused) safePlayAudio(); });
-      el.addEventListener('canplay', () => { if (audio === el && hooks.isPlaying() && el.paused && !el.seeking) safePlayAudio(); });
-      el.addEventListener('ended', () => { if (audio === el && hooks.isPlaying() && targetSeekTime == null) hooks.onEnded(); });
-      el.addEventListener('error', () => {
-        if (audio === el) { audio = null; if (!isRecord) hooks.onSoundUI(); }
+      el.addEventListener('seeked', () => {
+        if (audio !== el) return;
+        lastAudioMoveTs = performance.now();
+        if (hooks.isPlaying() && el.paused) safePlayAudio();
       });
+      el.addEventListener('canplay', () => {
+        if (audio !== el) return;
+        tryApplyPendingSeek();
+        if (hooks.isPlaying() && el.paused && !el.seeking) safePlayAudio();
+      });
+      el.addEventListener('stalled', () => { if (audio === el && hooks.isPlaying()) recoverStalledAudio(performance.now()); });
+      el.addEventListener('ended', () => { if (audio === el && hooks.isPlaying() && targetSeekTime == null) hooks.onEnded(); });
+      el.addEventListener('error', () => handleMasterAudioError(el));
       el.src = src;
       el.load();
       return el;
+    }
+
+    function handleBgmAudioError(el) {
+      if (bgmAudio !== el) return;
+      if (!el._errRetried && hooks.isPlaying()) {
+        el._errRetried = true;
+        bgmPlayPending = false;
+        try { el.load(); } catch {}
+        return;
+      }
+      bgmAudio = null;
+      hooks.onBgmUnavailable();
+      hooks.onSoundUI();
     }
 
     function createBgmAudio(spec) {
@@ -2760,18 +2896,14 @@
       el.muted = isAllMuted() || !bgmOn;
       el.addEventListener('loadedmetadata', () => {
         if (bgmAudio !== el) return;
+        el._errRetried = false;
         el.playbackRate = playbackRate;
         el.loop = bgmLoop;
         const target = resolveBgmTarget(el, resolveRefTime(), bgmLoop);
         if (target.time > 0.05) { try { el.currentTime = target.time; } catch {} }
         if (hooks.isPlaying() && !el.muted && el.paused && !target.ended) safePlayBgm();
       });
-      el.addEventListener('error', () => {
-        if (bgmAudio !== el) return;
-        bgmAudio = null;
-        hooks.onBgmUnavailable();
-        hooks.onSoundUI();
-      });
+      el.addEventListener('error', () => handleBgmAudioError(el));
       el.src = spec.src;
       el.load();
       return el;
@@ -2994,7 +3126,7 @@
   V._isRecord = RECORD;
 
   let stage = null, current = null, now = 0, prevRenderNow = 0, playing = false;
-  let lastTs = 0, lastFrameTs = 0, ambientOffset = 0, idleSec = 0, ended = false, scrubbing = false;
+  let lastTs = 0, lastFrameTs = 0, ambientOffset = 0, idleSec = 0, audioStallSec = 0, ended = false, scrubbing = false;
   let showSubs = !params.has('nosubs'), playbackRate = 1, loopScene = false;
   let lastSeekTarget = -1, lastSeekAt = 0, activeCueIdx = -1;
   let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0;
@@ -3465,14 +3597,26 @@
   }
 
   function advanceAudioClock(ts, rawDt) {
-    lastTs = ts;
     const mTime = audioRt.tickMasterClock();
     if (mTime != null) {
+      lastTs = ts;
+      if (audioStallSec > 0.35 && Math.abs(mTime - now) > 0.35) {
+        audioStallSec = 0;
+        audioRt.seekTracks(now);
+        return;
+      }
+      audioStallSec = 0;
       if (checkSceneLoop(mTime)) return;
       if (mTime >= V.duration - 0.01) finishPlayback();
       else render(mTime, 0);
       return;
     }
+    audioStallSec += rawDt;
+    if (audioStallSec > 0.35) {
+      advanceWallClock(ts);
+      return;
+    }
+    lastTs = ts;
     if (shouldTickAmbientPause(current)) {
       ambientOffset += rawDt;
       render(now, 0);
@@ -3553,6 +3697,7 @@
     V._checkpointsRuntime.closeCheckpointOverlay();
     setOpenMenu(document.getElementById('controls'), '');
     playing = true;
+    audioStallSec = 0;
     lastTs = performance.now();
     if (audioRt) audioRt.startPlayback();
     document.body.classList.add('playing');

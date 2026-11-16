@@ -76,6 +76,8 @@ function resolveVirtualFile(pathname, videosDir) {
   return null;
 }
 
+const MAX_OPEN_RANGE = 4 * 1024 * 1024;
+
 function parseByteRange(rangeHeader, size) {
   const m = /^bytes=(\d*)-(\d*)$/i.exec(String(rangeHeader || '').trim());
   if (!m) return null;
@@ -86,7 +88,8 @@ function parseByteRange(rangeHeader, size) {
     return { start: Math.max(0, size - suf), end: size - 1 };
   }
   const start = parseInt(m[1], 10);
-  const end = Math.min(m[2] ? parseInt(m[2], 10) : size - 1, size - 1);
+  const rawEnd = m[2] ? parseInt(m[2], 10) : start + MAX_OPEN_RANGE - 1;
+  const end = Math.min(rawEnd, size - 1);
   if (start >= size || start > end) return { unsat: true };
   return { start, end };
 }
@@ -149,7 +152,9 @@ export function createVideoHttpServer({ videosDir = VIDEOS_DIR, watch = false } 
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       res.write(':\n\n');
       hmrClients.add(res);
-      req.on('close', () => hmrClients.delete(res));
+      const hb = setInterval(() => { try { res.write(':\n\n'); } catch { hmrClients.delete(res); } }, 20000);
+      if (hb.unref) hb.unref();
+      req.on('close', () => { clearInterval(hb); hmrClients.delete(res); });
       return;
     }
 

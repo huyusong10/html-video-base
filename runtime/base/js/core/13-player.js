@@ -14,7 +14,7 @@
   V._isRecord = RECORD;
 
   let stage = null, current = null, now = 0, prevRenderNow = 0, playing = false;
-  let lastTs = 0, lastFrameTs = 0, ambientOffset = 0, idleSec = 0, ended = false, scrubbing = false;
+  let lastTs = 0, lastFrameTs = 0, ambientOffset = 0, idleSec = 0, audioStallSec = 0, ended = false, scrubbing = false;
   let showSubs = !params.has('nosubs'), playbackRate = 1, loopScene = false;
   let lastSeekTarget = -1, lastSeekAt = 0, activeCueIdx = -1;
   let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0;
@@ -485,14 +485,26 @@
   }
 
   function advanceAudioClock(ts, rawDt) {
-    lastTs = ts;
     const mTime = audioRt.tickMasterClock();
     if (mTime != null) {
+      lastTs = ts;
+      if (audioStallSec > 0.35 && Math.abs(mTime - now) > 0.35) {
+        audioStallSec = 0;
+        audioRt.seekTracks(now);
+        return;
+      }
+      audioStallSec = 0;
       if (checkSceneLoop(mTime)) return;
       if (mTime >= V.duration - 0.01) finishPlayback();
       else render(mTime, 0);
       return;
     }
+    audioStallSec += rawDt;
+    if (audioStallSec > 0.35) {
+      advanceWallClock(ts);
+      return;
+    }
+    lastTs = ts;
     if (shouldTickAmbientPause(current)) {
       ambientOffset += rawDt;
       render(now, 0);
@@ -573,6 +585,7 @@
     V._checkpointsRuntime.closeCheckpointOverlay();
     setOpenMenu(document.getElementById('controls'), '');
     playing = true;
+    audioStallSec = 0;
     lastTs = performance.now();
     if (audioRt) audioRt.startPlayback();
     document.body.classList.add('playing');

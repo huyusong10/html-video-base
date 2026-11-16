@@ -96,7 +96,8 @@
     let volume = 1, restoreVolume = 1, bgmBaseVolume = 1;
     let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm'), muted = false;
     let audioBlocked = false, unlockArmed = false, lastUnlockTs = 0;
-    let playPending = false, bgmPlayPending = false, targetSeekTime = null;
+    let playPending = false, playPendingTs = 0, bgmPlayPending = false, targetSeekTime = null;
+    let lastAudioSample = -1, lastAudioMoveTs = 0, lastRecoverTs = 0, lastBgmSeekTs = 0;
 
     function isAllMuted() {
       if (muted || volume <= 0.001) return true;
@@ -163,13 +164,17 @@
     }
 
     function safePlayAudio() {
-      if (!audio || !hooks.isPlaying() || !audio.paused || playPending) return;
+      if (!audio || !hooks.isPlaying() || !audio.paused) return;
+      const nowTs = performance.now();
+      if (playPending && nowTs - playPendingTs < 1500) return;
       playPending = true;
+      playPendingTs = nowTs;
       audio.playbackRate = playbackRate;
       const p = audio.play();
       if (p && typeof p.then === 'function') {
         p.then(() => {
           playPending = false;
+          lastAudioMoveTs = performance.now();
           if (audioBlocked) { audioBlocked = false; hooks.onSoundUI(); }
         }).catch(err => {
           playPending = false;
@@ -228,7 +233,9 @@
         return;
       }
       if (bgmAudio.paused) { safePlayBgm(); return; }
-      if (bgmAudio.readyState >= 2 && computeBgmDrift(bgmAudio.currentTime, target.time, target.dur, bgmLoop) > 0.22) {
+      const nowTs = performance.now();
+      if (bgmAudio.readyState >= 2 && nowTs - lastBgmSeekTs > 1200 && computeBgmDrift(bgmAudio.currentTime, target.time, target.dur, bgmLoop) > 0.32) {
+        lastBgmSeekTs = nowTs;
         try { bgmAudio.currentTime = target.time; } catch {}
       }
     }
@@ -337,6 +344,7 @@
     function seekTracks(nowVal) {
       alignBgmToTime(nowVal, 0.02);
       if (!audio) return;
+      lastAudioMoveTs = performance.now();
       if (audio.readyState >= 1) {
         try { audio.currentTime = nowVal; targetSeekTime = null; } catch { targetSeekTime = nowVal; }
       } else {
@@ -354,12 +362,54 @@
       return Boolean(audio && !audioBlocked);
     }
 
+    function tryApplyPendingSeek() {
+      if (targetSeekTime == null || !audio || audio.readyState < 1 || audio.seeking) return;
+      const t = targetSeekTime;
+      try {
+        audio.currentTime = t;
+        targetSeekTime = null;
+        lastAudioMoveTs = performance.now();
+        hooks.markSeekApplied(t);
+      } catch {}
+    }
+
+    function recoverStalledAudio(nowTs) {
+      if (!audio || audioBlocked || nowTs - lastRecoverTs < 2200) return;
+      lastRecoverTs = nowTs;
+      const refT = hooks.getNow();
+      playPending = false;
+      if (audio.readyState === 0 || audio.error) {
+        targetSeekTime = refT;
+        try { audio.load(); } catch {}
+        return;
+      }
+      try { audio.currentTime = refT; } catch {}
+      safePlayAudio();
+    }
+
+    function observeMasterProgress(nowTs) {
+      const cur = audio.currentTime;
+      if (Math.abs(cur - lastAudioSample) > 0.0005) {
+        lastAudioSample = cur;
+        lastAudioMoveTs = nowTs;
+        return cur;
+      }
+      if (lastAudioMoveTs <= 0) lastAudioMoveTs = nowTs;
+      if (nowTs - lastAudioMoveTs < 700) return cur;
+      recoverStalledAudio(nowTs);
+      return null;
+    }
+
     function tickMasterClock() {
+      const nowTs = performance.now();
+      tryApplyPendingSeek();
       if (targetSeekTime == null && !audio.paused && !audio.seeking && audio.readyState >= 2) {
-        keepBgmInSync(audio.currentTime);
-        return audio.currentTime;
+        const cur = observeMasterProgress(nowTs);
+        if (cur != null) keepBgmInSync(cur);
+        return cur;
       }
       if (audio.paused && audio.readyState >= 1 && !audio.seeking) safePlayAudio();
+      else if (!audio.seeking && nowTs - lastAudioMoveTs > 1400) recoverStalledAudio(nowTs);
       return null;
     }
 
@@ -373,29 +423,64 @@
       });
     }
 
+    function handleMasterAudioError(el) {
+      if (audio !== el) return;
+      if (!el._errRetried && hooks.isPlaying()) {
+        el._errRetried = true;
+        targetSeekTime = hooks.getNow();
+        playPending = false;
+        try { el.load(); } catch {}
+        return;
+      }
+      audio = null;
+      if (!isRecord) hooks.onSoundUI();
+    }
+
     function createMasterAudio(src) {
       bindVisibilitySyncOnce();
       const el = new Audio();
       el.preload = 'auto';
       el.addEventListener('loadedmetadata', () => {
         if (audio !== el) return;
+        el._errRetried = false;
         el.playbackRate = playbackRate;
         const nowVal = hooks.getNow();
         const target = targetSeekTime != null ? targetSeekTime : (nowVal > 0.05 ? nowVal : null);
         if (target != null) {
           try { el.currentTime = target; targetSeekTime = null; hooks.markSeekApplied(target); } catch {}
         }
+        lastAudioMoveTs = performance.now();
         if (hooks.isPlaying() && el.paused) safePlayAudio();
       });
-      el.addEventListener('seeked', () => { if (audio === el && hooks.isPlaying() && el.paused) safePlayAudio(); });
-      el.addEventListener('canplay', () => { if (audio === el && hooks.isPlaying() && el.paused && !el.seeking) safePlayAudio(); });
-      el.addEventListener('ended', () => { if (audio === el && hooks.isPlaying() && targetSeekTime == null) hooks.onEnded(); });
-      el.addEventListener('error', () => {
-        if (audio === el) { audio = null; if (!isRecord) hooks.onSoundUI(); }
+      el.addEventListener('seeked', () => {
+        if (audio !== el) return;
+        lastAudioMoveTs = performance.now();
+        if (hooks.isPlaying() && el.paused) safePlayAudio();
       });
+      el.addEventListener('canplay', () => {
+        if (audio !== el) return;
+        tryApplyPendingSeek();
+        if (hooks.isPlaying() && el.paused && !el.seeking) safePlayAudio();
+      });
+      el.addEventListener('stalled', () => { if (audio === el && hooks.isPlaying()) recoverStalledAudio(performance.now()); });
+      el.addEventListener('ended', () => { if (audio === el && hooks.isPlaying() && targetSeekTime == null) hooks.onEnded(); });
+      el.addEventListener('error', () => handleMasterAudioError(el));
       el.src = src;
       el.load();
       return el;
+    }
+
+    function handleBgmAudioError(el) {
+      if (bgmAudio !== el) return;
+      if (!el._errRetried && hooks.isPlaying()) {
+        el._errRetried = true;
+        bgmPlayPending = false;
+        try { el.load(); } catch {}
+        return;
+      }
+      bgmAudio = null;
+      hooks.onBgmUnavailable();
+      hooks.onSoundUI();
     }
 
     function createBgmAudio(spec) {
@@ -406,18 +491,14 @@
       el.muted = isAllMuted() || !bgmOn;
       el.addEventListener('loadedmetadata', () => {
         if (bgmAudio !== el) return;
+        el._errRetried = false;
         el.playbackRate = playbackRate;
         el.loop = bgmLoop;
         const target = resolveBgmTarget(el, resolveRefTime(), bgmLoop);
         if (target.time > 0.05) { try { el.currentTime = target.time; } catch {} }
         if (hooks.isPlaying() && !el.muted && el.paused && !target.ended) safePlayBgm();
       });
-      el.addEventListener('error', () => {
-        if (bgmAudio !== el) return;
-        bgmAudio = null;
-        hooks.onBgmUnavailable();
-        hooks.onSoundUI();
-      });
+      el.addEventListener('error', () => handleBgmAudioError(el));
       el.src = spec.src;
       el.load();
       return el;
