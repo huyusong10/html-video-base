@@ -1278,6 +1278,28 @@ async function verifySingleLangOptOutSafety(browser, port) {
   await ctx.close();
 }
 
+async function verifyPptOptInDefaultOff(browser, port) {
+  const ctx = await browser.newContext({ viewport: { width: 640, height: 360 } });
+  const p = await ctx.newPage();
+  await p.route('**/demo/video.config.js', async route => {
+    const resp = await route.fetch();
+    const txt = (await resp.text()).replace(/ppt:\s*true,?\s*/g, '');
+    await route.fulfill({ response: resp, body: txt });
+  });
+  await p.goto(`http://127.0.0.1:${port}/demo/?ppt=1`, { waitUntil: 'networkidle' });
+  const st = await p.evaluate(() => ({
+    pptMode: Boolean(window.__video && window.__video.pptMode),
+    bodyPpt: document.body.classList.contains('ppt-mode'),
+    toPptBtn: Boolean(document.querySelector('[data-act="to-ppt"]')),
+    pptBar: Boolean(document.querySelector('[data-ppt-act]')),
+  }));
+  assert.equal(st.pptMode, false, 'Video without ppt:true must ignore ?ppt=1 and stay in video mode');
+  assert.equal(st.bodyPpt, false, 'Video without ppt:true must not get body.ppt-mode');
+  assert.equal(st.toPptBtn, false, 'Video without ppt:true must not render [data-act="to-ppt"]');
+  assert.equal(st.pptBar, false, 'Video without ppt:true must not render PPT control bar');
+  await ctx.close();
+}
+
 async function assertHubHasPptLink(page, port) {
   const mText = await (await fetch(`http://127.0.0.1:${port}/manifest.js`)).text();
   assert.ok(mText.includes('"ppt": true'), 'manifest.js must export ppt: true for ppt-enabled videos');
@@ -1472,6 +1494,7 @@ async function verifyBrowserCapabilities(videoDir) {
     await verifySfxAndMultiScriptContracts(page, port);
     await verifyRuntimeSetLangHotSwitch(page, port);
     await verifySingleLangOptOutSafety(browser, port);
+    await verifyPptOptInDefaultOff(browser, port);
     await verifyAutoplayBlockedUnlock(browser, port);
     await page.close();
   } finally {

@@ -3716,7 +3716,7 @@
 
   V.mountStage = function () {
     const cfg = V.getCfg();
-    if (cfg.ppt === false) V.pptMode = false;
+    if (!cfg.ppt) V.pptMode = false;
     const uiCfg = getUiCfg(cfg);
     const W = cfg.width || 1920, H = cfg.height || 1080;
     V.stageWidth = W;
