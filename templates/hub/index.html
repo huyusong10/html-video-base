@@ -134,8 +134,9 @@
           </div>
           <div class="row-tags">
             <span class="tag">${Number(it.width) || 1920}×${Number(it.height) || 1080}</span>
-            <span class="tag">${Number(it.scenes) || 0} 幕 · ${fmt(it.duration)}</span>
+            <span class="tag">${Number(it.scenes) || 0} 幕 ${fmt(it.duration)}</span>
             <a class="btn" href="${idHref}/?dev=1">调试</a>
+            ${it.ppt ? `<a class="btn" href="${idHref}/?ppt=1">PPT 演示</a>` : ''}
             <a class="btn primary" href="${idHref}/">▶ 播放</a>
           </div>`;
         list.appendChild(row);

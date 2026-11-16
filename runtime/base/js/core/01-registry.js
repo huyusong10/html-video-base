@@ -21,6 +21,15 @@
     if (!V[k]) V[k] = make();
   }
 
+  function detectInitialPptMode() {
+    if (typeof location === 'undefined' || !location.search) return false;
+    const sp = new URLSearchParams(location.search);
+    if (sp.has('record') || sp.has('capture')) return false;
+    const raw = (sp.get('ppt') || '').toLowerCase();
+    return raw === '1' || raw === 'true' || (sp.get('mode') || '').toLowerCase() === 'ppt';
+  }
+  if (V.pptMode === undefined) V.pptMode = detectInitialPptMode();
+
   function upsertById(list, item) {
     const key = item.id || item.name;
     if (!key) { list.push(item); return item; }

@@ -43,6 +43,14 @@
     sandboxPrefix: '🎮 彩蛋试玩：',
     sandboxActive: '🎮 彩蛋试玩中',
     sandboxBack: '↩ 返回终章',
+    pptPrev: '上一页（← / PageUp）',
+    pptNext: '下一页（→ / 空格 / PageDown）',
+    pptNotesShow: '开启提词',
+    pptNotesHide: '关闭提词',
+    pptPageBadge: '第 {cur}/{total} 页',
+    pptChapPage: '第 {p} 页',
+    copyPageTip: '点击复制当前页链接 (?ppt=1&page=)',
+    copiedPage: '✓ 已复制第 {p} 页',
   };
 
   const UI_ZH_TW = {
@@ -88,6 +96,14 @@
     sandboxPrefix: '🎮 互動試玩：',
     sandboxActive: '🎮 互動試玩中',
     sandboxBack: '↩ 返回終章',
+    pptPrev: '上一頁（← / PageUp）',
+    pptNext: '下一頁（→ / 空白鍵 / PageDown）',
+    pptNotesShow: '開啟提詞',
+    pptNotesHide: '關閉提詞',
+    pptPageBadge: '第 {cur}/{total} 頁',
+    pptChapPage: '第 {p} 頁',
+    copyPageTip: '點擊複製目前頁連結 (?ppt=1&page=)',
+    copiedPage: '✓ 已複製第 {p} 頁',
   };
 
   const UI_EN = {
@@ -133,6 +149,14 @@
     sandboxPrefix: '🎮 Interactive: ',
     sandboxActive: '🎮 Interactive Mode',
     sandboxBack: '↩ Back to Finale',
+    pptPrev: 'Previous Slide (← / PageUp)',
+    pptNext: 'Next Slide (→ / Space / PageDown)',
+    pptNotesShow: 'Show Notes',
+    pptNotesHide: 'Hide Notes',
+    pptPageBadge: 'Slide {cur}/{total}',
+    pptChapPage: 'P.{p}',
+    copyPageTip: 'Click to copy slide link (?ppt=1&page=)',
+    copiedPage: '✓ Copied Slide {p}',
   };
 
   const NATIVE_LANG_LABELS = {

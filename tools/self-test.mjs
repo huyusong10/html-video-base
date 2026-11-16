@@ -107,6 +107,7 @@ function writeTestProjectFiles(videoDir) {
     '});',
     'V.config = {',
     '  title: "微内核自检演示",',
+    '  ppt: true,',
     '  lang: "zh-CN",',
     '  locales: ["zh-CN", "en", "zh-TW"],',
     '  width: 640, height: 360, fps: 10,',
@@ -1277,6 +1278,96 @@ async function verifySingleLangOptOutSafety(browser, port) {
   await ctx.close();
 }
 
+async function assertHubHasPptLink(page, port) {
+  const mText = await (await fetch(`http://127.0.0.1:${port}/manifest.js`)).text();
+  assert.ok(mText.includes('"ppt": true'), 'manifest.js must export ppt: true for ppt-enabled videos');
+  await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'networkidle' });
+  const hasHubPpt = await page.evaluate(() => Boolean(document.querySelector('a[href="demo/?ppt=1"]')));
+  assert.equal(hasHubPpt, true, 'Hub page must render PPT 演示 link when manifest entry has ppt: true');
+}
+
+async function verifyPptNavigationSteps(page) {
+  await page.evaluate(() => {
+    window.V.scenes[1].pptSteps = [0.6, 1.4, 2.2];
+    window.V._pptRuntime.rebuildPages();
+    window.V._pptRuntime.syncUI();
+  });
+  await page.mouse.click(320, 160);
+  await page.waitForTimeout(340);
+  const afterClick = await page.evaluate(() => window.__video.getSyncState());
+  assert.equal(afterClick.page, 2, 'Clicking blank viewport in PPT mode must advance to Page 2');
+  assert.equal(afterClick.totalPages, 4, 'Rebuilt custom pptSteps must yield 4 slides');
+
+  await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(30);
+  await page.keyboard.press('ArrowRight');
+  const afterRapid = await page.evaluate(() => window.__video.getSyncState());
+  assert.equal(afterRapid.page, 4, 'Rapid second ArrowRight while tweening must advance to Page 4 without swallowing keypress');
+  assert.equal(afterRapid.tweening, false, 'Rapid second ArrowRight must 0ms instant-snap without lag');
+
+  await page.mouse.move(320, 160);
+  await page.mouse.wheel(0, -120);
+  await page.waitForTimeout(50);
+  assert.equal(await page.evaluate(() => window.__video.page), 3, 'Wheel up must step back to Page 3');
+
+  await page.keyboard.press('ArrowLeft');
+  assert.equal(await page.evaluate(() => window.__video.page), 2, 'ArrowLeft must step back to Page 2');
+  await page.keyboard.press('Home');
+  assert.equal(await page.evaluate(() => window.__video.page), 1, 'Home must jump to Page 1');
+  await page.keyboard.press('End');
+  assert.equal(await page.evaluate(() => window.__video.page), 4, 'End must jump to last slide');
+}
+
+async function verifyPptDeckMode(page, port) {
+  await assertHubHasPptLink(page, port);
+  const mediaReqs = [];
+  const onReq = req => { if (/\.m4a(\?|$)/i.test(req.url())) mediaReqs.push(req.url()); };
+  page.on('request', onReq);
+  await page.goto(`http://127.0.0.1:${port}/demo/?ppt=1`, { waitUntil: 'networkidle' });
+  page.off('request', onReq);
+  assert.equal(mediaReqs.length, 0, 'PPT mode must not fetch soundtrack.m4a or bgm.m4a');
+
+  const init = await page.evaluate(() => {
+    const st = window.__video.getSyncState();
+    const hint = document.getElementById('start-hint');
+    const lead = document.querySelector('#subs .sub-lead');
+    return {
+      st,
+      hintDisplay: getComputedStyle(hint).display,
+      leadDisplay: getComputedStyle(lead).display,
+      energy: window.V.getSceneEnergy(window.V.scenes[0], 0, 0.5),
+      hasVideoCtrls: Boolean(document.querySelector('[data-act="play"], [data-act="rate"], [data-act="mute"]')),
+      prevDisabled: document.querySelector('[data-ppt-act="prev"]').disabled,
+      pageNumTxt: document.querySelector('.ppt-page-num').textContent,
+    };
+  });
+  assert.equal(init.st.pptMode, true, '?ppt=1 must enable pptMode');
+  assert.equal(init.st.subsEnabled, false, 'PPT mode must hide subtitles/notes by default');
+  assert.equal(init.st.page, 1, 'PPT mode must start on Page 1');
+  assert.equal(init.hintDisplay, 'none', 'PPT mode must hide #start-hint');
+  assert.equal(init.leadDisplay, 'none', 'PPT mode must hide #subs .sub-lead mascot slot');
+  assert.equal(init.energy, 0, 'PPT mode must keep speech energy at 0');
+  assert.equal(init.hasVideoCtrls, false, 'PPT mode must replace video bar with clean PPT bar');
+  assert.equal(init.prevDisabled, true, 'Prev button must be disabled on Page 1');
+  assert.equal(init.pageNumTxt, '1 / 2', 'PPT page badge must render "1 / 2"');
+
+  await verifyPptNavigationSteps(page);
+
+  await page.locator('[data-act="subs"]').click();
+  const notes = await page.evaluate(() => ({
+    subsOn: window.__video.getSyncState().subsEnabled,
+    subVis: getComputedStyle(document.getElementById('subs')).visibility,
+    subOp: getComputedStyle(document.getElementById('subs')).opacity,
+    subTxt: document.querySelector('#subs .sub-text > span:last-child')?.textContent,
+    deepLink: window.__video.getDeepLink(),
+  }));
+  assert.equal(notes.subsOn, true, 'Clicking [data-act="subs"] in PPT mode must open speaker teleprompter');
+  assert.equal(notes.subVis, 'visible', 'Speaker teleprompter must render #subs visible');
+  assert.equal(notes.subOp, '1', 'Speaker teleprompter must stay at opacity 1 without fade-out');
+  assert.equal(notes.subTxt, '所有画面仅由时间纯函数唯一决定。', 'Speaker teleprompter must show full sentence');
+  assert.ok(notes.deepLink.includes('ppt=1') && notes.deepLink.includes('page=4'), `PPT deep link must encode ?ppt=1&page=4, got ${notes.deepLink}`);
+}
+
 async function verifyBrowserCapabilities(videoDir) {
   const { srv, port } = await startEphemeralVideoServer({ videosDir: path.join(TEST_ROOT, 'videos'), watch: true });
   const chromium = await loadChromium(PKG_ROOT);
@@ -1333,6 +1424,13 @@ async function verifyBrowserCapabilities(videoDir) {
 
     await verifyRound3BrowserContracts(page, port);
     await verifyPlayerBarContracts(page, port);
+    const noPptLeak = await page.evaluate(() => ({
+      pptMode: window.__video.pptMode,
+      hasPptAct: Boolean(document.querySelector('[data-ppt-act]')),
+    }));
+    assert.equal(noPptLeak.pptMode, false, 'Default video mode must keep pptMode=false');
+    assert.equal(noPptLeak.hasPptAct, false, 'Default video mode must not inject PPT buttons');
+    await verifyPptDeckMode(page, port);
     await verifySfxAndMultiScriptContracts(page, port);
     await verifyRuntimeSetLangHotSwitch(page, port);
     await verifySingleLangOptOutSafety(browser, port);

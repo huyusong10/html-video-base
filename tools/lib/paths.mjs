@@ -403,6 +403,7 @@ export function buildVideoManifestItem(projectRoot, id) {
       scenes: (sandbox.V.scenes || []).length,
       width: cfg.width || 1920,
       height: cfg.height || 1080,
+      ppt: Boolean(cfg.ppt),
       path: `./${id}/index.html`,
     };
   } catch {

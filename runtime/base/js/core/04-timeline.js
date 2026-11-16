@@ -335,6 +335,8 @@
       whisperModel: lineObj.whisperModel,
       volume: lineObj.volume,
       xmlLang: lineObj.xmlLang,
+      pptSkip: Boolean(lineObj.pptSkip),
+      pptAt: lineObj.pptAt,
     };
   }
 
@@ -523,6 +525,7 @@
   }
 
   V.getSceneEnergy = function (sc, si, lt) {
+    if (V.pptMode) return 0;
     if (!sc || !sc.cues) return 0;
     const li = sc.cues.findIndex(c => lt >= c.start && lt <= c.end);
     if (li < 0) return 0;

@@ -464,11 +464,11 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   opacity: 0;
   transition: opacity 0.16s ease;
 }
-:is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing), .ui-active, .scrubbing, .menu-open) #controls,
+:is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing):not(.ppt-mode), .ui-active, .scrubbing, .menu-open) #controls,
 :is(body.ctrl-overlay, body.web-full, body.os-full) #controls:has(.chap-search:focus) {
   opacity: 1;
 }
-:is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing), .ui-active, .scrubbing, .menu-open) #stage,
+:is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing):not(.ppt-mode), .ui-active, .scrubbing, .menu-open) #stage,
 :is(body.ctrl-overlay, body.web-full, body.os-full):has(#controls .chap-search:focus) #stage {
   --ctrl-dodge: var(--ctrl-overlap, 52px);
 }
@@ -889,3 +889,18 @@ body.record *, body.record *::before, body.record *::after {
   animation-delay: var(--anim-t, 0s) !important;
 }
 body.record #controls, body.record #osd, body.record #dev-hud, body.record #safe-guide { display: none !important; }
+
+/* 独立 PPT 人工讲解模式（?ppt=1） */
+body.ppt-mode #start-hint { display: none !important; }
+body.ppt-mode #subs .sub-lead,
+body.ppt-mode [data-presenter] { display: none !important; }
+#controls.ppt-bar .ppt-spacer { flex: 1; min-width: 8px; }
+#controls.ppt-bar .ppt-nav {
+  display: flex; align-items: center; gap: 6px;
+}
+#controls.ppt-bar .ppt-page-num {
+  width: auto; min-width: 72px; padding: 0 8px;
+}
+#controls.ppt-bar :where(button:disabled) {
+  opacity: 0.36; cursor: default; pointer-events: none;
+}

@@ -67,10 +67,12 @@
       : h('span', { class: 'chap-it-title' },
           h('span', null, hit.sceneTitle),
           h('span', { class: 'chap-hit-sub' }, buildHighlightedSnippet(hit.text, query)));
+    const ppt = V.pptMode && V._pptRuntime;
+    const rowMeta = ppt ? uiText('pptChapPage', { p: ppt.findPageNoForTime(hit.time) }) : ctl.fmtTime(hit.time);
     const row = h('div', { class: 'chap-item' + (idx === activeIdx ? ' on' : '') },
       h('em', null, code),
       body,
-      h('small', null, ctl.fmtTime(hit.time)));
+      h('small', null, rowMeta));
     row.onclick = e => { e.stopPropagation(); onPick(hit); };
     return row;
   }
@@ -89,8 +91,20 @@
       u.searchParams.delete('autoplay');
       u.searchParams.delete('_hmr');
       syncDeepLinkLangParam(u);
-      if (sec >= 1) u.searchParams.set('t', String(sec));
-      else u.searchParams.delete('t');
+      const ppt = V.pptMode && V._pptRuntime;
+      if (ppt && targetSec === undefined) {
+        u.searchParams.set('ppt', '1');
+        u.searchParams.set('page', String(ppt.getPageNo()));
+        u.searchParams.delete('t');
+      } else if (ppt) {
+        u.searchParams.set('ppt', '1');
+        u.searchParams.set('page', String(ppt.findPageNoForTime(sec)));
+        u.searchParams.delete('t');
+      } else if (sec >= 1) {
+        u.searchParams.set('t', String(sec));
+      } else {
+        u.searchParams.delete('t');
+      }
       return u.toString();
     } catch {
       return location.href;
@@ -121,14 +135,17 @@
     if (!timeEl) return;
     timeElRef = timeEl;
     let copyTimer = null;
-    timeEl.title = uiText('copyTimeTip');
+    timeEl.title = uiText(V.pptMode ? 'copyPageTip' : 'copyTimeTip');
     timeEl.onclick = async e => {
       e.stopPropagation();
       if (V.sfx) V.sfx('click', 0.45);
+      const ppt = V.pptMode && V._pptRuntime;
       const sec = Math.max(0, Math.floor(V._now || 0));
-      await copyToClipboard(getDeepLink(sec));
+      await copyToClipboard(getDeepLink(ppt ? undefined : sec));
       timeEl.dataset.copied = '1';
-      timeEl.textContent = uiText('copiedTime', { time: ctl.fmtTime(sec) });
+      timeEl.textContent = ppt
+        ? uiText('copiedPage', { p: ppt.getPageNo() })
+        : uiText('copiedTime', { time: ctl.fmtTime(sec) });
       clearTimeout(copyTimer);
       copyTimer = setTimeout(() => {
         delete timeEl.dataset.copied;
@@ -268,7 +285,7 @@
         searchInputEl.setAttribute('aria-label', uiText('searchAria'));
         if (searchInputEl.value) searchInputEl.dispatchEvent(new Event('input'));
       }
-      if (timeElRef) timeElRef.title = uiText('copyTimeTip');
+      if (timeElRef) timeElRef.title = uiText(V.pptMode ? 'copyPageTip' : 'copyTimeTip');
     },
     onSeek(t) {
       if (!V._isRecord) syncAddressBarOnSeek(t);

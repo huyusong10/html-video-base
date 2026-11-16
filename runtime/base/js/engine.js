@@ -23,6 +23,15 @@
     if (!V[k]) V[k] = make();
   }
 
+  function detectInitialPptMode() {
+    if (typeof location === 'undefined' || !location.search) return false;
+    const sp = new URLSearchParams(location.search);
+    if (sp.has('record') || sp.has('capture')) return false;
+    const raw = (sp.get('ppt') || '').toLowerCase();
+    return raw === '1' || raw === 'true' || (sp.get('mode') || '').toLowerCase() === 'ppt';
+  }
+  if (V.pptMode === undefined) V.pptMode = detectInitialPptMode();
+
   function upsertById(list, item) {
     const key = item.id || item.name;
     if (!key) { list.push(item); return item; }
@@ -323,6 +332,14 @@
     sandboxPrefix: '🎮 彩蛋试玩：',
     sandboxActive: '🎮 彩蛋试玩中',
     sandboxBack: '↩ 返回终章',
+    pptPrev: '上一页（← / PageUp）',
+    pptNext: '下一页（→ / 空格 / PageDown）',
+    pptNotesShow: '开启提词',
+    pptNotesHide: '关闭提词',
+    pptPageBadge: '第 {cur}/{total} 页',
+    pptChapPage: '第 {p} 页',
+    copyPageTip: '点击复制当前页链接 (?ppt=1&page=)',
+    copiedPage: '✓ 已复制第 {p} 页',
   };
 
   const UI_ZH_TW = {
@@ -368,6 +385,14 @@
     sandboxPrefix: '🎮 互動試玩：',
     sandboxActive: '🎮 互動試玩中',
     sandboxBack: '↩ 返回終章',
+    pptPrev: '上一頁（← / PageUp）',
+    pptNext: '下一頁（→ / 空白鍵 / PageDown）',
+    pptNotesShow: '開啟提詞',
+    pptNotesHide: '關閉提詞',
+    pptPageBadge: '第 {cur}/{total} 頁',
+    pptChapPage: '第 {p} 頁',
+    copyPageTip: '點擊複製目前頁連結 (?ppt=1&page=)',
+    copiedPage: '✓ 已複製第 {p} 頁',
   };
 
   const UI_EN = {
@@ -413,6 +438,14 @@
     sandboxPrefix: '🎮 Interactive: ',
     sandboxActive: '🎮 Interactive Mode',
     sandboxBack: '↩ Back to Finale',
+    pptPrev: 'Previous Slide (← / PageUp)',
+    pptNext: 'Next Slide (→ / Space / PageDown)',
+    pptNotesShow: 'Show Notes',
+    pptNotesHide: 'Hide Notes',
+    pptPageBadge: 'Slide {cur}/{total}',
+    pptChapPage: 'P.{p}',
+    copyPageTip: 'Click to copy slide link (?ppt=1&page=)',
+    copiedPage: '✓ Copied Slide {p}',
   };
 
   const NATIVE_LANG_LABELS = {
@@ -1326,6 +1359,8 @@
       whisperModel: lineObj.whisperModel,
       volume: lineObj.volume,
       xmlLang: lineObj.xmlLang,
+      pptSkip: Boolean(lineObj.pptSkip),
+      pptAt: lineObj.pptAt,
     };
   }
 
@@ -1514,6 +1549,7 @@
   }
 
   V.getSceneEnergy = function (sc, si, lt) {
+    if (V.pptMode) return 0;
     if (!sc || !sc.cues) return 0;
     const li = sc.cues.findIndex(c => lt >= c.start && lt <= c.end);
     if (li < 0) return 0;
@@ -2090,6 +2126,8 @@
     play: '<path d="M4.5 2.9a.8.8 0 0 1 1.22-.68l7.4 4.6a.8.8 0 0 1 0 1.36l-7.4 4.6a.8.8 0 0 1-1.22-.68V2.9z"/>',
     pause: '<rect x="3.75" y="2.75" width="3" height="10.5" rx="0.9"/><rect x="9.25" y="2.75" width="3" height="10.5" rx="0.9"/>',
     replay: ['M2.75 8a5.25 5.25 0 1 0 1.4-3.58', 'M2.6 2.6v2.7h2.7'],
+    prevSlide: ['M9.75 3.75 5.5 8l4.25 4.25'],
+    nextSlide: ['M6.25 3.75 10.5 8l-4.25 4.25'],
     chapCaret: ['M4.5 9.75 8 6.25l3.5 3.5'],
     rate: ['M2.6 11.5a6 6 0 1 1 10.8 0', 'M8 8.5 10.8 5.4', 'M6 12.5h4'],
     subsOn: ['M2.25 3.5h11.5a.75.75 0 0 1 .75.75v7.5a.75.75 0 0 1-.75.75H2.25a.75.75 0 0 1-.75-.75v-7.5a.75.75 0 0 1 .75-.75z', 'M4.25 8.25h3', 'M9 8.25h2.75', 'M4.25 10.6h5.25'],
@@ -2110,6 +2148,8 @@
     play: '<path d="M4 2h2v1h2v1h2v1h2v2h1v2h-1v2h-2v1H8v1H6v1H4V2z"/>',
     pause: '<rect x="4" y="3" width="3" height="10"/><rect x="9" y="3" width="3" height="10"/>',
     replay: '<rect x="5" y="2" width="7" height="2"/><rect x="12" y="4" width="2" height="8"/><rect x="4" y="12" width="8" height="2"/><rect x="2" y="9" width="2" height="3"/><path d="M2 2h2v3h3v2H2V2z"/>',
+    prevSlide: '<path d="M10 3v2H8v2H6v2h2v2h2v2h1v-2H9V9H7V7h2V5h2V3h-1z"/>',
+    nextSlide: '<path d="M5 3v2h2v2h2v2H7v2H5v2h1v-2h2V9h2V7H8V5H6V3H5z"/>',
     chapCaret: '<path d="M7 5h2v2h2v2h2v2h-2V9H9V7H7v2H5v2H3V9h2V7h2V5z"/>',
     rate: '<rect x="4" y="2" width="8" height="2"/><rect x="2" y="4" width="2" height="7"/><rect x="12" y="4" width="2" height="7"/><rect x="3" y="11" width="2" height="2"/><rect x="11" y="11" width="2" height="2"/><rect x="7" y="8" width="2" height="3"/><rect x="9" y="6" width="2" height="2"/><rect x="6" y="13" width="4" height="1"/>',
     subsOn: '<path d="M1 3h14v10H1V3zm2 2v6h10V5H3zm1 2h3v1H4V7zm5 0h3v1H9V7zm-5 2h6v1H4V9z"/>',
@@ -2378,20 +2418,32 @@
     fn(cue, info, { subs, lead: subLead, tail: subTail, speaker: subSpeaker, text: subText });
   }
 
+  function pickPptCue(sc, lt) {
+    const cues = sc.cues || [];
+    const hit = cues.findIndex(c => lt >= c.start - 0.04 && lt <= c.end + 0.12);
+    if (hit >= 0) return { cue: cues[hit], activeCueIdx: hit };
+    return { cue: null, activeCueIdx: -1 };
+  }
+
+  function pickVideoCue(sc, lt) {
+    const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
+    let cue = null, activeCueIdx = -1;
+    sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
+    list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
+    return { cue, activeCueIdx };
+  }
+
   function updateSubs(sc, idx, lt, now, clock, showSubs) {
     if (!subs) return -1;
     const subCfg = getSubCfg();
     syncSceneSubLayout(sc, lt, subCfg);
-    const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
-    let cue = null;
-    let activeCueIdx = -1;
-    sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
-    list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
+    const picked = V.pptMode ? pickPptCue(sc, lt) : pickVideoCue(sc, lt);
+    const { cue, activeCueIdx } = picked;
     const visible = Boolean(cue && showSubs);
     subs.style.visibility = visible ? 'visible' : 'hidden';
     if (cue) updateSubDomText(cue);
     if (visible) {
-      const a = Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
+      const a = V.pptMode ? 1 : Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
       subs.style.opacity = String(clamp(a));
     } else {
       subs.style.opacity = '0';
@@ -3110,6 +3162,429 @@
   });
 })(globalThis.V = globalThis.V || {});
 
+/* core/12b-ppt.js - 独立 PPT 人工讲解运行时（按句步进驻留、280ms 平滑推进 / 连按瞬切、鼠标滚轮与激光翻页笔支持） */
+(function (V) {
+  if (typeof location === 'undefined') return;
+  const { clamp, h, toggle } = V.u;
+
+  function resolveCueSettleLt(sc, cue) {
+    if (typeof cue.pptAt === 'number') {
+      return clamp(cue.pptAt, 0.05, Math.max(0.06, sc.duration - 0.05));
+    }
+    const minLt = Math.min(0.3, sc.duration * 0.45);
+    const maxLt = Math.max(0.08, sc.duration - 0.32);
+    return clamp(cue.end - 0.04, minLt, Math.max(minLt, maxLt));
+  }
+
+  function resolveCustomSteps(sc, si) {
+    const raw = typeof sc.pptSteps === 'function'
+      ? sc.pptSteps(sc.ctx || (V.makeCtx ? V.makeCtx(sc, si) : null), sc, si)
+      : sc.pptSteps;
+    if (!Array.isArray(raw) || !raw.length) return null;
+    const maxLt = Math.max(0.06, sc.duration - 0.05);
+    return raw.map(it => {
+      const val = typeof it === 'number' ? it : (it && (it.lt !== undefined ? it.lt : it.at));
+      const lt = clamp(Number(val) || 0, 0.05, maxLt);
+      return { lt, cueStart: sc.start, cueEnd: sc.start + sc.duration, text: (it && it.text) || '' };
+    });
+  }
+
+  function resolveCueSteps(sc) {
+    const kept = (sc.cues || []).filter(c => c && !c.pptSkip);
+    if (kept.length) {
+      return kept.map(c => ({
+        lt: resolveCueSettleLt(sc, c),
+        cueStart: sc.start + c.start,
+        cueEnd: sc.start + c.end,
+        text: c.text || '',
+      }));
+    }
+    const tailLt = clamp(sc.duration - 0.15, 0.05, Math.max(0.06, sc.duration - 0.05));
+    return [{ lt: tailLt, cueStart: sc.start, cueEnd: sc.start + sc.duration, text: '' }];
+  }
+
+  function resolveSceneSteps(sc, si) {
+    if (sc && sc.pptSteps) {
+      const custom = resolveCustomSteps(sc, si);
+      if (custom) return custom;
+    }
+    return resolveCueSteps(sc);
+  }
+
+  function buildPptPages() {
+    const pages = [];
+    (V.scenes || []).forEach((sc, si) => {
+      if (!sc || sc.pptSkip) return;
+      const steps = resolveSceneSteps(sc, si);
+      steps.forEach((st, idx) => {
+        pages.push({
+          index: pages.length,
+          pageNo: pages.length + 1,
+          sceneIndex: si,
+          stepInScene: idx,
+          sceneSteps: steps.length,
+          lt: st.lt,
+          globalT: sc.start + st.lt,
+          cueStart: st.cueStart,
+          cueEnd: st.cueEnd,
+          text: st.text,
+        });
+      });
+    });
+    return pages;
+  }
+
+  function hasActiveVideoClips() {
+    return Boolean(V._videoClips && V._videoClips.size > 0);
+  }
+
+  V._createPptRuntime = function (deps) {
+    const {
+      params, getNow, renderAt, uiText, makeCtrlIcon, swapBtnIcon,
+      renderCustomControls, setOpenMenu, toggleOsFull, fallbackWebFull, exitWebFullIfActive, bindMenuAutoClose,
+    } = deps;
+
+    let pages = [];
+    let pageIdx = 0;
+    let barEl = null;
+    let internalRender = false;
+    let wheelLockTs = 0;
+    const refs = { prev: null, next: null, pageNum: null, chapLabel: null, chapItems: [] };
+    const tween = { active: false, startTs: 0, durMs: 280, fromT: 0, toT: 0 };
+
+    function renderInternal(t) {
+      internalRender = true;
+      try { renderAt(t); } finally { internalRender = false; }
+    }
+
+    function rebuildPages() {
+      pages = buildPptPages();
+      pageIdx = clamp(pageIdx, 0, Math.max(0, pages.length - 1));
+      return pages;
+    }
+
+    function findFirstPageIndexForScene(si) {
+      const idx = pages.findIndex(p => p.sceneIndex === si);
+      return idx >= 0 ? idx : Math.max(0, pages.findIndex(p => p.sceneIndex > si));
+    }
+
+    function findBestPageInScene(si, targetT) {
+      const list = pages.filter(p => p.sceneIndex === si);
+      if (!list.length) return -1;
+      const hit = list.find(p => targetT <= p.cueEnd + 0.12);
+      return hit ? hit.index : list[list.length - 1].index;
+    }
+
+    function findPageIndexForTime(targetT) {
+      if (!pages.length) return 0;
+      const t = Number(targetT) || 0;
+      const scenes = V.scenes || [];
+      for (let si = 0; si < scenes.length; si++) {
+        const sc = scenes[si];
+        if (t < sc.start + sc.duration) {
+          const hit = findBestPageInScene(si, t);
+          if (hit >= 0) return hit;
+        }
+      }
+      let best = 0, bestDist = Infinity;
+      for (const p of pages) {
+        const d = Math.abs(p.globalT - t);
+        if (d < bestDist) { bestDist = d; best = p.index; }
+      }
+      return best;
+    }
+
+    function resolveInitialPageIndex() {
+      if (!pages.length) return 0;
+      if (params.has('page')) {
+        return clamp((parseInt(params.get('page'), 10) || 1) - 1, 0, pages.length - 1);
+      }
+      if (params.has('scene')) {
+        const si = clamp(parseInt(params.get('scene'), 10) || 0, 0, Math.max(0, (V.scenes || []).length - 1));
+        return clamp(findFirstPageIndexForScene(si), 0, pages.length - 1);
+      }
+      if (params.has('t')) return findPageIndexForTime(parseFloat(params.get('t')) || 0);
+      return 0;
+    }
+
+    function syncUI() {
+      const p = pages[pageIdx];
+      if (!p) return;
+      if (refs.prev) refs.prev.disabled = pageIdx <= 0;
+      if (refs.next) refs.next.disabled = pageIdx >= pages.length - 1;
+      if (refs.pageNum && !refs.pageNum.dataset.copied) {
+        refs.pageNum.textContent = `${pageIdx + 1} / ${pages.length}`;
+        refs.pageNum.setAttribute('aria-label', uiText('pptPageBadge', { cur: pageIdx + 1, total: pages.length }));
+      }
+      const sc = V.scenes[p.sceneIndex];
+      if (refs.chapLabel && sc) {
+        const stepTag = p.sceneSteps > 1 ? ` (${p.stepInScene + 1}/${p.sceneSteps})` : '';
+        refs.chapLabel.textContent = `${String(p.sceneIndex + 1).padStart(2, '0')} ${sc.title}${stepTag}`;
+      }
+      refs.chapItems.forEach(({ item, sceneIndex }) => toggle(item, 'on', sceneIndex === p.sceneIndex));
+      V.controls.forEach(c => { if (typeof c.sync === 'function') c.sync(c._el, V); });
+    }
+
+    function commitPageSnap(targetPage) {
+      tween.active = false;
+      renderInternal(targetPage.globalT);
+      syncUI();
+      V.emit('onSeek', targetPage.globalT);
+      V.emit('onPptPage', { page: pageIdx + 1, total: pages.length, sceneIndex: targetPage.sceneIndex });
+    }
+
+    function startPageTween(prevPage, nextPage) {
+      const sameScene = prevPage && prevPage.sceneIndex === nextPage.sceneIndex;
+      const sc = V.scenes[nextPage.sceneIndex];
+      const fromT = sameScene ? clamp(getNow(), sc.start, nextPage.globalT) : Math.min(nextPage.globalT, sc.start + 0.04);
+      tween.fromT = fromT;
+      tween.toT = nextPage.globalT;
+      tween.startTs = performance.now();
+      tween.active = true;
+      renderInternal(fromT);
+      if (hasActiveVideoClips()) {
+        commitPageSnap(nextPage);
+        return;
+      }
+      syncUI();
+    }
+
+    function goToPage(targetIdx, opts = {}) {
+      if (!pages.length) return 0;
+      const nextIdx = clamp(targetIdx, 0, pages.length - 1);
+      const next = pages[nextIdx];
+      if (nextIdx === pageIdx) {
+        if (tween.active) commitPageSnap(next);
+        return pageIdx;
+      }
+      const prev = pages[pageIdx];
+      const smooth = nextIdx === pageIdx + 1 && !opts.instant && !tween.active && !hasActiveVideoClips();
+      pageIdx = nextIdx;
+      if (smooth) {
+        startPageTween(prev, next);
+        return pageIdx;
+      }
+      commitPageSnap(next);
+      return pageIdx;
+    }
+
+    function tick(ts) {
+      if (!tween.active) return false;
+      const p = clamp((ts - tween.startTs) / tween.durMs, 0, 1);
+      const eased = 1 - Math.pow(1 - p, 3);
+      renderInternal(tween.fromT + (tween.toT - tween.fromT) * eased);
+      if (p < 1 && !hasActiveVideoClips()) return true;
+      commitPageSnap(pages[pageIdx]);
+      return false;
+    }
+
+    function stepBy(delta) {
+      if (!pages.length) return pageIdx;
+      return goToPage(pageIdx + delta, tween.active ? { instant: true } : undefined);
+    }
+
+    function jumpSceneDelta(delta) {
+      const p = pages[pageIdx];
+      if (!p) return;
+      const scenes = V.scenes || [];
+      let nextSi = p.sceneIndex + delta;
+      while (nextSi >= 0 && nextSi < scenes.length) {
+        const idx = pages.findIndex(item => item.sceneIndex === nextSi);
+        if (idx >= 0) { goToPage(idx, { instant: true }); return; }
+        nextSi += delta;
+      }
+    }
+
+    function seekToNearestPage(t) {
+      if (!pages.length) rebuildPages();
+      goToPage(findPageIndexForTime(t), { instant: true });
+    }
+
+    function buildChapters(bar) {
+      const list = bar.querySelector('.chap-list'), trig = bar.querySelector('.chap-trigger');
+      refs.chapLabel = bar.querySelector('.chap-cur-txt');
+      if (!list || !trig) return;
+      list.innerHTML = '';
+      refs.chapItems = [];
+      (V.scenes || []).forEach((sc, si) => {
+        if (!sc || sc.pptSkip) return;
+        const firstIdx = pages.findIndex(p => p.sceneIndex === si);
+        if (firstIdx < 0) return;
+        const pageTag = uiText('pptChapPage', { p: firstIdx + 1 });
+        const item = h('div', { class: 'chap-item' }, h('em', null, String(si + 1).padStart(2, '0')), h('span', { class: 'chap-it-title' }, sc.title), h('small', null, pageTag));
+        item.onclick = e => { e.stopPropagation(); setOpenMenu(bar, ''); goToPage(firstIdx, { instant: true }); };
+        list.appendChild(item);
+        refs.chapItems.push({ item, sceneIndex: si });
+      });
+      trig.onclick = e => { e.stopPropagation(); setOpenMenu(bar, bar.dataset.menu === 'chap' ? '' : 'chap'); };
+    }
+
+    function buildControlsBar(cfg, uiCfg) {
+      const homeTitle = cfg.homeLabel || uiText('home');
+      const homeLink = cfg.homeUrl === false
+        ? null
+        : h('a', { class: 'ctrl-home ctrl-icon-btn', href: cfg.homeUrl || '../', title: homeTitle, 'aria-label': homeTitle }, makeCtrlIcon(uiCfg.icons.home));
+      const webLabel = uiText('webEnter');
+      const webBtn = uiCfg.webFull
+        ? h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'webfull', title: webLabel, 'aria-label': webLabel }, makeCtrlIcon(uiCfg.icons.webEnter))
+        : null;
+      const notesLabel = uiText('pptNotesShow');
+      const fullLabel = uiText('fullEnter');
+      const nav = h('div', { class: 'ppt-nav' },
+        h('button', { class: 'ctrl-icon-btn ppt-prev', 'data-ppt-act': 'prev', title: uiText('pptPrev'), 'aria-label': uiText('pptPrev') }, makeCtrlIcon(uiCfg.icons.prevSlide)),
+        h('div', { class: 'chap-wrap' },
+          h('button', { class: 'chap-trigger', 'data-act': 'chap', title: uiText('chapTrigger') }, h('span', { class: 'chap-cur-txt' }), h('i', { class: 'chap-caret' }, makeCtrlIcon(uiCfg.icons.chapCaret))),
+          h('div', { class: 'chap-menu' }, h('div', { class: 'chap-menu-hd' }, uiText('chapHeader')), h('div', { class: 'chap-list' }))),
+        h('span', { class: 'time ppt-page-num' }, '1 / 1'),
+        h('button', { class: 'ctrl-icon-btn ppt-next', 'data-ppt-act': 'next', title: uiText('pptNext'), 'aria-label': uiText('pptNext') }, makeCtrlIcon(uiCfg.icons.nextSlide)));
+      return h('div', { id: 'controls', class: 'ppt-bar', 'data-interactive': '1' },
+        homeLink,
+        ...renderCustomControls('left', uiCfg),
+        h('div', { class: 'ppt-spacer' }),
+        nav,
+        h('div', { class: 'ppt-spacer' }),
+        ...renderCustomControls('right', uiCfg),
+        h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'subs', title: notesLabel, 'aria-label': notesLabel }, makeCtrlIcon(uiCfg.icons.subsOff)),
+        webBtn,
+        h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'full', title: fullLabel, 'aria-label': fullLabel }, makeCtrlIcon(uiCfg.icons.fullEnter)));
+    }
+
+    function syncBtnTitle(el, key) {
+      if (!el) return;
+      const label = uiText(key);
+      el.title = label;
+      el.setAttribute('aria-label', label);
+    }
+
+    function refreshChrome(cfg, uiCfg) {
+      rebuildPages();
+      if (!barEl) return;
+      syncBtnTitle(barEl.querySelector('.ctrl-home'), 'home');
+      const home = barEl.querySelector('.ctrl-home');
+      if (home && cfg.homeLabel) { home.title = cfg.homeLabel; home.setAttribute('aria-label', cfg.homeLabel); }
+      syncBtnTitle(refs.prev, 'pptPrev');
+      syncBtnTitle(refs.next, 'pptNext');
+      const chapTrig = barEl.querySelector('.chap-trigger');
+      if (chapTrig) chapTrig.title = uiText('chapTrigger');
+      const chapHd = barEl.querySelector('.chap-menu-hd');
+      if (chapHd) chapHd.textContent = uiText('chapHeader');
+      buildChapters(barEl);
+      syncUI();
+      void uiCfg;
+    }
+
+    function isEditableKeyTarget(t) {
+      if (!t) return false;
+      return Boolean(t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ''));
+    }
+
+    function isActionControlTarget(t) {
+      return Boolean(t && t.closest && t.closest('button, a'));
+    }
+
+    function handlePptEscape(bar, e) {
+      if (bar && bar.classList.contains('menu-open')) { setOpenMenu(bar, ''); e.preventDefault(); }
+      else if (exitWebFullIfActive && exitWebFullIfActive()) e.preventDefault();
+    }
+
+    const stepForwardOrScene = e => { e.preventDefault(); if (e.shiftKey) jumpSceneDelta(1); else stepBy(1); };
+    const stepBackwardOrScene = e => { e.preventDefault(); if (e.shiftKey) jumpSceneDelta(-1); else stepBy(-1); };
+    const PPT_KEY_MAP = {
+      ArrowRight: stepForwardOrScene,
+      ArrowDown: stepForwardOrScene,
+      PageDown: stepForwardOrScene,
+      ArrowLeft: stepBackwardOrScene,
+      ArrowUp: stepBackwardOrScene,
+      PageUp: stepBackwardOrScene,
+      Backspace: stepBackwardOrScene,
+      '[': e => { e.preventDefault(); jumpSceneDelta(-1); },
+      ']': e => { e.preventDefault(); jumpSceneDelta(1); },
+      Home: e => { e.preventDefault(); goToPage(0, { instant: true }); },
+      End: e => { e.preventDefault(); goToPage(pages.length - 1, { instant: true }); },
+      f: toggleOsFull,
+      F: toggleOsFull,
+      w: () => fallbackWebFull(true),
+      W: () => fallbackWebFull(true),
+    };
+
+    function handlePptKeyDown(bar, e) {
+      if (e.key === 'Escape') { handlePptEscape(bar, e); return; }
+      if (e.ctrlKey || e.metaKey || e.altKey || isEditableKeyTarget(e.target)) return;
+      if (e.key === ' ' || e.code === 'Space' || e.key === 'Enter') {
+        if (!isActionControlTarget(e.target)) { e.preventDefault(); stepBy(1); }
+        return;
+      }
+      const fn = PPT_KEY_MAP[e.key];
+      if (fn) fn(e);
+    }
+
+    function bindInputs(bar) {
+      if (refs.prev) refs.prev.onclick = e => { e.stopPropagation(); stepBy(-1); };
+      if (refs.next) refs.next.onclick = e => { e.stopPropagation(); stepBy(1); };
+      const vp = document.getElementById('viewport');
+      if (vp) {
+        vp.addEventListener('click', e => {
+          if (e.target.closest('[data-interactive]')) return;
+          const sel = typeof getSelection === 'function' ? String(getSelection()).trim() : '';
+          if (sel) return;
+          stepBy(1);
+        });
+        vp.addEventListener('wheel', e => {
+          if (e.target.closest('#controls, [data-interactive]') || Math.abs(e.deltaY) < 8) return;
+          e.preventDefault();
+          const nowTs = performance.now();
+          if (nowTs - wheelLockTs < 160) return;
+          wheelLockTs = nowTs;
+          stepBy(e.deltaY > 0 ? 1 : -1);
+        }, { passive: false });
+      }
+      document.addEventListener('keydown', e => handlePptKeyDown(bar, e));
+    }
+
+    function init(bar) {
+      barEl = bar;
+      refs.prev = bar.querySelector('[data-ppt-act="prev"]');
+      refs.next = bar.querySelector('[data-ppt-act="next"]');
+      refs.pageNum = bar.querySelector('.ppt-page-num');
+      rebuildPages();
+      buildChapters(bar);
+      bindMenuAutoClose(bar);
+      bindInputs(bar);
+      syncUI();
+    }
+
+    return {
+      rebuildPages,
+      buildControlsBar,
+      init,
+      refreshChrome,
+      syncUI,
+      goToPage,
+      stepBy,
+      jumpSceneDelta,
+      seekToNearestPage,
+      resolveInitialPageIndex,
+      tick,
+      swapSubsIcon: (subsBtn, showSubs, icons) => {
+        if (!subsBtn) return;
+        const key = showSubs ? 'subsOn' : 'subsOff';
+        subsBtn.classList.toggle('is-off', !showSubs);
+        swapBtnIcon(subsBtn, key, icons[key], uiText(showSubs ? 'pptNotesHide' : 'pptNotesShow'));
+      },
+      isInternalRender: () => internalRender,
+      getPageNo: () => pageIdx + 1,
+      getTotalPages: () => pages.length,
+      getState: () => ({
+        page: pageIdx + 1,
+        totalPages: pages.length,
+        sceneIndex: pages[pageIdx] ? pages[pageIdx].sceneIndex : 0,
+        tweening: tween.active,
+      }),
+      findPageNoForTime: t => findPageIndexForTime(t) + 1,
+    };
+  };
+})(globalThis.V = globalThis.V || {});
+
 /* core/13-player.js · 舞台挂载、紧凑全图标控制栏、PotPlayer 热区速隐、实时进度浮窗、OSD 轻提示与 V.boot 启动器 */
 (function (V) {
   if (typeof location === 'undefined') return;
@@ -3138,6 +3613,30 @@
   const sandboxState = { active: false, entering: false, autoExitOnLast: true, returnTime: null, el: null, txtEl: null, backEl: null };
   const ui = {};
   let audioRt = null;
+  let pptRt = null;
+
+  function ensurePptRuntime() {
+    if (pptRt || !V._createPptRuntime) return pptRt;
+    pptRt = V._createPptRuntime({
+      params,
+      getNow: () => now,
+      renderAt: t => render(t, 0),
+      uiText,
+      makeCtrlIcon,
+      swapBtnIcon,
+      renderCustomControls,
+      setOpenMenu,
+      toggleOsFull,
+      fallbackWebFull,
+      exitWebFullIfActive: () => {
+        if (!isOsFull() && webFull) { setWebFull(false); return true; }
+        return false;
+      },
+      bindMenuAutoClose,
+    });
+    V._pptRuntime = pptRt;
+    return pptRt;
+  }
 
   function buildCustomControlBtn(c, pos, uiCfg) {
     if (typeof c.render === 'function') return c.render(h, V);
@@ -3200,6 +3699,7 @@
 
   V.mountStage = function () {
     const cfg = V.getCfg();
+    if (cfg.ppt === false) V.pptMode = false;
     const uiCfg = getUiCfg(cfg);
     const W = cfg.width || 1920, H = cfg.height || 1080;
     V.stageWidth = W;
@@ -3209,6 +3709,7 @@
     document.documentElement.style.setProperty('--stage-w', W + 'px');
     document.documentElement.style.setProperty('--stage-h', H + 'px');
     document.body.classList.toggle('ctrl-overlay', uiCfg.controlsMode === 'overlay');
+    document.body.classList.toggle('ppt-mode', Boolean(V.pptMode));
     if (document.getElementById('stage')) return;
 
     const sbTxt = h('span', { class: 'v-sandbox-txt egg-ban-txt' }, uiText('sandboxActive'));
@@ -3236,7 +3737,8 @@
       osdEl,
       h('div', { id: 'start-hint' }, cfg.startHint || uiText('startHint')));
 
-    document.body.prepend(vp, buildControlsBar(cfg, uiCfg));
+    const bar = V.pptMode ? ensurePptRuntime().buildControlsBar(cfg, uiCfg) : buildControlsBar(cfg, uiCfg);
+    document.body.prepend(vp, bar);
   };
 
   function sceneAt(t) {
@@ -3290,6 +3792,7 @@
       current.root.style.transform = '';
       current.root.style.opacity = '';
     }
+    if (V.pptMode) return;
     const box = document.getElementById('wipe');
     if (!box || V.scenes.length < 2) return;
     const cfg = V.getCfg();
@@ -3425,7 +3928,7 @@
     prevRenderNow = now;
     V._now = now;
     V._clock = clock;
-    if (RECORD) V._checkpointsRuntime.syncRecordCheckpoints(now);
+    if (RECORD || V.pptMode) V._checkpointsRuntime.syncRecordCheckpoints(now);
     const sc = sceneAt(now);
     syncSceneCtxAndEndState(sc, idle);
     const lt = now - sc.start;
@@ -3441,7 +3944,7 @@
     syncSceneVideoClips(lt);
     activeCueIdx = V._subtitlesRuntime.updateSubs(sc, idx, lt, now, clock, showSubs);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
-    if (!RECORD) V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: false, playing, scrubbing, pause, play });
+    if (!RECORD && !V.pptMode) V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: false, playing, scrubbing, pause, play });
     const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false, voiceOn: true, volume: 1 };
     V.emit('onRender', {
       now, clock, alive: clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
@@ -3632,20 +4135,27 @@
     else render(now + dt, 0);
   }
 
+  function stepAmbientIdle(rawDt) {
+    if (!shouldTickAmbientPause(current)) return;
+    ambientOffset += rawDt;
+    idleSec += rawDt;
+    render(now, idleSec);
+  }
+
   function frame(ts) {
     const rawDt = lastFrameTs > 0 ? clamp((ts - lastFrameTs) / 1000, 0, 0.1) : 0;
     lastFrameTs = ts;
     stepPointerSmoothing(rawDt);
-    if (scrubbing) {
+    if (V.pptMode && pptRt) {
+      if (!pptRt.tick(ts)) stepAmbientIdle(rawDt);
+    } else if (scrubbing) {
       lastTs = ts;
       if (current && current.live) render(now, 0);
     } else if (playing) {
       if (audioRt && audioRt.canUseMasterClock()) advanceAudioClock(ts, rawDt);
       else advanceWallClock(ts);
-    } else if (shouldTickAmbientPause(current)) {
-      ambientOffset += rawDt;
-      idleSec += rawDt;
-      render(now, idleSec);
+    } else {
+      stepAmbientIdle(rawDt);
     }
     requestAnimationFrame(frame);
   }
@@ -3767,6 +4277,10 @@
 
   function seek(t, force = false) {
     if (!Number.isFinite(t)) return;
+    if (V.pptMode && pptRt && !pptRt.isInternalRender()) {
+      pptRt.seekToNearestPage(t);
+      return;
+    }
     const target = clamp(t, 0, V.duration - 0.001);
     const ts = performance.now();
     if (!force && isRedundantSeek(target, ts)) return;
@@ -4142,7 +4656,7 @@
   function isBarOverlayHidden(bar) {
     const b = document.body.classList;
     if (!(b.contains('ctrl-overlay') || b.contains('web-full') || b.contains('os-full'))) return false;
-    if (!b.contains('playing')) return false;
+    if (!b.contains('playing') && !b.contains('ppt-mode')) return false;
     if (b.contains('ui-active') || b.contains('scrubbing') || b.contains('menu-open')) return false;
     return !(bar && bar.matches && bar.matches(':has(.chap-search:focus)'));
   }
@@ -4163,7 +4677,7 @@
       blindPointerType = '';
       e.stopPropagation();
       e.preventDefault();
-      if (pt !== 'touch' && playing) pause();
+      if (pt !== 'touch' && playing && !V.pptMode) pause();
     }, true);
   }
 
@@ -4193,11 +4707,13 @@
       if (bar && bar.contains(e.target)) flashUi(uiCfg.idleHideDelay);
     });
     flashUi(uiCfg.idleHideDelay);
-    document.getElementById('viewport').addEventListener('click', e => {
-      if (e.target.closest('[data-interactive]')) return;
-      if (!playing && isInteractiveHold()) return;
-      playing ? pause() : play();
-    });
+    if (!V.pptMode) {
+      document.getElementById('viewport').addEventListener('click', e => {
+        if (e.target.closest('[data-interactive]')) return;
+        if (!playing && isInteractiveHold()) return;
+        playing ? pause() : play();
+      });
+    }
   }
 
   function syncPlayBtnUI() {
@@ -4214,9 +4730,28 @@
   function syncSubsBtnUI() {
     if (!ui.subs) return;
     const icons = getUiCfg(V.getCfg()).icons;
+    if (V.pptMode && pptRt && pptRt.swapSubsIcon) {
+      pptRt.swapSubsIcon(ui.subs, showSubs, icons);
+      return;
+    }
     const key = showSubs ? 'subsOn' : 'subsOff';
     ui.subs.classList.toggle('is-off', !showSubs);
     swapBtnIcon(ui.subs, key, icons[key], uiText(showSubs ? 'subsHide' : 'subsShow'));
+  }
+
+  function buildPptUI(uiCfg) {
+    const bar = document.getElementById('controls');
+    ui.subs = bar.querySelector('[data-act=subs]');
+    ui.webfull = bar.querySelector('[data-act=webfull]');
+    ui.full = bar.querySelector('[data-act=full]');
+    pptRt.init(bar, uiCfg);
+    syncSubsBtnUI();
+    if (ui.subs) ui.subs.onclick = () => setSubs(!showSubs);
+    if (ui.webfull) ui.webfull.onclick = () => setWebFull(!webFull);
+    if (ui.full) ui.full.onclick = toggleOsFull;
+    document.addEventListener('fullscreenchange', syncFullUI);
+    document.addEventListener('webkitfullscreenchange', syncFullUI);
+    bindIdleWake(bar, uiCfg);
   }
 
   function buildUI(uiCfg) {
@@ -4269,6 +4804,7 @@
   }
 
   function updateUI() {
+    if (V.pptMode && pptRt) { pptRt.syncUI(); return; }
     if (!ui.fill) return;
     const pct = clamp(now / V.duration) * 100 + '%';
     ui.fill.style.width = pct;
@@ -4465,6 +5001,12 @@
     if (RECORD) return;
     const bar = document.getElementById('controls');
     if (!bar) return;
+    if (V.pptMode && pptRt) {
+      pptRt.refreshChrome(cfg, uiCfg);
+      syncSubsBtnUI();
+      syncFullUI();
+      return;
+    }
     syncStaticBarLabels(bar, cfg);
     mountTrackMarks(bar.querySelector('.track'), uiCfg);
     buildChapters(bar);
@@ -4485,6 +5027,7 @@
     if (current && current.root) current.root.remove();
     current = null;
     V.layout();
+    if (V.pptMode && pptRt) pptRt.rebuildPages();
     const cfg = V.getCfg(), uiCfg = getUiCfg(cfg);
     if (cfg.title) document.title = cfg.title;
     mountHudTicks(uiCfg);
@@ -4531,6 +5074,12 @@
       setSubs,
       setLang,
       getLang: () => V.getActiveLang(),
+      pptMode: Boolean(V.pptMode),
+      get page() { return pptRt ? pptRt.getPageNo() : 0; },
+      get totalPages() { return pptRt ? pptRt.getTotalPages() : 0; },
+      nextPage: () => (pptRt ? pptRt.stepBy(1) + 1 : 0),
+      prevPage: () => (pptRt ? pptRt.stepBy(-1) + 1 : 0),
+      goToPage: (p, opts) => (pptRt ? pptRt.goToPage((Number(p) || 1) - 1, opts) + 1 : 0),
       sfx: (k, o) => (V.sfx ? V.sfx(k, o) : false),
       setVolume: v => audioRt.setVolume(v),
       getVolume: () => audioRt.getState(now).volume,
@@ -4562,6 +5111,8 @@
           playing,
           playbackRate,
           subsEnabled: showSubs,
+          pptMode: Boolean(V.pptMode),
+          ...(pptRt ? pptRt.getState() : {}),
           lang: V.getActiveLang(),
           audioBlocked: Boolean(a.audioBlocked),
           volume: a.volume,
@@ -4586,6 +5137,32 @@
     if (V.syncDocLangAttrs) V.syncDocLangAttrs();
   }
 
+  function initInitialAudioAndSubs(cfg, uiCfg, savedPrefs) {
+    if (V.pptMode) {
+      showSubs = params.has('subs');
+      document.body.classList.toggle('nosubs', !showSubs);
+      return;
+    }
+    applySavedPrefs(savedPrefs);
+    audioRt.setRate(playbackRate);
+    audioRt.initTracks(cfg, uiCfg, savedPrefs);
+  }
+
+  function startInitialRender(uiCfg) {
+    if (V.pptMode && pptRt) {
+      pptRt.rebuildPages();
+      pptRt.goToPage(pptRt.resolveInitialPageIndex(), { instant: true });
+      return;
+    }
+    const initPos = resolveInitialTime(uiCfg);
+    if (initPos.t > 0) {
+      seek(initPos.t);
+      if (initPos.resumed) flashOsd(uiText('osdResumed', { time: fmtTime(initPos.t) }), 1200);
+    } else {
+      render(0, 0);
+    }
+  }
+
   V.start = function () {
     syncInitialLocaleState();
     V.mountStage();
@@ -4599,8 +5176,6 @@
     V._layersRuntime.mountLayers(stage, document.getElementById('subs'));
 
     const savedPrefs = V._prefsRuntime ? V._prefsRuntime.readSaved(uiCfg) : null;
-    applySavedPrefs(savedPrefs);
-
     audioRt = V._createAudioRuntime({
       params,
       isRecord: RECORD,
@@ -4614,8 +5189,7 @@
       onVisibilitySync: t => render(t, 0),
       onBgmUnavailable: syncSoundMenuUI,
     });
-    audioRt.setRate(playbackRate);
-    audioRt.initTracks(cfg, uiCfg, savedPrefs);
+    initInitialAudioAndSubs(cfg, uiCfg, savedPrefs);
 
     V.seekTo = t => render(t, 0);
     V.seekToAsync = async t => { render(t, 0); await waitStageAssets(); };
@@ -4644,6 +5218,7 @@
     };
 
     if (RECORD) document.body.classList.add('record');
+    else if (V.pptMode && pptRt) buildPptUI(uiCfg);
     else buildUI(uiCfg);
     V.emit('onStart', V._playerCtl);
 
@@ -4652,15 +5227,9 @@
     lastFrameTs = performance.now();
     ambientOffset = 0;
     idleSec = 0;
-    const initPos = resolveInitialTime(uiCfg);
-    if (initPos.t > 0) {
-      seek(initPos.t);
-      if (initPos.resumed) flashOsd(uiText('osdResumed', { time: fmtTime(initPos.t) }), 1200);
-    } else {
-      render(0, 0);
-    }
+    startInitialRender(uiCfg);
     requestAnimationFrame(frame);
-    if (params.has('autoplay')) play();
+    if (!V.pptMode && params.has('autoplay')) play();
     exposeBridge(cfg);
   };
 
@@ -4814,10 +5383,12 @@
       : h('span', { class: 'chap-it-title' },
           h('span', null, hit.sceneTitle),
           h('span', { class: 'chap-hit-sub' }, buildHighlightedSnippet(hit.text, query)));
+    const ppt = V.pptMode && V._pptRuntime;
+    const rowMeta = ppt ? uiText('pptChapPage', { p: ppt.findPageNoForTime(hit.time) }) : ctl.fmtTime(hit.time);
     const row = h('div', { class: 'chap-item' + (idx === activeIdx ? ' on' : '') },
       h('em', null, code),
       body,
-      h('small', null, ctl.fmtTime(hit.time)));
+      h('small', null, rowMeta));
     row.onclick = e => { e.stopPropagation(); onPick(hit); };
     return row;
   }
@@ -4836,8 +5407,20 @@
       u.searchParams.delete('autoplay');
       u.searchParams.delete('_hmr');
       syncDeepLinkLangParam(u);
-      if (sec >= 1) u.searchParams.set('t', String(sec));
-      else u.searchParams.delete('t');
+      const ppt = V.pptMode && V._pptRuntime;
+      if (ppt && targetSec === undefined) {
+        u.searchParams.set('ppt', '1');
+        u.searchParams.set('page', String(ppt.getPageNo()));
+        u.searchParams.delete('t');
+      } else if (ppt) {
+        u.searchParams.set('ppt', '1');
+        u.searchParams.set('page', String(ppt.findPageNoForTime(sec)));
+        u.searchParams.delete('t');
+      } else if (sec >= 1) {
+        u.searchParams.set('t', String(sec));
+      } else {
+        u.searchParams.delete('t');
+      }
       return u.toString();
     } catch {
       return location.href;
@@ -4868,14 +5451,17 @@
     if (!timeEl) return;
     timeElRef = timeEl;
     let copyTimer = null;
-    timeEl.title = uiText('copyTimeTip');
+    timeEl.title = uiText(V.pptMode ? 'copyPageTip' : 'copyTimeTip');
     timeEl.onclick = async e => {
       e.stopPropagation();
       if (V.sfx) V.sfx('click', 0.45);
+      const ppt = V.pptMode && V._pptRuntime;
       const sec = Math.max(0, Math.floor(V._now || 0));
-      await copyToClipboard(getDeepLink(sec));
+      await copyToClipboard(getDeepLink(ppt ? undefined : sec));
       timeEl.dataset.copied = '1';
-      timeEl.textContent = uiText('copiedTime', { time: ctl.fmtTime(sec) });
+      timeEl.textContent = ppt
+        ? uiText('copiedPage', { p: ppt.getPageNo() })
+        : uiText('copiedTime', { time: ctl.fmtTime(sec) });
       clearTimeout(copyTimer);
       copyTimer = setTimeout(() => {
         delete timeEl.dataset.copied;
@@ -5015,7 +5601,7 @@
         searchInputEl.setAttribute('aria-label', uiText('searchAria'));
         if (searchInputEl.value) searchInputEl.dispatchEvent(new Event('input'));
       }
-      if (timeElRef) timeElRef.title = uiText('copyTimeTip');
+      if (timeElRef) timeElRef.title = uiText(V.pptMode ? 'copyPageTip' : 'copyTimeTip');
     },
     onSeek(t) {
       if (!V._isRecord) syncAddressBarOnSeek(t);

@@ -127,20 +127,32 @@
     fn(cue, info, { subs, lead: subLead, tail: subTail, speaker: subSpeaker, text: subText });
   }
 
+  function pickPptCue(sc, lt) {
+    const cues = sc.cues || [];
+    const hit = cues.findIndex(c => lt >= c.start - 0.04 && lt <= c.end + 0.12);
+    if (hit >= 0) return { cue: cues[hit], activeCueIdx: hit };
+    return { cue: null, activeCueIdx: -1 };
+  }
+
+  function pickVideoCue(sc, lt) {
+    const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
+    let cue = null, activeCueIdx = -1;
+    sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
+    list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
+    return { cue, activeCueIdx };
+  }
+
   function updateSubs(sc, idx, lt, now, clock, showSubs) {
     if (!subs) return -1;
     const subCfg = getSubCfg();
     syncSceneSubLayout(sc, lt, subCfg);
-    const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
-    let cue = null;
-    let activeCueIdx = -1;
-    sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
-    list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
+    const picked = V.pptMode ? pickPptCue(sc, lt) : pickVideoCue(sc, lt);
+    const { cue, activeCueIdx } = picked;
     const visible = Boolean(cue && showSubs);
     subs.style.visibility = visible ? 'visible' : 'hidden';
     if (cue) updateSubDomText(cue);
     if (visible) {
-      const a = Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
+      const a = V.pptMode ? 1 : Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
       subs.style.opacity = String(clamp(a));
     } else {
       subs.style.opacity = '0';
