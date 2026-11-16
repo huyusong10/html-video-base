@@ -6,6 +6,8 @@
 
 它把视频变成一套可交互的网页：既能直接在浏览器里播放、点击和拖拽进度条，也能一键合成配音字幕并导出高清 MP4。业务仓库只需安装这一个 npm 包，就能共用播放器运行时、配音管线和打包工具，不用在每个项目里重复维护一套引擎代码。
 
+视频首页和目录由业务项目自行维护。预览服务直接读取项目文件；多视频打包会原样复制 `videos/` 根目录下的文件，没有项目首页时按视频路径访问。
+
 ---
 
 ## 为什么这样设计
@@ -169,7 +171,7 @@ V.scenes.push({
 分镜代码本身保持单语种编写，需要外语版本时，在 `video.config.js` 声明 `locales`，再新增 `locales/en.js` 用 `V.locale()` 做外挂翻译即可。支持 `npx html-video build demo --lang en` 独立合成外语配音字幕，并在网页端通过 `?lang=en` 或声音菜单实时切换。详细写法见 [多语言扩展指南](skills/html-video/references/i18n.md)。
 
 ### 4. 主题与播放器外观定制
-- **播放器行为**：通过 `V.config.ui` 或 `V.themeDefaults.ui` 调整控制栏隐显模式（默认 `overlay` 悬停自动显隐）、倍速档位 `rates`、图标风格 `iconPreset`（`'default' | 'pixel'`），以及音轨/断点偏好记忆（`persist` / `resume`）；也支持代码控制音轨：`V.setBgm()`、`V.setVoice()`、`V.setMuted()`、`V.clearSavedState()`。
+- **播放器行为**：通过 `V.config.ui` 或 `V.themeDefaults.ui` 调整控制栏隐显模式（默认 `overlay` 悬停自动显隐）、倍速档位 `rates`、图标风格 `iconPreset`（`'default' | 'pixel'`），以及音轨/断点偏好记忆（`persist` / `resume`）；也支持代码控制音轨：`V.setBgm()`、`V.setVoice()`、`V.setMuted()`、`V.clearSavedState()`。需要返回项目页面时，在 `V.config.homeUrl` 中填写地址；未配置时不显示返回按钮。
 - **CSS 变量槽位**：底层样式采用低权重选择器，业务 `style.css` 直接在 `:root` 覆盖变量即可换肤：
   - 视口与舞台：`--viewport-bg`、`--stage-shadow`、`--stage-bg-image`、`--font-sans`、`--font-smoothing`、`--gl-rendering`
   - 顶栏分段 `#hud`：`--hud-left/right/top/h`、`--hud-track-h/radius/bg`、`--hud-bar-bg`、`--hud-tick-w/bg`
@@ -202,7 +204,6 @@ V.scenes.push({
 | `html-video storyboard [id] [out.html] [--per-cue] [--pdf]` | 导出图文分镜审阅单 |
 | `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--no-bgm] [--no-cache]` | 按幕缓存增量导出高清 MP4 |
 | `html-video bundle [id ... \| --single \| --all] [--out dist]` | 打包免 `node_modules` 的纯静态站点 |
-| `html-video manifest` | 扫描 `videos/` 并更新 `videos/manifest.js` |
 
 ## 工程门禁（本仓开发）
 

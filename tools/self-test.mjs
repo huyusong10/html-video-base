@@ -11,6 +11,53 @@ import { stripSceneCalls } from './render.mjs';
 
 const TEST_ROOT = path.join(PKG_ROOT, '.runtime/self-test-proj');
 const CLI_BIN = path.join(PKG_ROOT, 'bin/html-video.mjs');
+const PROJECT_FILES = {
+  'index.html': '<!doctype html><title>Project home</title><link rel="stylesheet" href="home.css"><a href="demo/">Play</a><script src="catalog.js"></script>',
+  'manifest.js': 'window.VIDEO_MANIFEST = [{ id: "demo", title: "Project title", order: 42 }];\n',
+  'catalog.js': 'window.projectCatalog = true;\n',
+  'home.css': 'body { color: #234; }\n',
+};
+
+function writeProjectFiles() {
+  for (const [name, content] of Object.entries(PROJECT_FILES)) {
+    fs.writeFileSync(path.join(TEST_ROOT, 'videos', name), content, 'utf8');
+  }
+}
+
+async function verifyProjectFileOwnership() {
+  const { srv, port } = await startEphemeralVideoServer({ videosDir: path.join(TEST_ROOT, 'videos') });
+  try {
+    for (const route of ['/', '/index.html', '/manifest.js']) {
+      const res = await fetch(`http://127.0.0.1:${port}${route}`);
+      assert.equal(res.status, 404, `Missing project file ${route} must not be generated`);
+      await res.text();
+    }
+    writeProjectFiles();
+    for (const [name, content] of Object.entries(PROJECT_FILES)) {
+      const res = await fetch(`http://127.0.0.1:${port}/${name}`);
+      assert.equal(res.status, 200, `Project file ${name} must be served`);
+      assert.equal(await res.text(), content, `Project file ${name} must be served unchanged`);
+    }
+  } finally {
+    await new Promise(resolve => srv.close(resolve));
+  }
+}
+
+function verifyBundledProjectFiles(distDir) {
+  for (const [name, content] of Object.entries(PROJECT_FILES)) {
+    assert.equal(fs.readFileSync(path.join(TEST_ROOT, 'videos', name), 'utf8'), content, `init/build/mix must preserve project file ${name}`);
+    assert.equal(fs.readFileSync(path.join(distDir, name), 'utf8'), content, `bundle must copy project file ${name} unchanged`);
+  }
+  try {
+    for (const name of Object.keys(PROJECT_FILES)) fs.rmSync(path.join(TEST_ROOT, 'videos', name));
+    const bareDist = path.join(TEST_ROOT, 'dist-bare');
+    runCliCmd(['bundle', 'demo', '--out', bareDist]);
+    assert.equal(fs.existsSync(path.join(bareDist, 'index.html')), false, 'bundle must not generate a home page');
+    assert.equal(fs.existsSync(path.join(bareDist, 'manifest.js')), false, 'bundle must not generate a catalog');
+  } finally {
+    writeProjectFiles();
+  }
+}
 
 function runCliCmd(args) {
   const r = spawnSync(process.execPath, [CLI_BIN, ...args], {
@@ -108,6 +155,7 @@ function writeTestProjectFiles(videoDir) {
     'V.config = {',
     '  title: "微内核自检演示",',
     '  ppt: true,',
+    '  homeUrl: "../index.html",',
     '  lang: "zh-CN",',
     '  locales: ["zh-CN", "en", "zh-TW"],',
     '  width: 640, height: 360, fps: 10,',
@@ -562,10 +610,8 @@ async function verifyRound2EngineRegressions(page, port) {
 async function verifyBugfixRegressions(page, port) {
   const badUrlRes = await fetch(`http://127.0.0.1:${port}/%E0%A4%A`);
   assert.equal(badUrlRes.status, 400, 'Malformed URI path must return 400 without crashing HTTP server');
-  const liveManifestRes = await fetch(`http://127.0.0.1:${port}/manifest.js`);
-  assert.equal(liveManifestRes.status, 200, 'Dev server must synthesize virtual /manifest.js for hub index');
-  const liveManifestTxt = await liveManifestRes.text();
-  assert.ok(liveManifestTxt.includes('"demo"'), 'Virtual /manifest.js must include live video entry');
+  const manifestRes = await fetch(`http://127.0.0.1:${port}/manifest.js`);
+  assert.equal(await manifestRes.text(), PROJECT_FILES['manifest.js'], 'Dev server must preserve the project catalog');
 
   const rt = await page.evaluate(() => {
     const subs = document.getElementById('subs');
@@ -1300,12 +1346,26 @@ async function verifyPptOptInDefaultOff(browser, port) {
   await ctx.close();
 }
 
-async function assertHubHasPptLink(page, port) {
-  const mText = await (await fetch(`http://127.0.0.1:${port}/manifest.js`)).text();
-  assert.ok(mText.includes('"ppt": true'), 'manifest.js must export ppt: true for ppt-enabled videos');
-  await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'networkidle' });
-  const hasHubPpt = await page.evaluate(() => Boolean(document.querySelector('a[href="demo/?ppt=1"]')));
-  assert.equal(hasHubPpt, true, 'Hub page must render PPT 演示 link when manifest entry has ppt: true');
+async function verifyOptionalReturnLink(browser, port) {
+  const ctx = await browser.newContext();
+  try {
+    const page = await ctx.newPage();
+    for (const mode of ['', '?ppt=1']) {
+      await page.goto(`http://127.0.0.1:${port}/demo/${mode}`, { waitUntil: 'networkidle' });
+      assert.equal(await page.locator('.ctrl-home').getAttribute('href'), '../index.html', 'Return link must use the project URL');
+    }
+    await page.route('**/demo/video.config.js', async route => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace('homeUrl: "../index.html",', '');
+      await route.fulfill({ response, body });
+    });
+    for (const mode of ['', '?ppt=1']) {
+      await page.goto(`http://127.0.0.1:${port}/demo/${mode}`, { waitUntil: 'networkidle' });
+      assert.equal(await page.locator('.ctrl-home').count(), 0, 'Player must omit return links when homeUrl is absent');
+    }
+  } finally {
+    await ctx.close();
+  }
 }
 
 async function verifyPptNavigationSteps(page) {
@@ -1365,7 +1425,6 @@ async function verifyPptModeSwitch(page) {
 }
 
 async function verifyPptDeckMode(page, port) {
-  await assertHubHasPptLink(page, port);
   const mediaReqs = [];
   const onReq = req => { if (/\.m4a(\?|$)/i.test(req.url())) mediaReqs.push(req.url()); };
   page.on('request', onReq);
@@ -1495,6 +1554,7 @@ async function verifyBrowserCapabilities(videoDir) {
     await verifyRuntimeSetLangHotSwitch(page, port);
     await verifySingleLangOptOutSafety(browser, port);
     await verifyPptOptInDefaultOff(browser, port);
+    await verifyOptionalReturnLink(browser, port);
     await verifyAutoplayBlockedUnlock(browser, port);
     await page.close();
   } finally {
@@ -1597,12 +1657,14 @@ async function main() {
   fs.mkdirSync(path.join(TEST_ROOT, 'videos'), { recursive: true });
 
   try {
+    await verifyProjectFileOwnership();
     verifyRound3UnitRegressions();
     verifyRound5SoundAndI18nUnit();
     console.log('[SelfTest 1/5] Scaffolding isolated video project (zero local videos/base)...');
     runCliCmd(['init', 'demo', '--title', '微内核自检演示', '--skill']);
     assert.equal(fs.existsSync(path.join(TEST_ROOT, 'videos/base')), false, 'videos/base must NOT exist locally');
     assert.equal(fs.existsSync(path.join(TEST_ROOT, '.agents/skills/html-video/SKILL.md')), true, '--skill must export SKILL.md');
+    assert.ok(runCliCmd(['manifest']).startsWith('html-video CLI'), 'Removed manifest command must fall back to CLI help');
 
     const videoDir = path.join(TEST_ROOT, 'videos/demo');
     createSampleMp4(resolveFfmpeg(PKG_ROOT), path.join(videoDir, 'assets/clip.mp4'));
@@ -1648,6 +1710,7 @@ async function main() {
     runCliCmd(['bundle', 'demo', '--out', distDir]);
     assert.ok(fs.existsSync(path.join(distDir, 'base/js/engine.js')), 'Bundled base/js/engine.js should exist');
     assert.ok(fs.existsSync(path.join(distDir, 'demo/index.html')), 'Bundled demo/index.html should exist');
+    verifyBundledProjectFiles(distDir);
 
     const singleDir = path.join(TEST_ROOT, 'dist-single');
     runCliCmd(['bundle', 'demo', '--single', '--out', singleDir]);

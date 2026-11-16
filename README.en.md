@@ -6,6 +6,8 @@ A lightweight web-native video engine and multi-TTS rendering toolchain.
 
 With `html-video-base`, your videos are interactive web pages built with HTML, CSS, and JavaScript: viewers can scrub, click, and inspect them directly in the browser, and you can also synthesize voiceovers, generate subtitles, and render lossless MP4s from the exact same source. Consumer repositories only need this single npm dependency—no need to copy runtime files or build scripts across projects.
 
+Each consumer project maintains its own landing page and catalog. The preview server serves project files directly, and multi-video bundles copy files at the root of `videos/` unchanged. Without a project landing page, open a video's URL directly.
+
 ---
 
 ## Why It Works This Way
@@ -167,7 +169,7 @@ Once the core workflow is up and running, explore these built-in capabilities as
 Keep your main scene scripts clean in one primary language. Add extra languages by listing `locales` in `video.config.js` and adding `locales/<lang>.js` with `V.locale()`. Use `npx html-video build demo --lang en` to generate separate localized audio/subtitles, and switch live via `?lang=en` or the player audio menu. See [i18n.md](skills/html-video/references/i18n.md) (ZH) for details.
 
 ### 4. Theme & Player Customization
-- **Player behavior**: Configure `V.config.ui` or `V.themeDefaults.ui` for control bar behavior (defaults to `controlsMode: 'overlay'`), playback `rates`, `iconPreset` (`'default' | 'pixel'`), and storage options (`persist`, `resume`). Control stems programmatically with `V.setBgm()`, `V.setVoice()`, `V.setMuted()`, and `V.clearSavedState()`.
+- **Player behavior**: Configure `V.config.ui` or `V.themeDefaults.ui` for control bar behavior (defaults to `controlsMode: 'overlay'`), playback `rates`, `iconPreset` (`'default' | 'pixel'`), and storage options (`persist`, `resume`). Control stems programmatically with `V.setBgm()`, `V.setVoice()`, `V.setMuted()`, and `V.clearSavedState()`. Set `V.config.homeUrl` to add a return link to your project page; the button is hidden when no URL is configured.
 - **CSS theme variables**: Base selectors use low specificity, so overriding `:root` variables in `style.css` restyles the entire player:
   - Viewport & stage: `--viewport-bg`, `--stage-shadow`, `--stage-bg-image`, `--font-sans`, `--font-smoothing`, `--gl-rendering`
   - Top segment HUD (`#hud`): `--hud-left/right/top/h`, `--hud-track-h/radius/bg`, `--hud-bar-bg`, `--hud-tick-w/bg`
@@ -200,7 +202,6 @@ All manuals and engineering specifications are bundled inside `node_modules/html
 | `html-video storyboard [id] [out.html] [--per-cue] [--pdf]` | Export single-file visual storyboard review sheet |
 | `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--no-bgm] [--no-cache]` | Render 1080p MP4 with incremental scene caching |
 | `html-video bundle [id ... \| --single \| --all] [--out dist]` | Bundle standalone static site without `node_modules` |
-| `html-video manifest` | Scan `videos/` and sync `videos/manifest.js` |
 
 ## Quality Gates (Repo Development)
 

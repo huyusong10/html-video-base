@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import {
   ROOT, PKG_ROOT, TOOLS_DIR, VIDEOS_DIR, TEMPLATES_DIR,
   listVideoIds, resolvePython, loadVideoSandbox, resolveLangMediaPaths, getSandboxCfg,
-  normalizeCliArgs, buildVideoManifestItem,
+  normalizeCliArgs,
 } from './lib/paths.mjs';
 
 function run(bin, args, label, extraEnv = {}) {
@@ -61,18 +61,6 @@ function copyTemplateDir(src, dest, replacements) {
   }
 }
 
-function syncManifest() {
-  const manifestPath = path.join(VIDEOS_DIR, 'manifest.js');
-  if (!fs.existsSync(manifestPath)) return;
-  const items = listVideoIds().map(id => buildVideoManifestItem(ROOT, id));
-  const content = [
-    '/* 视频中心清单（由 html-video 自动同步，也可手动编辑） */',
-    'window.VIDEO_MANIFEST = ' + JSON.stringify(items, null, 2) + ';',
-    '',
-  ].join('\n');
-  fs.writeFileSync(manifestPath, content, 'utf8');
-}
-
 function resolveAspectDims(aspect) {
   if (aspect === '9:16') return [1080, 1920];
   if (aspect === '1:1') return [1080, 1080];
@@ -114,7 +102,6 @@ function cmdInit(args) {
     '__STAGE_HEIGHT__': String(height),
   });
   if (args.includes('--skill')) exportSkillDoc(null);
-  syncManifest();
   console.log(`✅ Created new video at videos/${videoId} (${width}x${height})`);
   console.log(`  Preview draft: npx html-video serve -> http://localhost:8765/${videoId}/?dev=1`);
   console.log(`  Build audio  : npx html-video build ${videoId}`);
@@ -204,7 +191,6 @@ function cmdMix(args) {
   if (args.includes('--strict')) verifyArgs.push('--strict');
   run(process.execPath, verifyArgs, `[3/3] Stamping bakedLayout & running audio-visual sync verification...`, mixEnv);
 
-  syncManifest();
   console.log(`Offline remix complete for '${videoId}${lang ? ':' + lang : ''}'.`);
 }
 
@@ -246,7 +232,6 @@ function cmdBuild(args) {
   if (args.includes('--strict')) verifyArgs.push('--strict');
   run(process.execPath, verifyArgs, `[4/4] Stamping bakedLayout & running audio-visual sync verification...`, ttsEnv);
 
-  syncManifest();
   console.log(`Build complete for '${videoId}${lang ? ':' + lang : ''}'.`);
 }
 
@@ -307,7 +292,6 @@ function printHelp() {
     '  html-video storyboard [video-id] [out.html] [--per-cue] [--pdf] [--lang en]',
     '  html-video render [video-id] [output.mp4] [--workers N] [--scene K] [--range t0:t1] [--fps N] [--lang en] [--no-bgm] [--no-cache] [--no-frame-reuse]',
     '  html-video bundle [video-id ... | --single | --all] [--out dist]',
-    '  html-video manifest',
     '',
     `Docs: npx html-video docs | ${path.join(PKG_ROOT, 'README.md')}`,
   ].join('\n'));
@@ -326,7 +310,6 @@ const COMMANDS = {
   storyboard: r => run(process.execPath, [path.join(TOOLS_DIR, 'storyboard.mjs'), ...r]),
   render: r => run(process.execPath, [path.join(TOOLS_DIR, 'render.mjs'), ...r]),
   bundle: r => run(process.execPath, [path.join(TOOLS_DIR, 'bundle.mjs'), ...r]),
-  manifest: () => { syncManifest(); console.log('Synced videos/manifest.js'); },
   'check-cc': () => run(process.execPath, [path.join(TOOLS_DIR, 'check-complexity.mjs')]),
 };
 

@@ -3414,9 +3414,9 @@
 
     function buildControlsBar(cfg, uiCfg) {
       const homeTitle = cfg.homeLabel || uiText('home');
-      const homeLink = cfg.homeUrl === false
+      const homeLink = !cfg.homeUrl
         ? null
-        : h('a', { class: 'ctrl-home ctrl-icon-btn', href: cfg.homeUrl || '../', title: homeTitle, 'aria-label': homeTitle }, makeCtrlIcon(uiCfg.icons.home));
+        : h('a', { class: 'ctrl-home ctrl-icon-btn', href: cfg.homeUrl, title: homeTitle, 'aria-label': homeTitle }, makeCtrlIcon(uiCfg.icons.home));
       const webLabel = uiText('webEnter');
       const webBtn = uiCfg.webFull
         ? h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'webfull', title: webLabel, 'aria-label': webLabel }, makeCtrlIcon(uiCfg.icons.webEnter))
@@ -3676,9 +3676,9 @@
 
   function buildControlsBar(cfg, uiCfg) {
     const homeTitle = cfg.homeLabel || uiText('home');
-    const homeLink = cfg.homeUrl === false
+    const homeLink = !cfg.homeUrl
       ? null
-      : h('a', { class: 'ctrl-home ctrl-icon-btn', href: cfg.homeUrl || '../', title: homeTitle, 'aria-label': homeTitle }, makeCtrlIcon(uiCfg.icons.home));
+      : h('a', { class: 'ctrl-home ctrl-icon-btn', href: cfg.homeUrl, title: homeTitle, 'aria-label': homeTitle }, makeCtrlIcon(uiCfg.icons.home));
     const rateLabel = uiText('rate', { rate: '1.0x' });
     const rateWrap = uiCfg.rate
       ? h('div', { class: 'rate-wrap' },

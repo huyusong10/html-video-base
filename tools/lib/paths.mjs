@@ -390,27 +390,6 @@ export function normalizeCliArgs(argv = []) {
   return out;
 }
 
-export function buildVideoManifestItem(projectRoot, id) {
-  try {
-    const { sandbox } = loadVideoSandbox(projectRoot, id, { ignoreBaked: false, requireTimings: false });
-    const cfg = getSandboxCfg(sandbox.V);
-    return {
-      id,
-      title: cfg.title || id,
-      subtitle: cfg.subtitle || cfg.description || '',
-      description: cfg.description || cfg.subtitle || '',
-      duration: Math.round((sandbox.V.duration || 0) * 10) / 10,
-      scenes: (sandbox.V.scenes || []).length,
-      width: cfg.width || 1920,
-      height: cfg.height || 1080,
-      ppt: Boolean(cfg.ppt),
-      path: `./${id}/index.html`,
-    };
-  } catch {
-    return { id, title: id, subtitle: '', description: '', duration: 0, scenes: 0, width: 1920, height: 1080, path: `./${id}/index.html` };
-  }
-}
-
 export function probeSceneAnchors(sandbox, videoClipsOut = null) {
   const V = sandbox.V;
   V.__anchorErrors = [];

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   ROOT, PKG_ROOT, VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR,
-  listVideoIds, normalizeCliArgs, buildVideoManifestItem,
+  listVideoIds, normalizeCliArgs,
 } from './lib/paths.mjs';
 
 function parseBundleArgs(rawArgv) {
@@ -192,20 +192,12 @@ export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
     fs.cpSync(srcVideo, path.join(outDir, id), { recursive: true, force: true });
   }
 
-  const localHub = path.join(VIDEOS_DIR, 'index.html');
-  const hubSrc = fs.existsSync(localHub) ? localHub : path.join(TEMPLATES_DIR, 'hub/index.html');
-  copyIfExists(hubSrc, path.join(outDir, 'index.html'));
-
-  const manifestItems = targets.map(id => buildVideoManifestItem(ROOT, id));
-  const manifestCode = `/* 由 html-video bundle 自动生成 */\nwindow.VIDEO_MANIFEST = ${JSON.stringify(manifestCodeSafe(manifestItems), null, 2)};\n`;
-  fs.writeFileSync(path.join(outDir, 'manifest.js'), manifestCode, 'utf8');
+  for (const entry of fs.readdirSync(VIDEOS_DIR, { withFileTypes: true })) {
+    if (entry.isFile()) copyIfExists(path.join(VIDEOS_DIR, entry.name), path.join(outDir, entry.name));
+  }
 
   console.log(`✅ Bundled ${targets.length} video(s) + standalone runtime -> ${outDir}`);
   return outDir;
-}
-
-function manifestCodeSafe(items) {
-  return items;
 }
 
 const isDirectRun = process.argv[1] && process.argv[1].endsWith('bundle.mjs');

@@ -2,7 +2,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR, listVideoIds, buildVideoManifestItem } from './paths.mjs';
+import { VIDEOS_DIR, RUNTIME_BASE_DIR } from './paths.mjs';
 
 export const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -47,14 +47,6 @@ function pipeFileSafe(res, fp, opts) {
   stream.pipe(res);
 }
 
-function serveVirtualManifest(res, videosDir) {
-  const projectRoot = path.dirname(path.resolve(videosDir));
-  const items = listVideoIds(videosDir).map(id => buildVideoManifestItem(projectRoot, id));
-  const body = `window.VIDEO_MANIFEST = ${JSON.stringify(items, null, 2)};\n`;
-  res.writeHead(200, { 'Content-Type': MIME['.js'], 'Cache-Control': 'no-cache' });
-  res.end(body);
-}
-
 function resolveVirtualFile(pathname, videosDir) {
   let rel = pathname;
   if (rel.endsWith('/')) rel += 'index.html';
@@ -68,10 +60,6 @@ function resolveVirtualFile(pathname, videosDir) {
     const sub = normRel.slice(4).replace(/^[/\\]+/, '');
     const pkgBasePath = path.join(RUNTIME_BASE_DIR, sub);
     if (isInsideDir(pkgBasePath, RUNTIME_BASE_DIR) && fs.existsSync(pkgBasePath)) return pkgBasePath;
-  }
-  if (normRel === 'index.html') {
-    const hubFallback = path.join(TEMPLATES_DIR, 'hub/index.html');
-    if (fs.existsSync(hubFallback)) return hubFallback;
   }
   return null;
 }
@@ -162,7 +150,6 @@ export function createVideoHttpServer({ videosDir = VIDEOS_DIR, watch = false } 
     if (!decodedPath) { res.writeHead(400).end('Bad Request'); return; }
     const fp = resolveVirtualFile(decodedPath, videosDir);
     if (!fp) {
-      if (decodedPath === '/manifest.js') { serveVirtualManifest(res, videosDir); return; }
       res.writeHead(404).end('Not Found');
       return;
     }

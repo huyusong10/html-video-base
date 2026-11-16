@@ -37,7 +37,7 @@ project-root/
 | `npx html-video verify [id] [--stamp-baked]` | 校验语义词锚、字幕分段与物理双音轨时长零漂移 |
 | `npx html-video audit [id] [--screenshots .runtime/audit]` | 无头浏览器巡检破损图、越界、字幕遮挡、兄弟卡片压盖、小字号与 `f(t)` 幂等性 |
 | `npx html-video render <id> [out.mp4] [--scene K] [--no-bgm]` | 按幕增量缓存 + 静止帧复用导出 1080p MP4（`--no-bgm` 可导出纯解说无配乐版） |
-| `npx html-video bundle <id> --single --out dist` | 打包免依赖静态目录（`--all` 可带多视频索引门户一起打包） |
+| `npx html-video bundle <id> --single --out dist` | 打包免依赖静态目录（`--all` 打包全部视频及项目自有文件） |
 
 ## 3. 纯函数分镜与时间轴契约
 
@@ -72,12 +72,12 @@ V.scene({
   - `controlsMode: 'overlay' | 'docked'`（默认为 `'overlay'`：鼠标移入视频或在画面内移动立即唤醒底栏，在画面上静止 `idleHideDelay: 1500` 毫秒自动隐退，移出视频窗口 `leaveHideDelay: 220` 毫秒速隐，悬停底栏时保持常亮，全屏静止同步隐鼠；悬停进度条实时跟随 `.track-tip` 预览章节与时间；按键盘快进/静音/切章仅在右上角闪出 `#osd` 胶囊，不弹底栏顶跳字幕）
   - `persist: true`（默认按路径记忆倍速、音量、字幕、双音轨开关等观看偏好）、`resume: false`（断点续播默认关闭，刷新默认从头播放；长时培训课程可显式设 `resume: true`，超过 `resumeMinSec: 5` 秒刷新自动续播）、`livePause: true`、`osd: true`、`chapterMarks: true`、`hud: true`、`rate: true`、`webFull: true`、`iconPreset: 'default' | 'pixel'`
 - **全图标控制栏与业务图标覆盖规范**：
-  - 控制栏左右按钮默认统一使用 `32×30` 紧凑矢量图标（返回主界面 `home`、播放/暂停/重播 `play`/`pause`/`replay`、章节箭头 `chapCaret`、倍速 `rate` 在 `1.0x` 显示仪表图标并在非 `1.0x` 动态切换为紧凑数字、字幕 `subsOn`/`subsOff`、声音多态 `volumeOn`/`volumeLow`/`volumeVoice`/`volumeBgm`/`volumeMute`、全屏 `webEnter`/`webExit`/`fullEnter`/`fullExit`）。
+  - 控制栏左右按钮默认统一使用 `32×30` 紧凑矢量图标（播放/暂停/重播 `play`/`pause`/`replay`、章节箭头 `chapCaret`、倍速 `rate` 在 `1.0x` 显示仪表图标并在非 `1.0x` 动态切换为紧凑数字、字幕 `subsOn`/`subsOff`、声音多态 `volumeOn`/`volumeLow`/`volumeVoice`/`volumeBgm`/`volumeMute`、全屏 `webEnter`/`webExit`/`fullEnter`/`fullExit`）。需要返回项目页面时显式设置 `homeUrl`，再显示 `home` 图标。
   - **业务新增按钮建议一律用图标**：调用 `V.control({ id: 'xray', position: 'right', title: 'X-Ray 透视', icon: ['M...'], onClick(e, V) {} })`，不要塞多字中文撑宽工具栏。
   - **覆盖默认图标**：可通过 `V.icons({ play: '...', subsOn: '...' })` 或 `V.config.ui.icons` 按需覆盖任意内置键名；像素风主题可直接设 `ui: { iconPreset: 'pixel' }` 并加 `--ctrl-ico-render: crispEdges`。图标值支持 `16×16` `<path d>` 数组、内联 SVG 字符串、完整 `<svg>` 字符串或 `(h, V) => Node` 渲染函数。
 - **内置检索、深链、音量调节、分幕配乐闪避与自动播放解锁**：按 `/` 或 `Ctrl+K` 全文检索台词与章节跳转；点击时间码复制当前 `?t=` 深链；点击声音图标打开上拉面板拖动 `0%–100%` 音量滑块（亦可在声音图标上滚轮或按 `↑`/`↓` 键按 `5%` 步进调音并闪出 `#osd` 提示，调用 `V.setVolume(v)` 编程设置），有配乐时可独立开关 BGM（`V.setBgm(on)` / `V.setVoice(on)`，按 `B` 开关配乐，按 `M` 静音）；浏览器拦截有声自动播放时声音图标自动切为高亮待开启态，点一下即刻解锁发声；单幕可设 `bgm: false | 0.25 | { volume: 0.25 }` 在混音期做 `0.4s` 平滑配乐静默或压低。
 - **多语言为纯可选项（默认严禁预埋）**：默认一律按单语种直写自然中文 DOM、台词与词锚；用户未明确提出多语言需求时，严禁在业务代码或配置中预埋 `locales`、`x.t`、`data-i18n` 或拆分多语言字典。后续确需增加外语版本时，读取 [references/i18n.md](references/i18n.md)，在外部 `locales/<lang>.js` 中用原文直映（`texts`、`lines`、`anchors`）无侵入扩展，无需返工修改分镜源码。
-- **可选 PPT 人工讲解模式（`ppt: true` / `?ppt=1`）**：需要兼顾线下人工讲课时在配置声明 `ppt: true`，首页会在播放按钮旁提供 `PPT 演示` 入口进入 `?ppt=1`，视频与 PPT 控制栏右侧均提供低频一键互切按钮（`?ppt=1&scene=N` 与 `?scene=N` 干净跳转，保持原有视频播放体验零侵入）；PPT 模式下自动静音且不加载音轨、隐藏默认导览挂件、保留 `x.sceneClock` 驱动的背景循环动效与全部画布交互，默认按“1 幕 = 1 页定格终态”翻页（仅有多组互斥画板的分镜通过 `pptFrames: [t1, t2]` 展开为扁平多页），支持工具栏按钮、方向键/翻页笔与鼠标滚轮翻页（画布点击专供业务交互），可按需用 `pptSkip: true` 跳过介绍句或 `pptKeep: true` 保留模特类静态示范角色，点击底部字幕按钮可把 `#subs` 当整幕提词器。
+- **可选 PPT 人工讲解模式（`ppt: true` / `?ppt=1`）**：需要兼顾线下人工讲课时在配置声明 `ppt: true`，通过视频地址的 `?ppt=1` 进入演示，视频与 PPT 控制栏右侧均提供低频一键互切按钮（`?ppt=1&scene=N` 与 `?scene=N` 干净跳转，保持原有视频播放体验零侵入）；PPT 模式下自动静音且不加载音轨、隐藏默认导览挂件、保留 `x.sceneClock` 驱动的背景循环动效与全部画布交互，默认按“1 幕 = 1 页定格终态”翻页（仅有多组互斥画板的分镜通过 `pptFrames: [t1, t2]` 展开为扁平多页），支持工具栏按钮、方向键/翻页笔与鼠标滚轮翻页（画布点击专供业务交互），可按需用 `pptSkip: true` 跳过介绍句或 `pptKeep: true` 保留模特类静态示范角色，点击底部字幕按钮可把 `#subs` 当整幕提词器。
 
 ## 5. 核心 CSS 主题变量表
 
