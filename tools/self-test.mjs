@@ -2581,15 +2581,25 @@ async function verifyBrowserCapabilities(videoDir) {
       await window.V.seekToAsync(0.6);
       await window.V.seekToAsync(0.9);
     });
-    const recState = await page.evaluate(() => ({
-      pluginInstalled: window.__pluginInstalled,
-      hasPreset: Boolean(document.querySelector('.test-preset-badge')),
-      hasControl: Boolean(document.querySelector('[data-custom-ctrl="test-btn"]')),
-      maxEnergy: window.__maxLayerEnergy,
-      cpActiveInRecord: document.getElementById('checkpoint-overlay')?.classList.contains('is-open') || false,
-      ptrNeutral: window.V.pointer.inside === false && window.V.pointer.nx === 0 && window.V.pointer.presence === 0,
-      clockLocked: window.__video.getSyncState().clock === window.__video.getSyncState().now,
-    }));
+    const recState = await page.evaluate(() => {
+      const stage = document.getElementById('stage');
+      const guide = document.createElement('div');
+      guide.style.cssText = 'position:absolute;bottom:calc(30px + var(--ctrl-dodge, 0px));width:40px;height:40px';
+      stage.appendChild(guide);
+      const stageRect = stage.getBoundingClientRect();
+      const overlayBottom = (stageRect.bottom - guide.getBoundingClientRect().bottom) / (stageRect.height / V.stageHeight);
+      guide.remove();
+      return {
+        overlayBottom,
+        pluginInstalled: window.__pluginInstalled,
+        hasPreset: Boolean(document.querySelector('.test-preset-badge')),
+        hasControl: Boolean(document.querySelector('[data-custom-ctrl="test-btn"]')),
+        maxEnergy: window.__maxLayerEnergy,
+        cpActiveInRecord: document.getElementById('checkpoint-overlay')?.classList.contains('is-open') || false,
+        ptrNeutral: window.V.pointer.inside === false && window.V.pointer.nx === 0 && window.V.pointer.presence === 0,
+        clockLocked: window.__video.getSyncState().clock === window.__video.getSyncState().now,
+      };
+    });
     assert.equal(recState.pluginInstalled, true, 'Plugin should install');
     assert.equal(recState.hasPreset, true, 'Preset should render');
     assert.equal(recState.hasControl, true, 'Custom control should mount');
@@ -2597,6 +2607,7 @@ async function verifyBrowserCapabilities(videoDir) {
     assert.equal(recState.cpActiveInRecord, false, 'Record mode must auto-bypass checkpoints');
     assert.equal(recState.ptrNeutral, true, 'Record mode must lock V.pointer to neutral center');
     assert.equal(recState.clockLocked, true, 'Record mode must lock ambient clock === narrative now');
+    assert.ok(Math.abs(recState.overlayBottom - 30) < 0.01, 'Recorded project overlays must not inherit hidden control-bar spacing');
 
     await page.goto(`http://127.0.0.1:${port}/demo/?lang=en&record=1`, { waitUntil: 'networkidle' });
     const enInfo = await page.evaluate(() => ({

@@ -468,8 +468,8 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 :is(body.ctrl-overlay, body.web-full, body.os-full) #controls:has(.chap-search:focus) {
   opacity: 1;
 }
-:is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing):not(.ppt-mode), .ui-active, .scrubbing, .menu-open) #stage,
-:is(body.ctrl-overlay, body.web-full, body.os-full):has(#controls .chap-search:focus) #stage {
+:is(body.ctrl-overlay, body.web-full, body.os-full):not(.record):is(:not(.playing):not(.ppt-mode), .ui-active, .scrubbing, .menu-open) #stage,
+:is(body.ctrl-overlay, body.web-full, body.os-full):not(.record):has(#controls .chap-search:focus) #stage {
   --ctrl-dodge: var(--ctrl-overlap, 52px);
 }
 :is(body.web-full, body.os-full).playing:not(.ui-active, .scrubbing, .menu-open) #viewport {
