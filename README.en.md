@@ -119,6 +119,8 @@ When your scenes are ready to ship:
    npx html-video bundle --all --out dist
    ```
 
+   Rendering keeps the per-scene cache. Long uncached scenes are split into temporary chunks, rendered in parallel, then joined without re-encoding into one cache file per scene. The default uses the available logical CPUs to allocate up to eight workers and budget JPEG decoding and H.264 encoding threads per worker. Set `--workers N` or `WORKERS=N` to request concurrency; the CPU budget and pending work limit the actual count.
+
 ---
 
 ## Recommended `package.json` Scripts

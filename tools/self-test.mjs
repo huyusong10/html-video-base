@@ -2953,6 +2953,13 @@ function verifyRenderCacheIdentityRegressions() {
   assert.equal(r.status, 0, `Render cache identity regressions failed:\n${r.stdout}\n${r.stderr}`);
 }
 
+function verifyRenderParallelRegressions(integration = false) {
+  const args = [path.join(PKG_ROOT, 'tools/test-render-parallel.mjs')];
+  if (integration) args.push(path.join(TEST_ROOT, 'render-parallel'));
+  const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 180000 });
+  assert.equal(r.status, 0, `Parallel rendering regressions failed:\n${r.stdout}\n${r.stderr}`);
+}
+
 function verifyRenderEncoderExitRegression() {
   const r = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools/test-render-encoder.mjs'), path.join(TEST_ROOT, 'render-encoder-exit')], { encoding: 'utf8', timeout: 130000 });
   assert.equal(r.status, 0, `Early encoder exit regression failed:\n${r.stdout}\n${r.stderr}`);
@@ -3142,6 +3149,7 @@ async function runQuickChecks() {
   verifySpokenTextRules();
   verifyTimingOutputRegressions();
   verifyRenderCacheIdentityRegressions();
+  verifyRenderParallelRegressions();
   verifyLargeAssetCacheInvalidation();
   verifyNestedStylesheetCacheInvalidation();
   verifyNestedVisualAssetCacheInvalidation();
@@ -3195,6 +3203,7 @@ async function main() {
     await verifyBrowserCapabilities(videoDir);
 
     console.log('[Full 4/5] Cold render, warm cache, style invalidation and voice-only output...');
+    verifyRenderParallelRegressions(true);
     const outMp4 = path.join(TEST_ROOT, 'demo.mp4');
     const out1 = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
     assert.ok(fs.existsSync(outMp4), 'Rendered MP4 should exist');

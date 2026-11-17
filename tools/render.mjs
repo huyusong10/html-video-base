@@ -404,6 +404,44 @@ function buildUncachedChunks(totalFrames, workerCount, tmpDir) {
   return chunks;
 }
 
+export function buildRenderTasks(misses, workerCount, fps, tmpDir) {
+  const totalFrames = misses.reduce((sum, segment) => sum + segment.f1 - segment.f0, 0);
+  const targetFrames = Math.max(Math.ceil(fps * 10), Math.ceil(totalFrames / (workerCount * 2)));
+  const groups = misses.map(segment => {
+    const length = segment.f1 - segment.f0;
+    const count = workerCount > 1 ? Math.ceil(length / targetFrames) : 1;
+    const parts = Array.from({ length: count }, (_, index) => ({
+      ...segment,
+      f0: segment.f0 + Math.floor(length * index / count),
+      f1: segment.f0 + Math.floor(length * (index + 1) / count),
+      partPath: count === 1 ? segment.partPath : path.join(tmpDir, `scene-${segment.idx}-part-${index}.mp4`),
+    }));
+    return { segment, parts };
+  });
+  const jobs = groups.flatMap(group => group.parts).sort((a, b) => (b.f1 - b.f0) - (a.f1 - a.f0));
+  return { groups, jobs };
+}
+
+function writeConcatList(listFile, segments) {
+  const body = segments.map(s => `file '${s.partPath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n') + '\n';
+  fs.writeFileSync(listFile, body, 'utf8');
+}
+
+async function mergeRenderParts(groups, ffmpegBin, tmpDir) {
+  for (const { segment, parts } of groups) {
+    if (parts.length === 1) continue;
+    const listFile = path.join(tmpDir, `scene-${segment.idx}-concat.txt`);
+    const tmpOut = `${segment.partPath}.${process.pid}.tmp.mp4`;
+    writeConcatList(listFile, parts);
+    try {
+      await runFfmpeg(ffmpegBin, ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', tmpOut]);
+      fs.renameSync(tmpOut, segment.partPath);
+    } finally {
+      fs.rmSync(tmpOut, { force: true });
+    }
+  }
+}
+
 function runFfmpeg(bin, args) {
   return new Promise((res, rej) => {
     const p = spawn(bin, args, { stdio: ['ignore', 'inherit', 'inherit'] });
@@ -592,12 +630,12 @@ async function writeSegmentFrames(page, input, fps, startSec, seg, reuseFrames, 
   }
 }
 
-async function renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, reuseFrames, onFrame) {
+async function renderSegmentToMp4(page, ffmpegBin, fps, encoderThreads, startSec, seg, reuseFrames, onFrame) {
   const tmpOut = `${seg.partPath}.${process.pid}.tmp.mp4`;
   const ffArgs = [
     '-y', '-loglevel', 'error',
-    '-f', 'image2pipe', '-vcodec', 'mjpeg', '-framerate', String(fps), '-i', '-',
-    '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
+    '-threads', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-framerate', String(fps), '-i', '-',
+    '-c:v', 'libx264', '-threads', String(encoderThreads), '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
     tmpOut,
   ];
   let ff;
@@ -619,11 +657,16 @@ async function renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, reuseFram
   }
 }
 
-async function renderMissingSegments({ misses, workerCount, videoId, W, H, fps, lang, startSec, ffmpegBin, tStartWall, reuseFrames }) {
+async function renderMissingSegments({ misses, workerCount, cpuBudget, tmpDir, videoId, W, H, fps, lang, startSec, ffmpegBin, tStartWall, reuseFrames }) {
   if (!misses.length) return;
   const totalMissFrames = misses.reduce((a, s) => a + (s.f1 - s.f0), 0);
-  const poolSize = Math.min(misses.length, workerCount);
-  const queue = misses.slice();
+  const { groups, jobs } = buildRenderTasks(misses, workerCount, fps, tmpDir);
+  const poolSize = Math.min(jobs.length, workerCount);
+  // 每个任务为浏览器渲染和 JPEG 解码各留一份 CPU 预算，其余分给编码器。
+  const encoderThreads = Math.max(1, Math.floor(cpuBudget / poolSize) - 2);
+  const queue = jobs.slice();
+  fs.mkdirSync(tmpDir, { recursive: true });
+  console.log(`  Parallel render: ${poolSize} workers, ${encoderThreads} encoder threads/worker, ${jobs.length} chunks (${misses.length} uncached segments, CPU budget ${cpuBudget})`);
   let doneFrames = 0;
   let reusedFrames = 0;
 
@@ -647,14 +690,26 @@ async function renderMissingSegments({ misses, workerCount, videoId, W, H, fps, 
   };
 
   try {
+    let firstError = null;
     await Promise.all(Array.from({ length: poolSize }, async () => {
-      const page = await openRenderPage(browser, port, videoId, W, H, lang);
-      while (queue.length > 0) {
-        const seg = queue.shift();
-        if (seg) await renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, reuseFrames, onFrame);
+      let page;
+      try {
+        page = await openRenderPage(browser, port, videoId, W, H, lang);
+        while (queue.length > 0 && !firstError) {
+          const seg = queue.shift();
+          if (seg) await renderSegmentToMp4(page, ffmpegBin, fps, encoderThreads, startSec, seg, reuseFrames, onFrame);
+        }
+      } catch (error) {
+        if (!firstError) {
+          firstError = error;
+          await browser.close().catch(() => {});
+        }
+      } finally {
+        await page?.close().catch(() => {});
       }
-      await page.close();
     }));
+    if (firstError) throw firstError;
+    await mergeRenderParts(groups, ffmpegBin, tmpDir);
     process.stdout.write('\n');
   } finally {
     await browser.close();
@@ -708,8 +763,7 @@ async function stitchSegmentsAndAudio(spec) {
   fs.mkdirSync(tmpDir, { recursive: true });
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   const listFile = path.join(tmpDir, 'concat.txt');
-  const listBody = segments.map(s => `file '${s.partPath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n') + '\n';
-  fs.writeFileSync(listFile, listBody, 'utf8');
+  writeConcatList(listFile, segments);
 
   const muxArgs = ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listFile];
   if (hasAudio && hasBgm) {
@@ -738,10 +792,12 @@ function resolveTargetVideoId(pos) {
   return firstIsMp4 ? defaultVideo : (pos[0] || defaultVideo);
 }
 
-function resolveWorkerCount(totalFrames, opts) {
-  const autoWorkers = totalFrames >= 120 ? Math.min(4, Math.max(1, os.cpus().length - 1)) : 1;
+export function resolveRenderConcurrency(totalFrames, opts, cpuCount = os.availableParallelism?.() || os.cpus().length) {
+  const cpuBudget = Math.max(1, cpuCount - 1);
+  const maxWorkers = Math.max(1, Math.floor(cpuBudget / 3));
+  const autoWorkers = totalFrames >= 120 ? Math.min(8, maxWorkers) : 1;
   const envWorkers = process.env.WORKERS ? Math.max(1, parseInt(process.env.WORKERS, 10) || 1) : null;
-  return Math.min(totalFrames, opts.workers || envWorkers || autoWorkers);
+  return { workerCount: Math.min(totalFrames, maxWorkers, opts.workers || envWorkers || autoWorkers), cpuBudget };
 }
 
 function describeRenderAudio(hasAudio, hasBgm) {
@@ -788,7 +844,7 @@ async function runRenderCli() {
   const renderDur = Math.max(1 / FPS, endSec - startSec);
   const totalFrames = Math.max(1, Math.ceil(renderDur * FPS));
   if (!Number.isSafeInteger(totalFrames)) throw new Error('Render frame count exceeds the supported integer range. Reduce the FPS or selected duration.');
-  const workerCount = resolveWorkerCount(totalFrames, opts);
+  const { workerCount, cpuBudget } = resolveRenderConcurrency(totalFrames, opts);
 
   const tmpDir = path.join(ROOT, '.runtime', `render-${VIDEO_ID}-${process.pid}`);
   const ffmpegBin = resolveFfmpeg(ROOT);
@@ -808,7 +864,7 @@ async function runRenderCli() {
     );
 
     await renderMissingSegments({
-      misses, workerCount, videoId: VIDEO_ID, W, H, fps: FPS, lang: opts.lang,
+      misses, workerCount, cpuBudget, tmpDir, videoId: VIDEO_ID, W, H, fps: FPS, lang: opts.lang,
       startSec, ffmpegBin, tStartWall, reuseFrames: !opts.noFrameReuse,
     });
 
