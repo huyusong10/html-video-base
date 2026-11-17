@@ -5,16 +5,17 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { parse } from 'acorn';
 import {
   ROOT, VIDEOS_DIR, listVideoIds, loadVideoSandbox, resolveBaseFile,
   loadChromium, findBrowserExecutable, resolveFfmpeg, getSandboxCfg,
-  isBgmDisabledCfg, extractRawBgmSrc, localizeMediaRel, normalizeCliArgs,
+  isBgmDisabledCfg, extractRawBgmSrc, localizeMediaRel, normalizeCliArgs, getSceneCacheSnapshot, isMainModule,
 } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
 
 const OPT_HANDLERS = {
   '--workers': (o, v) => { o.workers = Math.max(1, parseInt(v, 10) || 1); },
-  '--scene': (o, v) => { o.scene = parseInt(v, 10); },
+  '--scene': (o, v) => { o.scene = v.trim() ? Number(v) : NaN; },
   '--range': (o, v) => { o.range = v; },
   '--fps': (o, v) => { o.fps = Number(v); },
   '--lang': (o, v) => { o.lang = v; },
@@ -91,7 +92,7 @@ function buildRenderSuffix(opts) {
 
 function resolveOutAndAudio(videoId, videoDir, sandbox, cfg, opts, pos, audioRelDefault, bgmRelDefault) {
   const audioInfo = resolveAudioFile(videoDir, sandbox, cfg, audioRelDefault, bgmRelDefault, opts);
-  const firstIsMp4 = Boolean(pos[0] && pos[0].endsWith('.mp4'));
+  const firstIsMp4 = pos.length === 1 && /\.mp4$/i.test(pos[0]);
   const suffix = buildRenderSuffix(opts);
   const baseName = cfg.outputName || `${videoId}.mp4`;
   const defaultOutName = suffix ? baseName.replace(/\.mp4$/i, `${suffix}.mp4`) : baseName;
@@ -99,35 +100,37 @@ function resolveOutAndAudio(videoId, videoDir, sandbox, cfg, opts, pos, audioRel
   return { outPath, ...audioInfo };
 }
 
-function resolveTimeWindow(scenes, fullDur, hasAudio, opts) {
-  if (opts.scene != null && !Number.isNaN(opts.scene)) {
-    if (opts.scene < 0 || opts.scene >= scenes.length) {
+export function resolveTimeWindow(scenes, fullDur, hasAudio, opts) {
+  if (opts.scene != null) {
+    if (!Number.isInteger(opts.scene) || opts.scene < 0 || opts.scene >= scenes.length) {
       throw new Error(`--scene ${opts.scene} out of range (0..${scenes.length - 1})`);
     }
     const sc = scenes[opts.scene];
     return { startSec: sc.start, endSec: sc.start + sc.duration, isSlice: true };
   }
   if (opts.range) {
-    const [a, b] = String(opts.range).split(':').map(Number);
-    if (Number.isNaN(a) || Number.isNaN(b) || b <= a) {
+    const parts = String(opts.range).split(':');
+    const [a, b] = parts.map(Number);
+    if (parts.length !== 2 || !Number.isFinite(a) || !Number.isFinite(b) || b <= a) {
       throw new Error(`Invalid --range "${opts.range}". Expected format like --range 5:18.5`);
     }
-    return { startSec: Math.max(0, a), endSec: Math.min(fullDur + 0.5, b), isSlice: true };
+    const startSec = Math.max(0, a), endSec = Math.min(fullDur + 0.5, b);
+    if (endSec <= startSec) throw new Error(`--range "${opts.range}" does not overlap the video (0..${fullDur + 0.5}).`);
+    return { startSec, endSec, isSlice: true };
   }
   return { startSec: 0, endSec: fullDur + (hasAudio ? 0.4 : 0), isSlice: false };
 }
 
-function hashFilesInDir(h, dir, extFilter, recursive = false) {
+function hashFilesInDir(h, dir, extFilter, recursive = false, relDir = '') {
   if (!fs.existsSync(dir)) return;
   for (const name of fs.readdirSync(dir).sort()) {
     const fp = path.join(dir, name);
+    const rel = relDir ? `${relDir}/${name}` : name;
     const st = fs.statSync(fp);
     if (st.isDirectory() && recursive) {
-      h.update(name + '/');
-      hashFilesInDir(h, fp, extFilter, true);
+      hashFilesInDir(h, fp, extFilter, true, rel);
     } else if (st.isFile() && (!extFilter || extFilter(name))) {
-      h.update(name);
-      h.update(fs.readFileSync(fp));
+      hashFileEntry(h, rel, fp, st.size);
     }
   }
 }
@@ -136,154 +139,141 @@ function isGeneratedMediaOrSub(name) {
   return /^(soundtrack|bgm|subtitles)(\.[a-z0-9_-]+)?\.(m4a|mp3|wav|ogg|vtt|srt)$/i.test(name);
 }
 
-function hashFileFast(h, fp) {
-  const st = fs.statSync(fp);
-  if (st.size <= 2 * 1024 * 1024) { h.update(fs.readFileSync(fp)); return; }
-  const chunk = 65536;
-  const buf = Buffer.allocUnsafe(chunk * 2);
+function hashFileContent(h, fp, size) {
+  if (size <= 2 * 1024 * 1024) { h.update(fs.readFileSync(fp)); return; }
+  const buf = Buffer.allocUnsafe(1024 * 1024);
   const fd = fs.openSync(fp, 'r');
   try {
-    fs.readSync(fd, buf, 0, chunk, 0);
-    fs.readSync(fd, buf, chunk, chunk, st.size - chunk);
+    // 逐块读取完整内容，避免大素材中部的改动误命中缓存。
+    let count;
+    while ((count = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+      h.update(buf.subarray(0, count));
+    }
   } finally {
     fs.closeSync(fd);
   }
-  h.update(`${st.size}:`);
-  h.update(buf);
 }
 
-function hashVisualAssetsDir(h, dir) {
+function hashFileEntry(h, name, fp, size = fs.statSync(fp).size) {
+  h.update(JSON.stringify({ name, size }));
+  hashFileContent(h, fp, size);
+}
+
+function isRenderOutput(fp, outputPath) {
+  return Boolean(outputPath) && path.relative(fp, outputPath) === '';
+}
+
+function hashVisualAssetsDir(h, dir, outputPath = '', relDir = '') {
   if (!fs.existsSync(dir)) return;
   for (const name of fs.readdirSync(dir).sort()) {
     if (name.startsWith('.')) continue;
     const fp = path.join(dir, name);
+    if (isRenderOutput(fp, outputPath)) continue;
+    const rel = relDir ? `${relDir}/${name}` : name;
     const st = fs.statSync(fp);
     if (st.isDirectory()) {
-      if (name !== 'voice') { h.update(`d:${name}/`); hashVisualAssetsDir(h, fp); }
+      if (name !== 'voice') hashVisualAssetsDir(h, fp, outputPath, rel);
     } else if (st.isFile() && !isGeneratedMediaOrSub(name)) {
-      h.update(`f:${name}:`);
-      hashFileFast(h, fp);
+      hashFileEntry(h, rel, fp, st.size);
     }
   }
 }
 
-function shouldHashExtraScript(name, rel, sceneRelSet) {
-  if (!name.endsWith('.js') && !name.endsWith('.mjs')) return false;
+function shouldHashExtraFile(name, rel, sceneRelSet) {
+  if (isGeneratedMediaOrSub(name)) return false;
   if (/^timings(\.[a-z0-9_-]+)?\.js$/i.test(name)) return false;
   return !sceneRelSet.has(rel);
 }
 
-const SKIP_EXTRA_SCRIPT_DIRS = new Set(['assets', 'locales', 'node_modules']);
-
-function hashExtraVideoScripts(h, videoDir, sceneRelSet, relDir = '') {
+function hashExtraVideoFiles(h, videoDir, sceneRelSet, relDir = '', outputPath = '') {
   const dir = relDir ? path.join(videoDir, relDir) : videoDir;
   if (!fs.existsSync(dir)) return;
   for (const name of fs.readdirSync(dir).sort()) {
     if (name.startsWith('.')) continue;
     const rel = relDir ? `${relDir}/${name}` : name;
     const fp = path.join(dir, name);
+    if (isRenderOutput(fp, outputPath)) continue;
     const st = fs.statSync(fp);
     if (st.isDirectory()) {
-      if (!SKIP_EXTRA_SCRIPT_DIRS.has(name)) hashExtraVideoScripts(h, videoDir, sceneRelSet, rel);
-    } else if (st.isFile() && shouldHashExtraScript(name, rel, sceneRelSet)) {
-      h.update(`js:${rel}:`);
-      h.update(fs.readFileSync(fp));
+      if (name === 'node_modules' || (!relDir && (name === 'assets' || name === 'locales'))) continue;
+      hashExtraVideoFiles(h, videoDir, sceneRelSet, rel, outputPath);
+    } else if (st.isFile() && shouldHashExtraFile(name, rel, sceneRelSet)) {
+      hashFileEntry(h, 'video-files/' + rel, fp, st.size);
     }
   }
 }
 
-function skipQuoted(code, i, quote) {
-  i++;
-  while (i < code.length) {
-    if (code[i] === '\\') { i += 2; continue; }
-    if (code[i] === quote) return i + 1;
-    i++;
+function memberPath(node) {
+  if (node.type === 'Identifier') return node.name;
+  if (node.type !== 'MemberExpression' || node.computed) return '';
+  return `${memberPath(node.object)}.${node.property.name}`;
+}
+
+function isSceneRegistration(node) {
+  if (node.type !== 'CallExpression' || node.arguments.length !== 1) return false;
+  if (node.arguments[0].type !== 'ObjectExpression') return false;
+  const callee = memberPath(node.callee);
+  return callee === 'V.scene' || callee === 'V.scenes.push';
+}
+
+function splitSceneSource(code) {
+  let body;
+  try { body = parse(code, { ecmaVersion: 'latest' }).body; }
+  catch { return { shared: code, calls: [] }; }
+  let shared = '', last = 0;
+  const calls = [];
+  for (const statement of body) {
+    if (statement.type !== 'ExpressionStatement' || !isSceneRegistration(statement.expression)) continue;
+    const { start, end } = statement.expression;
+    shared += code.slice(last, start);
+    calls.push(code.slice(start, end));
+    last = end;
   }
-  return i;
-}
-
-function skipBlockComment(code, i) {
-  const end = code.indexOf('*/', i + 2);
-  return end < 0 ? code.length : end + 2;
-}
-
-function skipLineComment(code, i) {
-  const end = code.indexOf('\n', i + 2);
-  return end < 0 ? code.length : end + 1;
-}
-
-function advanceCallToken(code, i) {
-  const ch = code[i];
-  if (ch === '"' || ch === "'" || ch === '`') return skipQuoted(code, i, ch);
-  if (ch === '/' && code[i + 1] === '/') return skipLineComment(code, i);
-  if (ch === '/' && code[i + 1] === '*') return skipBlockComment(code, i);
-  return -1;
-}
-
-function findCallEnd(code, openParenIdx) {
-  let depth = 0;
-  for (let i = openParenIdx; i < code.length; i++) {
-    const next = advanceCallToken(code, i);
-    if (next >= 0) { i = next - 1; continue; }
-    if (code[i] === '(') depth++;
-    else if (code[i] === ')' && --depth === 0) return i + 1;
-  }
-  return code.length;
-}
-
-const SCENE_CALL_AT = /^V\.(?:scene|scenes\.push)\s*\(/;
-
-function isIdentChar(ch) {
-  return Boolean(ch && /[A-Za-z0-9_$]/.test(ch));
+  return { shared: shared + code.slice(last), calls };
 }
 
 export function stripSceneCalls(code) {
-  let out = '', last = 0, i = 0;
-  while (i < code.length) {
-    const next = advanceCallToken(code, i);
-    if (next >= 0) { i = next; continue; }
-    if (code[i] === 'V' && !isIdentChar(code[i - 1])) {
-      const m = SCENE_CALL_AT.exec(code.slice(i));
-      if (m) {
-        out += code.slice(last, i);
-        last = findCallEnd(code, i + m[0].length - 1);
-        i = last;
-        continue;
-      }
-    }
-    i++;
+  return splitSceneSource(code).shared;
+}
+
+function loadSceneCacheSources(videoDir, scenes) {
+  const groups = new Map(), modules = new Map(), definitions = new WeakMap();
+  for (const scene of scenes) {
+    if (!scene._sourceScript) continue;
+    if (!groups.has(scene._sourceScript)) groups.set(scene._sourceScript, []);
+    groups.get(scene._sourceScript).push(scene);
   }
-  return out + code.slice(last);
+  for (const [rel, group] of groups) {
+    const code = fs.readFileSync(path.join(videoDir, rel), 'utf8');
+    const parts = splitSceneSource(code);
+    // 只有能够逐个对应的顶层对象定义才按幕处理，工厂和动态注册保留完整源码。
+    if (parts.calls.length !== group.length) { modules.set(rel, code); continue; }
+    modules.set(rel, parts.shared);
+    group.forEach((scene, i) => definitions.set(scene, parts.calls[i]));
+  }
+  return { modules, definitions };
 }
 
-function getSceneModuleSharedDigest(videoDir, relScript, memo) {
-  if (!relScript) return '';
-  if (memo.has(relScript)) return memo.get(relScript);
-  const fp = path.join(videoDir, relScript);
-  const raw = fs.existsSync(fp) ? stripSceneCalls(fs.readFileSync(fp, 'utf8')) : '';
-  const dg = crypto.createHash('sha256').update(raw).digest('hex');
-  memo.set(relScript, dg);
-  return dg;
-}
-
-function computeSharedVideoDigest(videoDir, W, H, fps, lang, sceneRelSet) {
+function computeSharedVideoDigest(videoDir, W, H, fps, lang, sourceInfo, outputPath) {
   const h = crypto.createHash('sha256');
-  h.update(JSON.stringify({ v: '2.2', W, H, fps, lang }));
+  // 渲染规则改变后，旧缓存片段也需要重新生成。
+  h.update(JSON.stringify({ v: '3.7', W, H, fps, lang }));
   for (const rel of ['css/base.css', 'js/engine.js', 'js/gl.js']) {
     const fp = resolveBaseFile(rel, VIDEOS_DIR);
-    if (fs.existsSync(fp)) h.update(fs.readFileSync(fp));
+    if (fs.existsSync(fp)) hashFileEntry(h, 'base/' + rel, fp);
   }
   const topFiles = ['index.html', 'video.config.js', ...(lang ? [`locales/${lang}.js`] : [])];
   for (const rel of topFiles) {
     const fp = path.join(videoDir, rel);
-    if (fs.existsSync(fp)) h.update(fs.readFileSync(fp));
+    if (fs.existsSync(fp)) hashFileEntry(h, 'video/' + rel, fp);
   }
-  hashFilesInDir(h, videoDir, n => n.endsWith('.css'), false);
-  hashFilesInDir(h, path.join(videoDir, 'css'), n => n.endsWith('.css'), true);
-  hashFilesInDir(h, path.join(VIDEOS_DIR, 'themes'), n => n.endsWith('.css') || n.endsWith('.js'), true);
-  hashExtraVideoScripts(h, videoDir, sceneRelSet || new Set());
-  hashVisualAssetsDir(h, path.join(VIDEOS_DIR, 'assets'));
-  hashVisualAssetsDir(h, path.join(videoDir, 'assets'));
+  for (const rel of [...sourceInfo.modules.keys()].sort()) {
+    h.update(JSON.stringify({ sharedSceneModule: rel, source: sourceInfo.modules.get(rel) }));
+  }
+  hashFilesInDir(h, path.join(VIDEOS_DIR, 'themes'), n => n.endsWith('.css') || n.endsWith('.js'), true, 'themes');
+  hashExtraVideoFiles(h, videoDir, new Set(sourceInfo.modules.keys()), '', outputPath);
+  hashVisualAssetsDir(h, path.join(VIDEOS_DIR, 'assets'), outputPath, 'shared-assets');
+  hashVisualAssetsDir(h, path.join(videoDir, 'assets'), outputPath, 'video-assets');
   return h.digest('hex');
 }
 
@@ -293,56 +283,75 @@ function serializeSubSpec(spec) {
 
 function serializeSceneCode(V, sc) {
   if (!sc) return '';
-  const parts = [
-    sc.id, sc.title, sc.cls, sc.transition, sc.transitionDur,
-    serializeSubSpec(sc.subLayout || sc.subtitles),
-    serializeSubSpec(sc.checkpoints),
-    sc.build && sc.build.toString(),
-    sc.update && sc.update.toString(),
-    sc.gl && sc.gl.toString(),
-  ];
+  const parts = {
+    authored: getSceneCacheSnapshot(sc),
+    id: sc.id, title: sc.title, cls: sc.cls,
+    transition: sc.transition, transitionDur: sc.transitionDur,
+    subtitles: serializeSubSpec(sc.subLayout || sc.subtitles),
+    checkpoints: serializeSubSpec(sc.checkpoints),
+    build: sc.build && sc.build.toString(),
+    update: sc.update && sc.update.toString(),
+    gl: sc.gl && sc.gl.toString(),
+    layers: [],
+  };
   for (const layer of (V.layers || [])) {
     const fn = sc[layer.prop || layer.id];
-    parts.push(typeof fn === 'function' ? fn.toString() : JSON.stringify(fn));
+    parts.layers.push([layer.prop || layer.id, typeof fn === 'function' ? fn.toString() : JSON.stringify(fn)]);
   }
-  return parts.join('|');
+  return JSON.stringify(parts);
 }
 
 function nextCutSignature(scenes, si) {
   const next = si + 1 < scenes.length ? scenes[si + 1] : null;
   if (!next) return '';
-  return `${next.transition || ''}:${next.transitionDur === undefined ? '' : next.transitionDur}`;
+  return JSON.stringify({ transition: next.transition || '', duration: next.transitionDur });
 }
 
-function serializePrevLayerState(V, scenes, si) {
+function serializePrevLayerState(V, scenes, si, sourceInfo, startSec) {
   const prev = si > 0 ? scenes[si - 1] : null;
   if (!prev || !Array.isArray(V.layers) || !V.layers.length) return '';
-  return V.layers.map(l => {
-    const v = prev[l.prop || l.id];
-    return typeof v === 'function' ? v.toString() : JSON.stringify(v);
-  }).join('|');
+  const elapsed = Math.max(0, startSec - scenes[si].start);
+  if (!V.layers.some(layer => (layer.blendDur ?? 0.45) > elapsed)) return '';
+  return JSON.stringify({
+    scene: serializeSceneCode(V, prev),
+    source: sourceInfo.definitions.get(prev),
+    timing: getSceneTimingInputs(V, prev, si - 1),
+  });
 }
 
-function computeSceneSegmentDigest(V, sharedHash, videoDir, modMemo, scenes, si, f0, f1, fps, hudSig, cpSig) {
+function getSceneTimingInputs(V, scene, index) {
+  if (!scene) return null;
+  const voice = (V.getActiveVoice ? V.getActiveVoice() : V.voice) || {};
+  return {
+    duration: scene.duration,
+    cues: scene.cues,
+    subCues: scene.subCues,
+    words: voice.words ? voice.words[index] : null,
+    envelope: voice.envelopes ? voice.envelopes[index] : null,
+  };
+}
+
+function computeSceneSegmentDigest(V, sharedHash, sourceInfo, scenes, si, f0, f1, fps, hudSig, cpSig) {
   const sc = scenes[si];
   const prevSc = si > 0 && f0 / fps < sc.start ? scenes[si - 1] : null;
   const h = crypto.createHash('sha256');
   h.update(sharedHash);
-  h.update(serializeSceneCode(V, sc));
-  h.update(serializeSceneCode(V, prevSc));
-  h.update(getSceneModuleSharedDigest(videoDir, sc._sourceScript, modMemo));
-  h.update(getSceneModuleSharedDigest(videoDir, prevSc && prevSc._sourceScript, modMemo));
-  h.update(serializePrevLayerState(V, scenes, si));
-  h.update(nextCutSignature(scenes, si));
-  h.update(cpSig);
+  h.update(JSON.stringify({
+    scene: serializeSceneCode(V, sc),
+    previous: serializeSceneCode(V, prevSc),
+    source: sourceInfo.definitions.get(sc),
+    previousSource: sourceInfo.definitions.get(prevSc),
+    previousLayers: serializePrevLayerState(V, scenes, si, sourceInfo, f0 / fps),
+    nextCut: nextCutSignature(scenes, si),
+    checkpoints: cpSig,
+  }));
   h.update(JSON.stringify({
     frames: f1 - f0,
     phase: Math.round((f0 / fps - sc.start) * 10000),
     dur: sc.duration,
     hudSig,
-    cues: sc.cues,
-    subCues: sc.subCues,
-    env: V.voice && V.voice.envelopes ? V.voice.envelopes[si] : null,
+    timing: getSceneTimingInputs(V, sc, si),
+    previousTiming: getSceneTimingInputs(V, prevSc, si - 1),
     glKeys: V.glKeys || null,
   }));
   return h.digest('hex').slice(0, 16);
@@ -355,13 +364,12 @@ function computeHudSignature(V, cfg, scenes) {
   return `${Math.round(durNorm * 1000)}:${scenes.slice(1).map(s => Math.round((s.start / durNorm) * 10000)).join(',')}`;
 }
 
-export function buildCachedSceneSegments(V, cfg, videoId, videoDir, totalFrames, W, H, fps, lang) {
+export function buildCachedSceneSegments(V, cfg, videoId, videoDir, totalFrames, W, H, fps, lang, outputPath = '') {
   const scenes = V.scenes || [];
-  const sceneRelSet = new Set(scenes.map(s => s._sourceScript).filter(Boolean));
-  const sharedHash = computeSharedVideoDigest(videoDir, W, H, fps, lang, sceneRelSet);
-  const modMemo = new Map();
+  const sourceInfo = loadSceneCacheSources(videoDir, scenes);
+  const sharedHash = computeSharedVideoDigest(videoDir, W, H, fps, lang, sourceInfo, outputPath);
   const hudSig = computeHudSignature(V, cfg, scenes);
-  const cpParts = scenes.map(s => `${s.start}:${serializeSubSpec(s.checkpoints)}`);
+  const cpParts = scenes.map(s => [s.start, serializeSubSpec(s.checkpoints)]);
   const cacheDir = path.join(ROOT, '.runtime/render-cache', videoId);
   fs.mkdirSync(cacheDir, { recursive: true });
 
@@ -373,8 +381,8 @@ export function buildCachedSceneSegments(V, cfg, videoId, videoDir, totalFrames,
     const f0 = bounds[si];
     const f1 = Math.max(f0, bounds[si + 1]);
     if (f1 <= f0) continue;
-    const cpSig = cpParts.slice(0, si + 1).join('|');
-    const digest = computeSceneSegmentDigest(V, sharedHash, videoDir, modMemo, scenes, si, f0, f1, fps, hudSig, cpSig);
+    const cpSig = JSON.stringify(cpParts.slice(0, si + 1));
+    const digest = computeSceneSegmentDigest(V, sharedHash, sourceInfo, scenes, si, f0, f1, fps, hudSig, cpSig);
     const cachePath = path.join(cacheDir, `s${String(si).padStart(2, '0')}-${digest}.mp4`);
     segments.push({ idx: si, f0, f1, partPath: cachePath, cached: fs.existsSync(cachePath) });
   }
@@ -399,45 +407,117 @@ function buildUncachedChunks(totalFrames, workerCount, tmpDir) {
 function runFfmpeg(bin, args) {
   return new Promise((res, rej) => {
     const p = spawn(bin, args, { stdio: ['ignore', 'inherit', 'inherit'] });
+    p.once('error', error => rej(new Error(`Cannot start ffmpeg: ${bin}`, { cause: error })));
     p.on('close', code => (code === 0 ? res() : rej(new Error(`ffmpeg exit ${code}`))));
   });
 }
 
-function installFrameReuseProbe() {
-  let usesTgVar = null;
-  const checkUsesTg = () => {
-    if (usesTgVar !== null) return usesTgVar;
-    usesTgVar = false;
-    for (const s of Array.from(document.styleSheets)) {
-      let rules;
-      try { rules = s.cssRules; } catch { continue; }
-      for (const r of Array.from(rules || [])) {
-        if (r.cssText && r.cssText.includes('--tg')) { usesTgVar = true; return true; }
-      }
+export function installFrameReuseProbe() {
+  const shadowHosts = new WeakSet();
+  const modalSelector = CSS.supports('selector(:modal)') ? ':modal' : 'dialog[open]';
+  const popoverSelector = CSS.supports('selector(:popover-open)') ? ':popover-open' : '[popover]';
+  const nativeNodeIds = new WeakMap();
+  let nextNativeNodeId = 0;
+  const nativeNodeId = node => {
+    if (!node) return 0;
+    if (!nativeNodeIds.has(node)) nativeNodeIds.set(node, ++nextNativeNodeId);
+    return nativeNodeIds.get(node);
+  };
+  const attachShadow = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function (options) {
+    const root = attachShadow.call(this, options);
+    shadowHosts.add(this);
+    return root;
+  };
+  let styleState = [];
+  const usesAnimationClock = rule => {
+    if (rule.style) {
+      const delay = rule.style.getPropertyValue('animation-delay');
+      const priority = rule.style.getPropertyPriority('animation-delay');
+      // 含 var() 的简写属性可能无法拆成长属性，保留其完整声明检查。
+      const text = rule.style.cssText.replace(`animation-delay: ${delay}${priority ? ' !' + priority : ''};`, '');
+      if (text.includes('--anim-t')) return true;
     }
-    return false;
+    if (rule.cssRules) return Array.from(rule.cssRules).some(usesAnimationClock);
+    return !rule.style && rule.cssText.includes('--anim-t');
+  };
+  const collectStyleState = (sheet, seen, parts) => {
+    if (seen.has(sheet)) return true;
+    seen.add(sheet);
+    try {
+      parts.push([sheet.href, sheet.disabled, sheet.media.mediaText]);
+      for (const rule of sheet.cssRules) {
+        const text = rule.cssText;
+        // 活动动画不会复用；单独的 animation-delay 不影响静态画面。
+        if (text.includes('--tg') || (text.includes('--anim-t') && usesAnimationClock(rule))) return false;
+        parts.push(text);
+        if (rule.styleSheet && !collectStyleState(rule.styleSheet, seen, parts)) return false;
+      }
+    } catch { return false; }
+    return true;
+  };
+  const readStyleState = () => {
+    const parts = [], seen = new Set();
+    const sheets = [...document.styleSheets, ...(document.adoptedStyleSheets || [])];
+    for (const sheet of sheets) {
+      if (!collectStyleState(sheet, seen, parts)) return false;
+    }
+    styleState = parts;
+    return true;
   };
   const canDedupeStage = stage => {
     if (!stage) return false;
+    // 原生顶层元素的层叠顺序无法从舞台 HTML 读取，打开期间完整截帧。
+    if (document.querySelector(`${modalSelector},${popoverSelector}`)) return false;
     const V = window.V;
     const glEl = document.getElementById('gl');
     if (V.gl && V.gl.ready && glEl && !glEl.classList.contains('is-off')) return false;
     if (V._videoClips && V._videoClips.size > 0) return false;
-    if (stage.querySelector('canvas:not(#gl)')) return false;
+    // Canvas 像素和 SVG 原生动画的当前状态不会反映在 HTML 中。
+    if (stage.querySelector('canvas:not(#gl),svg animate,svg animateTransform,svg animateMotion,svg set')) return false;
+    // 自定义元素还可能持有声明式封闭影子根，其内部状态无法通过 innerHTML 检查。
+    if ([stage, ...stage.querySelectorAll('*')].some(el => shadowHosts.has(el) || el.shadowRoot || el.localName.includes('-'))) return false;
+    // use 可绘制舞台外的 SVG 定义，这些内容不在舞台签名中。
+    if ([...stage.querySelectorAll('use')].some(el => {
+      try {
+        const ref = new URL(el.href?.baseVal || '', document.baseURI);
+        if (ref.href.split('#')[0] !== location.href.split('#')[0]) return true;
+        return !stage.contains(document.getElementById(decodeURIComponent(ref.hash.slice(1))));
+      } catch { return true; }
+    })) return false;
     if (stage.getAnimations && stage.getAnimations({ subtree: true }).length > 0) return false;
-    return !checkUsesTg();
+    return readStyleState();
   };
   const stageExtraState = stage => {
-    const forms = Array.from(stage.querySelectorAll('input,textarea,select'))
-      .slice(0, 20)
-      .map(el => `${el.value}:${el.checked}`)
-      .join(',');
-    const scrolls = Array.from(stage.querySelectorAll('*'))
-      .filter(el => el.scrollTop || el.scrollLeft)
-      .slice(0, 20)
-      .map(el => `${el.scrollTop}:${el.scrollLeft}`)
-      .join(',');
-    return `${document.documentElement.style.cssText}|${forms}|${scrolls}`;
+    const scope = [document.documentElement, document.body, stage].map(el => {
+      const shell = el.cloneNode(false);
+      if (el === stage) {
+        // 使用内置时钟的 CSS 动效已由 canDedupeStage 排除。
+        shell.style.removeProperty('--tg');
+        shell.style.removeProperty('--anim-t');
+      }
+      return shell.outerHTML;
+    });
+    const forms = Array.from(stage.querySelectorAll('input,textarea,select'), el => [
+      el.value, el.checked, el.indeterminate, el.validity.valid,
+      el.selectionStart, el.selectionEnd, el.selectionDirection,
+      el.options ? Array.from(el.options, opt => opt.selected) : null,
+    ]);
+    const scrolls = [stage, ...stage.querySelectorAll('*')]
+      .map((el, index) => [index, el.scrollTop, el.scrollLeft])
+      .filter(([, top, left]) => top || left);
+    // 原生焦点和选区不会反映在 HTML 中，单独记录节点身份与范围。
+    const selection = window.getSelection();
+    const ranges = selection ? Array.from({ length: selection.rangeCount }, (_, index) => {
+      const range = selection.getRangeAt(index);
+      return [nativeNodeId(range.startContainer), range.startOffset, nativeNodeId(range.endContainer), range.endOffset];
+    }) : [];
+    const nativeState = [
+      nativeNodeId(document.activeElement),
+      selection ? [nativeNodeId(selection.anchorNode), selection.anchorOffset, nativeNodeId(selection.focusNode), selection.focusOffset] : null,
+      ranges,
+    ];
+    return JSON.stringify([styleState, scope, forms, scrolls, nativeState]);
   };
   const readStageHtml = stage => {
     const hud = document.getElementById('hud');
@@ -453,7 +533,7 @@ function installFrameReuseProbe() {
     await window.V.seekToAsync(sec);
     const stage = document.getElementById('stage');
     if (!canDedupeStage(stage)) { window.__prevStageSig = null; return false; }
-    const sig = `${document.documentElement.dataset.theme || ''}|${document.body.className}|${stageExtraState(stage)}|${readStageHtml(stage)}`;
+    const sig = `${stageExtraState(stage)}|${readStageHtml(stage)}`;
     if (sig === window.__prevStageSig) return true;
     window.__prevStageSig = sig;
     return false;
@@ -464,10 +544,36 @@ async function openRenderPage(browser, port, videoId, W, H, lang) {
   const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
   await page.addInitScript(installFrameReuseProbe);
   const q = lang ? `?record=1&lang=${encodeURIComponent(lang)}` : '?record=1';
-  await page.goto(`http://127.0.0.1:${port}/${videoId}/${q}`, { waitUntil: 'networkidle' });
+  await page.goto(`http://127.0.0.1:${port}/${encodeURIComponent(videoId)}/${q}`, { waitUntil: 'networkidle' });
   await page.waitForFunction(() => window.__video && window.V && window.V.seekToAsync, null, { timeout: 15000 });
   await page.evaluate(() => (document.fonts ? document.fonts.ready : Promise.resolve()));
   return page;
+}
+
+function observeEncoderExit(child) {
+  let inputError = null;
+  child.stdin?.on('error', error => { inputError = error; });
+  return new Promise(resolve => {
+    child.once('error', error => resolve({ error }));
+    child.once('close', (code, signal) => resolve({ error: inputError, code, signal }));
+  });
+}
+
+function encoderExitError(result, index) {
+  return new Error(`ffmpeg seg ${index} stopped before encoding completed (exit ${result.code ?? result.signal ?? 'unknown'})`, { cause: result.error });
+}
+
+function duringEncoding(step, finished, index) {
+  return Promise.race([step, finished.then(result => { throw encoderExitError(result, index); })]);
+}
+
+function writeEncodedFrame(input, buffer, index) {
+  return new Promise((resolve, reject) => {
+    input.write(buffer, error => {
+      if (error) reject(new Error(`ffmpeg seg ${index} input write failed`, { cause: error }));
+      else resolve();
+    });
+  });
 }
 
 async function renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, reuseFrames, onFrame) {
@@ -478,23 +584,35 @@ async function renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, reuseFram
     '-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
     tmpOut,
   ];
-  const ff = spawn(ffmpegBin, ffArgs, { stdio: ['pipe', 'inherit', 'inherit'] });
-  await page.evaluate(() => { window.__prevStageSig = null; });
-  let prevBuf = null;
-  for (let f = seg.f0; f < seg.f1; f++) {
-    const sec = startSec + f / fps;
-    const same = reuseFrames
-      ? await page.evaluate(s => window.__seekAndDedupe(s), sec)
-      : (await page.evaluate(s => window.V.seekToAsync(s), sec), false);
-    const reused = Boolean(same && prevBuf);
-    const buf = reused ? prevBuf : await page.screenshot({ type: 'jpeg', quality: 92 });
-    prevBuf = buf;
-    if (!ff.stdin.write(buf)) await new Promise(r => ff.stdin.once('drain', r));
-    onFrame(reused);
+  let ff;
+  try { ff = spawn(ffmpegBin, ffArgs, { stdio: ['pipe', 'inherit', 'inherit'] }); }
+  catch (error) { throw new Error(`Cannot start ffmpeg seg ${seg.idx}: ${ffmpegBin}`, { cause: error }); }
+  const finished = observeEncoderExit(ff);
+  const step = promise => duringEncoding(promise, finished, seg.idx);
+  try {
+    await step(page.evaluate(() => { window.__prevStageSig = null; }));
+    let prevBuf = null;
+    for (let f = seg.f0; f < seg.f1; f++) {
+      const sec = startSec + f / fps;
+      const same = reuseFrames
+        ? await step(page.evaluate(s => window.__seekAndDedupe(s), sec))
+        : (await step(page.evaluate(s => window.V.seekToAsync(s), sec)), false);
+      const reused = Boolean(same && prevBuf);
+      const buf = reused ? prevBuf : await step(page.screenshot({ type: 'jpeg', quality: 92 }));
+      prevBuf = buf;
+      await step(writeEncodedFrame(ff.stdin, buf, seg.idx));
+      onFrame(reused);
+    }
+    ff.stdin.end();
+    const result = await finished;
+    if (result.error || result.code !== 0) throw encoderExitError(result, seg.idx);
+    fs.renameSync(tmpOut, seg.partPath);
+  } finally {
+    ff.stdin?.destroy();
+    if (ff.exitCode === null && ff.signalCode === null) ff.kill();
+    await finished;
+    fs.rmSync(tmpOut, { force: true });
   }
-  ff.stdin.end();
-  await new Promise((res, rej) => ff.on('close', code => (code === 0 ? res() : rej(new Error(`ffmpeg seg ${seg.idx} exit ${code}`)))));
-  fs.renameSync(tmpOut, seg.partPath);
 }
 
 async function renderMissingSegments({ misses, workerCount, videoId, W, H, fps, lang, startSec, ffmpegBin, tStartWall, reuseFrames }) {
@@ -599,12 +717,19 @@ async function stitchSegmentsAndAudio(spec) {
   } else {
     muxArgs.push('-c:v', 'copy');
   }
-  muxArgs.push('-movflags', '+faststart', outPath);
-  await runFfmpeg(ffmpegBin, muxArgs);
+  const outputExt = path.basename(outPath).match(/\.[^.]*$/)?.[0] || '';
+  const tmpOut = path.join(path.dirname(outPath), `.html-video-${process.pid}-${crypto.randomUUID()}.tmp${outputExt}`);
+  muxArgs.push('-movflags', '+faststart', tmpOut);
+  try {
+    await runFfmpeg(ffmpegBin, muxArgs);
+    fs.renameSync(tmpOut, outPath);
+  } finally {
+    fs.rmSync(tmpOut, { force: true });
+  }
 }
 
 function resolveTargetVideoId(pos) {
-  const firstIsMp4 = Boolean(pos[0] && pos[0].endsWith('.mp4'));
+  const firstIsMp4 = pos.length === 1 && /\.mp4$/i.test(pos[0]);
   const defaultVideo = listVideoIds()[0] || 'starter';
   return firstIsMp4 ? defaultVideo : (pos[0] || defaultVideo);
 }
@@ -620,13 +745,29 @@ function describeRenderAudio(hasAudio, hasBgm) {
   return hasBgm ? ' + bgm' : ' (silent)';
 }
 
-function resolveStageSpec(V, cfg, opts) {
+function positiveRenderNumber(value, label) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    throw new Error(`Invalid ${label}: ${value}. Expected a finite positive number.`);
+  }
+  return number;
+}
+
+function renderDimension(value, label) {
+  const number = positiveRenderNumber(value, label);
+  if (!Number.isInteger(number) || number % 2 !== 0) {
+    throw new Error(`${label} must be a positive even integer for MP4 output (received ${value}).`);
+  }
+  return number;
+}
+
+export function resolveStageSpec(V, cfg, opts) {
   return {
-    W: cfg.width || 1920,
-    H: cfg.height || 1080,
-    FPS: Number(opts.fps || process.env.FPS || cfg.fps || 30),
+    W: renderDimension(cfg.width ?? 1920, 'Stage width'),
+    H: renderDimension(cfg.height ?? 1080, 'Stage height'),
+    FPS: positiveRenderNumber(opts.fps ?? (process.env.FPS || (cfg.fps ?? 30)), 'FPS'),
     scenes: V.scenes || [],
-    fullDur: V.totalDuration || V.duration || 1,
+    fullDur: positiveRenderNumber(V.totalDuration ?? V.duration ?? 1, 'Video duration'),
     audioBitrate: cfg.audioBitrate || '128k',
   };
 }
@@ -642,6 +783,7 @@ async function runRenderCli() {
   const { startSec, endSec, isSlice } = resolveTimeWindow(scenes, fullDur, media.hasAudio || media.hasBgm, opts);
   const renderDur = Math.max(1 / FPS, endSec - startSec);
   const totalFrames = Math.max(1, Math.ceil(renderDur * FPS));
+  if (!Number.isSafeInteger(totalFrames)) throw new Error('Render frame count exceeds the supported integer range. Reduce the FPS or selected duration.');
   const workerCount = resolveWorkerCount(totalFrames, opts);
 
   const tmpDir = path.join(ROOT, '.runtime', `render-${VIDEO_ID}-${process.pid}`);
@@ -651,7 +793,7 @@ async function runRenderCli() {
   try {
     const useSceneCache = !isSlice && !opts.noCache && scenes.length > 0;
     const segments = useSceneCache
-      ? buildCachedSceneSegments(sandbox.V, cfg, VIDEO_ID, videoDir, totalFrames, W, H, FPS, opts.lang)
+      ? buildCachedSceneSegments(sandbox.V, cfg, VIDEO_ID, videoDir, totalFrames, W, H, FPS, opts.lang, media.outPath)
       : buildUncachedChunks(totalFrames, workerCount, tmpDir);
     const misses = segments.filter(s => !s.cached);
     const cacheInfo = useSceneCache ? ` [cache ${segments.length - misses.length}/${segments.length} scenes hit]` : '';
@@ -677,5 +819,4 @@ async function runRenderCli() {
   }
 }
 
-const isDirectRun = process.argv[1] && process.argv[1].endsWith('render.mjs');
-if (isDirectRun) await runRenderCli();
+if (isMainModule(import.meta.url)) await runRenderCli();

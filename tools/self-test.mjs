@@ -3,11 +3,15 @@
 // Web 交互驻点、SSE 实时热重载端点、按幕 SHA-256 增量渲染缓存与独立静态包 bundle
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { PKG_ROOT, resolveFfmpeg, resolvePython, loadChromium, findBrowserExecutable } from './lib/paths.mjs';
-import { startEphemeralVideoServer } from './lib/http-static.mjs';
-import { stripSceneCalls } from './render.mjs';
+import { pathToFileURL } from 'node:url';
+import { PKG_ROOT, resolveFfmpeg, resolvePython, loadChromium, findBrowserExecutable, loadVideoSandbox } from './lib/paths.mjs';
+import { createVideoHttpServer, startEphemeralVideoServer } from './lib/http-static.mjs';
+import { buildVttContent } from './lib/subtitles.mjs';
+import { verifySpokenTimings } from './verify-sync.mjs';
+import { stripSceneCalls, buildCachedSceneSegments, installFrameReuseProbe, resolveStageSpec, resolveTimeWindow } from './render.mjs';
 
 const TEST_ROOT = path.join(PKG_ROOT, '.runtime/self-test-proj');
 const CLI_BIN = path.join(PKG_ROOT, 'bin/html-video.mjs');
@@ -59,11 +63,11 @@ function verifyBundledProjectFiles(distDir) {
   }
 }
 
-function runCliCmd(args) {
+function runCliCmd(args, projectRoot = TEST_ROOT) {
   const r = spawnSync(process.execPath, [CLI_BIN, ...args], {
-    cwd: TEST_ROOT,
+    cwd: projectRoot,
     encoding: 'utf8',
-    env: Object.assign({}, process.env, { VIDEO_PROJECT_ROOT: TEST_ROOT }),
+    env: Object.assign({}, process.env, { VIDEO_PROJECT_ROOT: projectRoot }),
   });
   if (r.status !== 0) {
     throw new Error(`CLI failed (${args.join(' ')}):\n${r.stdout || ''}\n${r.stderr || ''}`);
@@ -399,7 +403,24 @@ async function verifyPlayerBarContracts(page, port) {
   await verifyIframeWebFullContract(page, port);
 }
 
+async function verifyMalformedHttpRequests(port) {
+  for (const opts of [{ headers: { Host: '[invalid' } }, { path: 'http://[invalid' }]) {
+    const status = await new Promise((resolve, reject) => {
+      const req = http.get({ hostname: '127.0.0.1', port, path: '/demo/index.html', ...opts }, res => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode));
+      });
+      req.on('error', reject);
+    });
+    assert.equal(status, 400, 'Malformed request URLs and Host headers must return 400');
+  }
+  const goodRes = await fetch(`http://127.0.0.1:${port}/demo/index.html`);
+  assert.equal(goodRes.status, 200, 'Preview server must remain available after malformed requests');
+  await goodRes.arrayBuffer();
+}
+
 async function verifyHttpAndDomRegressions(page, port) {
+  await verifyMalformedHttpRequests(port);
   const suffixRes = await fetch(`http://127.0.0.1:${port}/demo/index.html`, { headers: { Range: 'bytes=-64' } });
   assert.equal(suffixRes.status, 206, 'Suffix byte range bytes=-64 must return 206');
   const suffixTxt = await suffixRes.text();
@@ -1028,15 +1049,85 @@ function verifyRound3UnitRegressions() {
   const pyCheck = spawnSync(py, [
     '-c',
     [
-      'import sys; sys.path.insert(0, "tools")',
+      'import sys, os; sys.path.insert(0, "tools")',
       'from tts_providers import vol_str',
       'from voice import make_cache_key',
       'assert vol_str(0.8) == "-20%" and vol_str(1.2) == "+20%" and vol_str("+5%") == "+5%" and vol_str(None) == "+0%"',
       'assert make_cache_key({"lang": "en"}, "OK", 1.0) != make_cache_key({"lang": "ja"}, "OK", 1.0)',
       'assert make_cache_key({"xmlLang": "zh-TW"}, "OK", 1.0) != make_cache_key({"xmlLang": "zh-CN"}, "OK", 1.0)',
-    ].join('; '),
+      'cfg = {"provider": "openai", "voice": "alloy"}',
+      'os.environ.pop("TTS_BASE_URL", None)',
+      'os.environ["OPENAI_BASE_URL"] = "http://127.0.0.1:1111/v1"',
+      'before = make_cache_key(cfg, "OK", 1.0)',
+      'os.environ["OPENAI_BASE_URL"] = "http://127.0.0.1:2222/v1"',
+      'assert make_cache_key(cfg, "OK", 1.0) != before, "Changing the effective TTS service must invalidate cached audio"',
+      'explicit = dict(cfg, baseUrl="http://127.0.0.1:3333/v1/")',
+      'fixed = make_cache_key(explicit, "OK", 1.0)',
+      'os.environ["TTS_BASE_URL"] = "http://127.0.0.1:4444/v1"',
+      'assert make_cache_key(explicit, "OK", 1.0) == fixed, "Explicit baseUrl must override environment defaults in cache identity"',
+      'custom = dict(cfg, baseUrlEnv="HTML_VIDEO_TEST_TTS_BASE")',
+      'os.environ["HTML_VIDEO_TEST_TTS_BASE"] = "http://127.0.0.1:5555/v1"',
+      'before = make_cache_key(custom, "OK", 1.0)',
+      'os.environ["HTML_VIDEO_TEST_TTS_BASE"] = "http://127.0.0.1:6666/v1"',
+      'assert make_cache_key(custom, "OK", 1.0) != before, "Custom baseUrlEnv must affect cached audio"',
+      'azure = {"provider": "azure"}',
+      'os.environ["AZURE_SPEECH_REGION"] = "eastus"',
+      'before = make_cache_key(azure, "OK", 1.0)',
+      'os.environ["AZURE_SPEECH_REGION"] = "westus"',
+      'assert make_cache_key(azure, "OK", 1.0) != before, "Effective Azure region must affect cached audio"',
+      'azure["endpoint"] = "http://127.0.0.1:7777/speech"',
+      'fixed = make_cache_key(azure, "OK", 1.0)',
+      'os.environ["AZURE_SPEECH_REGION"] = "eastus"',
+      'assert make_cache_key(azure, "OK", 1.0) == fixed, "Explicit Azure endpoint must override environment region in cache identity"',
+    ].join('\n'),
   ], { cwd: PKG_ROOT, encoding: 'utf8' });
   assert.equal(pyCheck.status, 0, `Python TTS unit checks failed:\n${pyCheck.stderr}`);
+}
+
+function verifyRenderArgumentValidation() {
+  const V = { duration: 2, totalDuration: 2, scenes: [{ start: 0, duration: 1 }, { start: 1, duration: 1 }] };
+  const cfg = { width: 320, height: 180, fps: 4 };
+  const priorFps = process.env.FPS;
+  try {
+    delete process.env.FPS;
+    assert.equal(resolveStageSpec(V, cfg, { fps: 29.97 }).FPS, 29.97, 'Fractional frame rates must remain supported');
+    for (const fps of [0, -1, NaN, Infinity]) {
+      assert.throws(() => resolveStageSpec(V, cfg, { fps }), /FPS/i, 'Invalid frame rates must fail before rendering');
+    }
+    process.env.FPS = 'Infinity';
+    assert.throws(() => resolveStageSpec(V, cfg, { fps: null }), /FPS/i, 'Invalid environment frame rate must be rejected');
+    assert.equal(resolveStageSpec(V, cfg, { fps: 4 }).FPS, 4, 'Explicit frame rate must override the environment');
+    delete process.env.FPS;
+    for (const duration of [0, -1, NaN, Infinity]) {
+      assert.throws(() => resolveStageSpec({ ...V, totalDuration: duration }, cfg, { fps: 4 }), /duration/i, 'Invalid duration must not produce an unbounded render');
+    }
+    for (const key of ['width', 'height']) {
+      for (const value of [0, -2, NaN, Infinity, 321, 320.5]) {
+        assert.throws(() => resolveStageSpec(V, { ...cfg, [key]: value }, { fps: 4 }), /width|height/i, 'MP4 dimensions must be finite positive even integers');
+      }
+    }
+    for (const range of ['100:101', '-5:-1', '0:1:2', '0:Infinity', 'bad', '2:1']) {
+      assert.throws(() => resolveTimeWindow(V.scenes, V.duration, false, { scene: null, range }), /range/i, 'Invalid or nonoverlapping ranges must be rejected');
+    }
+    for (const scene of [-1, 2, 1.5, NaN, Infinity]) {
+      assert.throws(() => resolveTimeWindow(V.scenes, V.duration, false, { scene }), /scene/i, 'Scene selection must use a valid integer index');
+    }
+    assert.deepEqual(resolveTimeWindow(V.scenes, 2, false, { scene: null, range: '-1:1' }), { startSec: 0, endSec: 1, isSlice: true });
+    assert.deepEqual(resolveTimeWindow(V.scenes, 2, false, { scene: null, range: '1:99' }), { startSec: 1, endSec: 2.5, isSlice: true });
+    assert.deepEqual(resolveTimeWindow(V.scenes, 2, false, { scene: 1 }), { startSec: 1, endSec: 2, isSlice: true });
+  } finally {
+    if (priorFps === undefined) delete process.env.FPS;
+    else process.env.FPS = priorFps;
+  }
+}
+
+function verifyVoiceCacheRegressions() {
+  const r = spawnSync(resolvePython(PKG_ROOT, true), [path.join(PKG_ROOT, 'tools/test-voice-cache.py'), path.join(TEST_ROOT, 'voice-cache-check')], {
+    cwd: PKG_ROOT,
+    encoding: 'utf8',
+    env: Object.assign({}, process.env, { VIDEO_PROJECT_ROOT: TEST_ROOT }),
+  });
+  assert.equal(r.status, 0, `Voice cache regressions failed:\n${r.stdout}\n${r.stderr}`);
 }
 
 function verifyRound5SoundAndI18nUnit() {
@@ -1284,6 +1375,46 @@ async function verifyRuntimeSetLangHotSwitch(page, port) {
   assert.equal(ghostFallback.voiceOk, true, 'Missing locale rollback must preserve base V.voice');
 }
 
+async function verifyConcurrentLocaleSwitches(page, port) {
+  await page.goto(`http://127.0.0.1:${port}/demo/`, { waitUntil: 'networkidle' });
+  const before = await page.evaluate(() => ({ duration: V.duration, lang: V.getActiveLang(), title: document.title, words: V.getActiveVoice()?.words }));
+  let release, markRequested;
+  const gate = new Promise(resolve => { release = resolve; });
+  const requested = new Promise(resolve => { markRequested = resolve; });
+  const delayedTimings = async route => { markRequested(); await gate; await route.continue(); };
+  await page.route('**/timings.en.js', delayedTimings);
+  try {
+    await page.evaluate(() => { window.__firstLocaleSwitch = V.setLang('en'); });
+    await requested;
+    await page.evaluate(() => { window.__secondLocaleSwitch = V.setLang('zh-CN'); });
+    release();
+    await page.evaluate(() => Promise.all([window.__firstLocaleSwitch, window.__secondLocaleSwitch]));
+    const after = await page.evaluate(() => ({
+      lang: V.getActiveLang(), hasVoice: Boolean(V.getActiveVoice()), duration: V.duration, title: document.title,
+      subtitle: V.scenes[0].cues[0].text, words: V.getActiveVoice()?.words,
+    }));
+    assert.equal(after.lang, before.lang, 'The latest language choice must remain active');
+    assert.ok(after.hasVoice, 'Late timing scripts must not replace the latest selected voice');
+    assert.equal(after.duration, before.duration, 'Concurrent language switches must retain the selected timeline');
+    assert.equal(after.title, before.title, 'Concurrent language switches must retain the selected document title');
+    assert.match(after.subtitle, /欢迎体验/, 'Concurrent language switches must retain the selected subtitles');
+    assert.deepEqual(after.words, before.words, 'Concurrent language switches must retain word anchor timestamps');
+    await page.waitForFunction(() => window.__video.getSyncState().readyState >= 1, null, { timeout: 10000 });
+    const recovered = await page.evaluate(async () => {
+      let failOnce = true;
+      V.use({ name: 'locale-switch-error', onLocaleChange() { if (failOnce) { failOnce = false; throw new Error('Locale hook failed'); } } });
+      const results = await Promise.allSettled([V.setLang('en'), V.setLang('zh-CN')]);
+      return { statuses: results.map(r => r.status), lang: V.getActiveLang(), hasVoice: Boolean(V.getActiveVoice()) };
+    });
+    assert.deepEqual(recovered.statuses, ['rejected', 'fulfilled'], 'A failed language switch must not prevent the next request');
+    assert.equal(recovered.lang, before.lang, 'Language switching must recover after an extension hook throws');
+    assert.ok(recovered.hasVoice, 'Recovery must restore the requested voice');
+  } finally {
+    release();
+    await page.unroute('**/timings.en.js', delayedTimings);
+  }
+}
+
 async function verifySingleLangOptOutSafety(browser, port) {
   const ctx = await browser.newContext({ viewport: { width: 640, height: 360 } });
   const p = await ctx.newPage();
@@ -1487,6 +1618,925 @@ async function verifyPptDeckMode(page, port) {
   await verifyPptModeSwitch(page);
 }
 
+async function verifyAnimationClockFrameReuse(browser) {
+  const baseCss = fs.readFileSync(path.join(PKG_ROOT, 'runtime/base/css/base.css'), 'utf8');
+  for (const grouped of [false, true]) {
+    const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+    try {
+      await page.setContent(`<style>${baseCss}html,body{margin:0}#stage{position:static;transform:none;width:320px;height:180px;background:red}</style><body class="record"><div id="stage"></div></body>`);
+      await page.evaluate(() => {
+        window.V = { async seekToAsync(sec) {
+          document.getElementById('stage').style.setProperty('--tg', String(sec));
+          document.getElementById('stage').style.setProperty('--anim-t', `${-sec}s`);
+        } };
+      });
+      await page.evaluate(installFrameReuseProbe);
+      assert.equal(await page.evaluate(() => window.__seekAndDedupe(0.1)), false);
+      assert.equal(await page.evaluate(() => window.__seekAndDedupe(0.2)), true, 'The built-in animation delay alone must preserve static frame reuse');
+      await page.evaluate(grouped => {
+        const style = document.createElement('style');
+        const rule = '#stage{background:hsl(atan2(var(--anim-t),1s) 100% 50%)}';
+        style.textContent = grouped ? `@media(min-width:0px){${rule}}` : rule;
+        document.head.append(style);
+      }, grouped);
+      await page.evaluate(() => window.__seekAndDedupe(0.1));
+      const before = await page.screenshot();
+      const reused = await page.evaluate(() => window.__seekAndDedupe(0.8));
+      const after = await page.screenshot();
+      assert.ok(!before.equals(after), 'The animation clock CSS fixture must visibly change');
+      assert.equal(reused, false, 'CSS driven by --anim-t must not reuse a previous frame');
+    } finally { await page.close(); }
+  }
+}
+
+async function verifyFrameReuseStateTracking(browser) {
+  const modes = ['body-style', 'body-attribute', 'stage-style', 'stage-class', 'root-attribute', 'input-21', 'checkbox-indeterminate', 'select-multiple', 'scroll-swap', 'css-rule', 'css-disabled', 'late-clock-style', 'imported-clock-style', 'adopted-rule'];
+  for (const mode of modes) {
+    const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+    try {
+      await page.setContent('<style>html,body{margin:0}#stage{width:320px;height:180px;background:red}#stage.alternate{background:blue}html[data-phase="alternate"] #stage,body[data-phase="alternate"] #stage{background:blue}input{font:60px Arial;width:300px}.scroll{display:inline-block;width:100px;height:80px;overflow:hidden}.content{height:200px;background:linear-gradient(red 50%,blue 50%)}</style><div id="stage"></div>');
+      await page.evaluate(async mode => {
+        const stage = document.getElementById('stage');
+        if (mode === 'input-21') {
+          for (let i = 0; i < 21; i++) {
+            const input = document.createElement('input');
+            input.style.display = i < 20 ? 'none' : 'block';
+            stage.append(input);
+          }
+        }
+        if (mode === 'checkbox-indeterminate') {
+          stage.innerHTML = '<input type="checkbox" style="width:80px;height:80px">';
+        }
+        if (mode === 'select-multiple') {
+          stage.innerHTML = '<select multiple size="3" style="font:24px Arial"><option selected>A</option><option>B</option><option>C</option></select>';
+        }
+        if (mode === 'scroll-swap') {
+          stage.innerHTML = '<div class="scroll"><div class="content"></div></div><div class="scroll"><div class="content"></div></div>';
+        }
+        if (mode === 'late-clock-style' || mode === 'imported-clock-style') {
+          stage.innerHTML = '<div class="moving" style="width:100px;height:100px;background:blue"></div>';
+        }
+        if (mode === 'imported-clock-style') {
+          const url = 'data:text/css,' + encodeURIComponent('.moving{transform:translateX(calc(var(--tg)*100px))}').replace(/-/g, '%2D');
+          const style = document.createElement('style');
+          const ready = new Promise(resolve => { style.onload = resolve; style.onerror = resolve; });
+          style.textContent = `@import url("${url}");`;
+          document.head.append(style);
+          await ready;
+        }
+        if (mode === 'adopted-rule') {
+          const sheet = new CSSStyleSheet();
+          sheet.replaceSync('#stage{background:red}');
+          document.adoptedStyleSheets = [sheet];
+        }
+        const update = {
+          'body-style': alt => { document.body.style.filter = alt ? 'hue-rotate(90deg)' : 'none'; },
+          'body-attribute': alt => { document.body.dataset.phase = alt ? 'alternate' : 'normal'; },
+          'stage-style': alt => { stage.style.opacity = alt ? '0.2' : '1'; },
+          'stage-class': alt => { stage.classList.toggle('alternate', alt); },
+          'root-attribute': alt => { document.documentElement.dataset.phase = alt ? 'alternate' : 'normal'; },
+          'input-21': alt => { stage.lastElementChild.value = alt ? '222' : '111'; },
+          'checkbox-indeterminate': alt => { stage.lastElementChild.indeterminate = alt; },
+          'select-multiple': alt => { stage.lastElementChild.options[1].selected = alt; },
+          'scroll-swap': alt => {
+            stage.children[0].scrollTop = alt ? 80 : 0;
+            stage.children[1].scrollTop = alt ? 0 : 80;
+          },
+          'css-rule': alt => { document.styleSheets[0].cssRules[1].style.backgroundColor = alt ? 'blue' : 'red'; },
+          'css-disabled': alt => { document.styleSheets[0].disabled = alt; },
+          'adopted-rule': alt => { document.adoptedStyleSheets[0].cssRules[0].style.backgroundColor = alt ? 'blue' : 'red'; },
+          'imported-clock-style': () => {},
+          'late-clock-style': alt => {
+            if (!alt || document.getElementById('late-clock-style')) return;
+            const style = document.createElement('style');
+            style.id = 'late-clock-style';
+            style.textContent = '.moving{transform:translateX(calc(var(--tg)*100px))}';
+            document.head.append(style);
+          },
+        };
+        window.V = { async seekToAsync(sec) {
+          stage.style.setProperty('--tg', String(sec));
+          stage.style.setProperty('--anim-t', `${-sec}s`);
+          update[mode](sec > 0.5);
+        } };
+      }, mode);
+      await page.evaluate(installFrameReuseProbe);
+      assert.equal(await page.evaluate(() => window.__seekAndDedupe(0.1)), false, `${mode}: first frame cannot be reused`);
+      const before = await page.screenshot();
+      const reused = await page.evaluate(() => window.__seekAndDedupe(0.8));
+      const after = await page.screenshot();
+      assert.ok(!before.equals(after), `${mode}: regression fixture must visibly change the frame`);
+      assert.equal(reused, false, `${mode}: visible changes must not reuse the previous frame`);
+      assert.equal(await page.evaluate(() => window.__seekAndDedupe(0.9)), !['late-clock-style', 'imported-clock-style'].includes(mode), `${mode}: reuse must follow visible state and active clock styles`);
+    } finally { await page.close(); }
+  }
+}
+
+async function verifyShadowDomFrameReuse(browser) {
+  for (const mode of ['open', 'closed', 'existing-open', 'declarative-open', 'declarative-closed']) {
+    for (const target of ['child', 'stage']) {
+      const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+      try {
+        await page.setContent('<style>html,body{margin:0}#stage{width:320px;height:180px;background:white}</style><div id="stage"><div id="host"></div></div>');
+        if (mode !== 'existing-open') await page.evaluate(installFrameReuseProbe);
+        await page.evaluate(({ mode, target }) => {
+          const host = document.getElementById(target === 'stage' ? 'stage' : 'host');
+          let fill;
+          if (mode.startsWith('declarative-')) {
+            customElements.define('paint-box', class extends HTMLElement {
+              constructor() { super(); this.internals = this.attachInternals(); }
+            });
+            host.setHTMLUnsafe(`<paint-box><template shadowrootmode="${mode.slice(12)}"><div></div></template></paint-box>`);
+            fill = host.firstElementChild.internals.shadowRoot.firstElementChild;
+          } else {
+            const shadow = host.attachShadow({ mode: mode === 'closed' ? 'closed' : 'open' });
+            fill = document.createElement('div');
+            shadow.append(fill);
+          }
+          fill.style.cssText = 'width:320px;height:180px';
+          window.V = { async seekToAsync(sec) { fill.style.background = sec < 0.5 ? 'red' : 'blue'; } };
+        }, { mode, target });
+        if (mode === 'existing-open') await page.evaluate(installFrameReuseProbe);
+        assert.equal(await page.evaluate(() => window.__seekAndDedupe(0.1)), false);
+        const before = await page.screenshot();
+        const reused = await page.evaluate(() => window.__seekAndDedupe(0.8));
+        const after = await page.screenshot();
+        assert.ok(!before.equals(after), `${mode}/${target}: shadow content must visibly change`);
+        assert.equal(reused, false, `${mode}/${target}: shadow changes must not reuse a previous frame`);
+        await page.evaluate(() => {
+          const stage = document.getElementById('stage');
+          stage.replaceWith(stage.cloneNode(false));
+        });
+        assert.equal(await page.evaluate(() => window.__seekAndDedupe(1)), false);
+        assert.equal(await page.evaluate(() => window.__seekAndDedupe(1.1)), true, 'Removing shadow content must restore ordinary static frame reuse');
+      } finally { await page.close(); }
+    }
+  }
+}
+
+async function verifySvgUseFrameReuse(browser) {
+  const modes = ['inside-href', 'inside-xlink', 'inside-absolute', 'inside-encoded', 'outside-href', 'outside-xlink', 'outside-absolute', 'outside-encoded'];
+  for (const mode of modes) {
+    const inside = mode.startsWith('inside');
+    const id = mode.endsWith('encoded') ? '绘制色块' : 'shared-paint';
+    const fragment = mode.endsWith('encoded') ? encodeURIComponent(id) : id;
+    const href = `${mode.endsWith('absolute') ? 'http://svg-frame.test/' : ''}#${fragment}`;
+    const attr = mode.endsWith('xlink') ? 'xlink:href' : 'href';
+    const definition = `<defs><rect id="${id}" width="320" height="180"/></defs>`;
+    const external = inside ? '' : `<svg width="0" height="0" style="position:absolute">${definition}</svg>`;
+    const content = `<!doctype html><style>html,body{margin:0}#stage{width:320px;height:180px}</style>${external}<div id="stage"><svg width="320" height="180" xmlns:xlink="http://www.w3.org/1999/xlink">${inside ? definition : ''}<use ${attr}="${href}"/></svg></div>`;
+    const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+    try {
+      await page.route('http://svg-frame.test/**', route => route.fulfill({ body: content, contentType: 'text/html; charset=utf-8' }));
+      await page.goto('http://svg-frame.test/');
+      await page.evaluate(installFrameReuseProbe);
+      await page.evaluate(id => {
+        window.V = { async seekToAsync(sec) { document.getElementById(id).setAttribute('fill', sec < 0.5 ? 'red' : 'blue'); } };
+      }, id);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.1)), false);
+      const before = await page.screenshot();
+      const reused = await page.evaluate(() => __seekAndDedupe(0.8));
+      assert.ok(!before.equals(await page.screenshot()), `${mode}: the SVG reference must visibly update`);
+      assert.equal(reused, false, `${mode}: changing a referenced definition must not reuse a stale frame`);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.9)), inside, `${mode}: only definitions inspected inside the stage can keep static frame reuse`);
+      await page.evaluate(() => {
+        document.getElementById('stage').innerHTML = '<div style="width:320px;height:180px;background:blue"></div>';
+        window.V.seekToAsync = async () => {};
+      });
+      assert.equal(await page.evaluate(() => __seekAndDedupe(1)), false);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(1.1)), true, 'Removing external SVG references must restore ordinary static frame reuse');
+    } finally { await page.close(); }
+  }
+}
+
+async function verifyNativeControlFrameReuse(browser) {
+  const fields = {
+    'input-range': '<input id="first" value="AAAA BBBB">',
+    'textarea-range': '<textarea id="first" spellcheck="false">AAAA BBBB</textarea>',
+    'document-range': '<div id="first" contenteditable="true" spellcheck="false">AAAA BBBB</div>',
+    'button-focus': '<button id="first" class="half">First</button><button id="second" class="half">Second</button>',
+    'focus-outside': '<button id="first">First</button>',
+    'focus-sibling': '<div id="first">Panel</div>',
+    'input-validity': '<input id="first" data-validity value="unchanged">',
+    'textarea-validity': '<textarea id="first" data-validity>unchanged</textarea>',
+    'select-validity': '<select id="first" data-validity><option>unchanged</option></select>',
+  };
+  for (const [mode, content] of Object.entries(fields)) {
+    const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+    try {
+      await page.setContent(`<style>html,body{margin:0}#stage{width:320px;height:180px;position:relative;overflow:hidden}#stage>*{position:absolute;left:0;top:0;width:320px;height:180px;box-sizing:border-box;font:36px monospace;padding:12px;border:2px solid black;outline:none;caret-color:transparent;background:white}#stage>*:focus,#external-a:focus~#stage>*{background:#ffe6a7}#stage>[data-validity]:valid{background:#00dd44}#stage>[data-validity]:invalid{background:#ff2255}#stage ::selection{background:#1769ff;color:white}#stage>.half{height:90px}#second{top:90px}.external{position:fixed;top:0;left:0;width:0;height:0;min-width:0;min-height:0;padding:0;border:0;opacity:0}</style><button id="external-a" class="external">External A</button><button id="external-b" class="external">External B</button><div id="stage">${content}</div>`);
+      await page.evaluate(installFrameReuseProbe);
+      await page.evaluate(mode => {
+        const first = document.getElementById('first');
+        const focusTargets = {
+          'button-focus': ['first', 'second'],
+          'focus-outside': ['first', 'external-b'],
+          'focus-sibling': ['external-a', 'external-b'],
+        }[mode];
+        window.V = { async seekToAsync(sec) {
+          const later = sec >= 0.5;
+          if (mode.endsWith('-validity')) { first.setCustomValidity(later ? 'Please review this value' : ''); return; }
+          if (mode === 'input-range' || mode === 'textarea-range') {
+            first.focus(); first.setSelectionRange(later ? 5 : 0, later ? 9 : 4); return;
+          }
+          if (mode === 'document-range') {
+            first.focus();
+            const range = document.createRange();
+            range.setStart(first.firstChild, later ? 5 : 0); range.setEnd(first.firstChild, later ? 9 : 4);
+            const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+            return;
+          }
+          document.getElementById(focusTargets[later ? 1 : 0]).focus();
+        } };
+      }, mode);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.1)), false);
+      const before = await page.screenshot({ caret: 'initial' });
+      const reused = await page.evaluate(() => __seekAndDedupe(0.8));
+      assert.ok(!before.equals(await page.screenshot({ caret: 'initial' })), `${mode}: native control state must visibly change`);
+      assert.equal(reused, false, `${mode}: native state changes must not reuse a stale frame`);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.9)), true, `${mode}: unchanged native state must retain static frame reuse`);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.1)), false);
+      assert.ok(before.equals(await page.screenshot({ caret: 'initial' })), `${mode}: backward seeking must restore the same native rendering`);
+      await page.evaluate(() => {
+        document.activeElement.blur(); getSelection().removeAllRanges();
+        document.getElementById('stage').innerHTML = '<div>Static</div>';
+        window.V.seekToAsync = async () => {};
+      });
+      assert.equal(await page.evaluate(() => __seekAndDedupe(1)), false);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(1.1)), true, 'Clearing native state must preserve ordinary static reuse');
+    } finally { await page.close(); }
+  }
+}
+
+async function verifyInitTitleEscaping(browser, port) {
+  const cases = [
+    ['title-special', 'O\'Reilly "HTML" &amp; <Video>'],
+    ['title-literal', '第一行\n第二行\\ ` ${literal} $& $$ $\' $` __VIDEO_ID__ __STAGE_WIDTH__'],
+  ];
+  for (const [id, title] of cases) {
+    runCliCmd(['init', id, '--title', title]);
+    const { sandbox } = loadVideoSandbox(TEST_ROOT, id);
+    assert.equal(sandbox.V.config.title, title, 'init must preserve the literal title in valid JavaScript');
+    const html = fs.readFileSync(path.join(TEST_ROOT, 'videos', id, 'index.html'), 'utf8');
+    const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
+    try {
+      const parsedTitle = await page.evaluate(html => new DOMParser().parseFromString(html, 'text/html').querySelector('title').textContent, html);
+      assert.equal(parsedTitle, title, 'HTML title text must preserve characters and entity-like text');
+      await page.goto(`http://127.0.0.1:${port}/${id}/?record=1`, { waitUntil: 'networkidle' });
+      await page.waitForFunction(() => window.V?.seekToAsync);
+      const shownTitle = await page.locator('h1.tpl-title').textContent();
+      assert.equal(shownTitle, title, 'Initialized scenes must display the literal title');
+    } finally {
+      await page.close();
+      fs.rmSync(path.join(TEST_ROOT, 'videos', id), { recursive: true, force: true });
+    }
+  }
+}
+
+async function verifyDelayedLocalePlayback(browser, port) {
+  const id = 'locale-playback';
+  const dir = path.resolve(TEST_ROOT, 'videos', id);
+  assert.equal(path.dirname(dir), path.resolve(TEST_ROOT, 'videos'));
+  fs.mkdirSync(path.join(dir, 'assets/voice'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'locales'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html lang="zh-CN"><head><link rel="stylesheet" href="../base/css/base.css"></head><body><script src="../base/js/engine.js"></script><script src="video.config.js"></script><script src="assets/voice/timings.js"></script><script src="scenes.js"></script><script>V.boot();</script></body></html>');
+  fs.writeFileSync(path.join(dir, 'video.config.js'), 'V.config={width:640,height:360,lang:"zh-CN",locales:["zh-CN","en"],lead:0,tail:0,gap:0,bgm:false,sceneScripts:["scenes.js"],ui:{persist:false,livePause:false,hud:false}};');
+  fs.writeFileSync(path.join(dir, 'scenes.js'), 'V.scene({id:"intro",lines:["中文配音。"],build(root){this.clip=V.u.videoClip("assets/clip.mp4",{loop:true,style:{width:"160px",height:"90px"}});root.append(this.clip);},update(t){V.u.syncVideoClip(this.clip,t);}});');
+  fs.writeFileSync(path.join(dir, 'locales/en.js'), 'V.locale("en",{scenes:{intro:{lines:["English narration."]}}});');
+  const ffmpeg = resolveFfmpeg(PKG_ROOT);
+  for (const [lang, name, duration] of [['zh-CN', 'base', 3], ['en', 'en', 30]]) {
+    const audio = spawnSync(ffmpeg, ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', `sine=frequency=440:duration=${duration}`, path.join(dir, 'assets', name + '.wav')]);
+    assert.equal(audio.status, 0, String(audio.stderr));
+    fs.writeFileSync(path.join(dir, 'assets/voice', lang === 'en' ? 'timings.en.js' : 'timings.js'), 'V.voice=' + JSON.stringify({ lang, src: `assets/${name}.wav`, durations: [[duration]] }) + ';');
+  }
+  const video = spawnSync(ffmpeg, ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=160x90:d=3:r=4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', path.join(dir, 'assets/clip.mp4')]);
+  assert.equal(video.status, 0, String(video.stderr));
+  try {
+    for (const action of [
+      { kind: 'keep', at: 2.5, playing: true, target: 'en', lang: 'en', mapped: 25 },
+      { kind: 'pause', at: 2.5, playing: false, target: 'en', lang: 'en', mapped: 25 },
+      { kind: 'seek', at: 1.5, playing: true, target: 'en', lang: 'en', mapped: 15 },
+      { kind: 'missing', at: 2.5, playing: true, target: 'missing', lang: 'zh-CN', mapped: 2.5 },
+    ]) {
+      const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      try {
+        const timingsPattern = `**/timings.${action.target}.js`;
+        await page.route(timingsPattern, async route => { await gate; await route.continue(); });
+        await page.goto(`http://127.0.0.1:${port}/${id}/`, { waitUntil: 'networkidle' });
+        await page.waitForFunction(() => window.__video?.getSyncState().readyState >= 2 && document.querySelector('video')?.readyState >= 2);
+        const requested = page.waitForRequest(timingsPattern, { timeout: 10000 });
+        await page.evaluate(target => { __video.seek(2.5); __video.play(); window.__localePlayback = V.setLang(target); }, action.target);
+        await requested;
+        await page.evaluate(action => {
+          if (action.kind === 'pause') __video.pause();
+          if (action.kind === 'seek') __video.seek(action.at);
+        }, action);
+        await page.waitForTimeout(1100);
+        const during = await page.evaluate(() => ({ ...__video.getSyncState(), clipPaused: document.querySelector('video').paused }));
+        release();
+        const after = await page.evaluate(async () => {
+          await window.__localePlayback;
+          const state = __video.getSyncState();
+          __video.pause();
+          return state;
+        });
+        assert.ok(Math.abs(during.now - action.at) < 0.001, 'Locale loading must hold the narrative at the latest requested position');
+        assert.equal(during.playing, action.playing, 'Locale loading must retain the latest playback intent');
+        assert.ok(during.audioPaused && during.clipPaused, 'Previous narration and embedded video must remain paused while locale assets load');
+        assert.equal(after.lang, action.lang, 'The delayed language request must finish in the selected locale or restore the previous locale');
+        assert.equal(after.playing, action.playing, 'Completing a language change must respect a user pause during loading');
+        assert.ok(Math.abs(after.now - action.mapped) < 0.001, 'A seek during loading must map its latest logical cue position');
+      } finally { release(); await page.close(); }
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+async function verifyLocaleResumeProgress(browser, port) {
+  const id = 'locale-resume';
+  const dir = path.resolve(TEST_ROOT, 'videos', id);
+  assert.equal(path.dirname(dir), path.resolve(TEST_ROOT, 'videos'));
+  fs.mkdirSync(path.join(dir, 'assets/voice'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'locales'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html lang="zh-CN"><head><link rel="stylesheet" href="../base/css/base.css"></head><body><script src="../base/js/engine.js"></script><script src="video.config.js"></script><script src="assets/voice/timings.js"></script><script src="scenes.js"></script><script>V.boot();</script></body></html>');
+  fs.writeFileSync(path.join(dir, 'video.config.js'), 'V.config={width:640,height:360,lang:"zh-CN",locales:["zh-CN","en"],audioSrc:false,bgm:false,sceneScripts:["scenes.js"],ui:{persist:true,resume:true,resumeMinSec:1,livePause:false,hud:false}};');
+  fs.writeFileSync(path.join(dir, 'scenes.js'), 'V.scene({duration:30,lines:[],build(){},update(){}});');
+  fs.writeFileSync(path.join(dir, 'locales/en.js'), 'V.locale("en",{title:"Resume EN"});');
+  for (const lang of ['zh-CN', 'en']) {
+    const name = lang === 'en' ? 'timings.en.js' : 'timings.js';
+    fs.writeFileSync(path.join(dir, 'assets/voice', name), 'V.voice=' + JSON.stringify({ lang, durations: [[]] }) + ';if(V.captureVoice)V.captureVoice(V.voice);');
+  }
+  const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
+  try {
+    await page.goto(`http://127.0.0.1:${port}/${id}/`, { waitUntil: 'networkidle' });
+    await page.waitForFunction(() => window.__video);
+    const base = await page.evaluate(() => {
+      __video.seek(5);
+      V._prefsRuntime.flushProgress(5, false);
+      return V._prefsRuntime.readSaved(V._getUiCfg(V.getCfg()));
+    });
+    assert.equal(base.t, 5, 'The base locale must save its paused progress');
+    const switched = await page.evaluate(async () => {
+      await V.setLang('en');
+      V._prefsRuntime.flushProgress(__video.getSyncState().now, false);
+      return V._prefsRuntime.readSaved(V._getUiCfg(V.getCfg()));
+    });
+    assert.equal(switched?.t, 5, 'The same timestamp in another locale must save that locale progress');
+    await page.goto(`http://127.0.0.1:${port}/${id}/?lang=en`, { waitUntil: 'networkidle' });
+    await page.waitForFunction(() => window.__video);
+    assert.equal(await page.evaluate(() => __video.getSyncState().now), 5, 'Reloading the selected locale must resume at its saved position');
+    const reset = await page.evaluate(() => {
+      V.clearSavedState();
+      const empty = V._prefsRuntime.readSaved(V._getUiCfg(V.getCfg()));
+      V._prefsRuntime.flushProgress(5, false);
+      return { empty, saved: V._prefsRuntime.readSaved(V._getUiCfg(V.getCfg())) };
+    });
+    assert.equal(reset.empty, null, 'Clearing saved state must remove the current locale progress');
+    assert.equal(reset.saved.t, 5, 'Cleared progress must be saved again even at the previous timestamp');
+    const restored = await page.evaluate(async () => {
+      await V.setLang('zh-CN');
+      return V._prefsRuntime.readSaved(V._getUiCfg(V.getCfg()));
+    });
+    assert.equal(restored.t, 5, 'Clearing another locale must preserve the base locale progress');
+  } finally {
+    await page.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function verifyConsumedInputEvents(browser, port) {
+  const id = 'consumed-input';
+  const dir = path.resolve(TEST_ROOT, 'videos', id);
+  assert.equal(path.dirname(dir), path.resolve(TEST_ROOT, 'videos'));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><head><link rel="stylesheet" href="../base/css/base.css"></head><body><script src="../base/js/engine.js"></script><script src="video.config.js"></script><script src="scenes.js"></script><script>V.boot();</script></body></html>');
+  fs.writeFileSync(path.join(dir, 'video.config.js'), 'V.config={width:640,height:360,audioSrc:false,bgm:false,ppt:true,ui:{hud:false,persist:false,livePause:false},sceneScripts:["scenes.js"]};');
+  fs.writeFileSync(path.join(dir, 'scenes.js'), `for(let i=0;i<3;i++)V.scene({title:'Widget '+i,duration:10,lines:[],build(root){
+const widget=V.u.interactive(V.u.h('div',{id:'input-widget',tabindex:'0',role:'listbox',style:'position:absolute;inset:40px;background:white;color:black'},'Component input'),{
+keydown(e){if(['ArrowRight','/',' ','Escape'].includes(e.key)){e.preventDefault();this.dataset.handled=e.key;}},
+wheel(e){e.preventDefault();this.dataset.wheeled='yes';}
+});root.append(widget);},update(){}});`);
+  const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
+  try {
+    for (const mode of ['video', 'ppt']) {
+      await page.goto(`http://127.0.0.1:${port}/${id}/${mode === 'ppt' ? '?ppt=1' : ''}`, { waitUntil: 'networkidle' });
+      await page.waitForFunction(() => window.__video);
+      const before = await page.evaluate(() => ({ now: __video.getSyncState().now, page: __video.page }));
+      await page.locator('#input-widget').focus();
+      for (const key of ['ArrowRight', 'Space']) {
+        await page.keyboard.press(key);
+        const after = await page.evaluate(() => ({ now: __video.getSyncState().now, page: __video.page, playing: __video.getSyncState().playing }));
+        assert.equal(after.now, before.now, `${mode}: a consumed ${key} must not seek the timeline`);
+        assert.equal(after.page, before.page, `${mode}: a consumed ${key} must not turn a page`);
+        assert.equal(after.playing, false, 'A consumed Space must not start playback');
+      }
+      await page.keyboard.press('/');
+      assert.equal(await page.evaluate(() => document.activeElement.id), 'input-widget', 'A consumed search shortcut must retain component focus');
+      await page.evaluate(() => V._playerCtl.setOpenMenu('chap'));
+      await page.keyboard.press('Escape');
+      assert.equal(await page.evaluate(() => document.getElementById('controls').dataset.menu), 'chap', 'A consumed Escape must not dismiss the player menu');
+      await page.evaluate(() => { V._playerCtl.setOpenMenu(''); document.activeElement.blur(); });
+      await page.keyboard.press('/');
+      assert.equal(await page.evaluate(() => document.activeElement.tagName), 'INPUT', 'Unconsumed search shortcuts must still open the search field');
+      await page.keyboard.press('Escape');
+      await page.keyboard.press('ArrowRight');
+      const navigated = await page.evaluate(() => ({ now: __video.getSyncState().now, page: __video.page }));
+      if (mode === 'video') {
+        assert.ok(Math.abs(navigated.now - before.now - 5) < 0.001, 'Unconsumed ArrowRight must still seek forward');
+      } else {
+        assert.equal(navigated.page, 2, 'Unconsumed ArrowRight must still turn a page');
+        await page.evaluate(() => { __video.goToPage(1); window.__wheelTarget = document.getElementById('input-widget'); });
+        const box = await page.locator('#input-widget').boundingBox();
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.wheel(0, 120);
+        await page.waitForFunction(() => window.__wheelTarget.dataset.wheeled === 'yes');
+        assert.equal(await page.evaluate(() => __video.page), 1, 'A consumed component wheel event must not turn a PPT page');
+        const stage = await page.locator('#stage').boundingBox();
+        await page.mouse.move(stage.x + 5, stage.y + 5);
+        await page.mouse.wheel(0, 120);
+        await page.waitForFunction(() => window.__video.page === 2);
+      }
+    }
+  } finally {
+    await page.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function verifyPersistentLayerFrameContext(browser, port) {
+  const id = 'layer-frame-context';
+  const dir = path.resolve(TEST_ROOT, 'videos', id);
+  assert.equal(path.dirname(dir), path.resolve(TEST_ROOT, 'videos'));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><head><link rel="stylesheet" href="../base/css/base.css"></head><body><script src="../base/js/engine.js"></script><script src="video.config.js"></script><script src="scenes.js"></script><script>V.boot();</script></body></html>');
+  fs.writeFileSync(path.join(dir, 'video.config.js'), 'V.config={width:320,height:180,audioSrc:false,bgm:false,transitionDur:0,ui:{hud:false},sceneScripts:["scenes.js"]};');
+  fs.writeFileSync(path.join(dir, 'scenes.js'), `function frameState(x,sc,si){return{tone:20+x.clock*50+si*30,clock:x.clock,alive:x.alive,sceneClock:x.sceneClock,dur:x.dur};}
+V.layer({id:'context',prop:'host',blendDur:0.5,zIndex:50,create(){},update(st,info){info.el.style.background='rgb('+Math.round(st.tone)+',0,0)';window.__layerPrevious={...info.prev};}});
+for(let i=0;i<3;i++)V.scene({duration:1,lines:[],host:frameState,build(){},update(){}});`);
+  const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+  try {
+    for (const [target, prior] of [[1.1, 0.8], [2.1, 1.8]]) {
+      await page.goto(`http://127.0.0.1:${port}/${id}/?record=1`, { waitUntil: 'networkidle' });
+      await page.waitForFunction(() => window.V?.seekToAsync);
+      await page.evaluate(t => V.seekToAsync(t), target);
+      const direct = await page.evaluate(() => window.__layerPrevious);
+      const first = await page.screenshot();
+      await page.evaluate(async ({ prior, target }) => { await V.seekToAsync(prior); await V.seekToAsync(target); }, { prior, target });
+      assert.deepEqual(await page.evaluate(() => window.__layerPrevious), direct, 'Persistent-layer state must not depend on the previous seek path');
+      assert.ok(first.equals(await page.screenshot()), 'Random seeks must reproduce identical persistent-layer pixels');
+      assert.equal(direct.clock, target, 'Previous-scene layer callbacks must receive the current frame clock');
+      assert.equal(direct.alive, target, 'Previous-scene layer callbacks must receive the current ambient clock');
+      assert.ok(Math.abs(direct.sceneClock - 1.1) < 0.000001, 'Layer callbacks must resolve sceneClock against their own scene start');
+    }
+    const resized = await page.evaluate(async () => {
+      V.scenes[0]._explicitDuration = 1.4;
+      V.layout();
+      await V.seekToAsync(V.scenes[1].start + 0.1);
+      return { actual: window.__layerPrevious.dur, expected: V.scenes[0].duration };
+    });
+    assert.equal(resized.actual, resized.expected, 'Previous-scene layer callbacks must use the latest laid-out duration');
+  } finally {
+    await page.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function verifyPausedVideoMetadata(browser, port) {
+  const id = 'paused-video-metadata';
+  const dir = path.resolve(TEST_ROOT, 'videos', id);
+  assert.equal(path.dirname(dir), path.resolve(TEST_ROOT, 'videos'));
+  fs.mkdirSync(dir, { recursive: true });
+  createVideoBoundaryClip(path.join(dir, 'assets/boundary.mp4'));
+  fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><head><link rel="stylesheet" href="../base/css/base.css"><style>#controls,#osd,#start-hint{display:none!important}</style></head><body><script src="../base/js/engine.js"></script><script src="video.config.js"></script><script src="scenes.js"></script><script>V.boot();</script></body></html>');
+  fs.writeFileSync(path.join(dir, 'video.config.js'), 'V.config={width:320,height:180,audioSrc:false,bgm:false,sceneScripts:["scenes.js"],ui:{persist:false,livePause:false,hud:false}};');
+  fs.writeFileSync(path.join(dir, 'scenes.js'), 'V.scene({duration:1,lines:[],build(){},update(){}});V.scene({duration:3,lines:[],build(root){this.clip=V.u.videoClip("assets/boundary.mp4",{loop:new URLSearchParams(location.search).has("loop"),style:{width:"320px",height:"180px"}});root.append(this.clip);},update(t){V.u.syncVideoClip(this.clip,t);}});');
+  try {
+    for (const action of [
+      { lt: 0.6, loop: false, expected: 0.6, pause: false },
+      { lt: 2.5, loop: false, expected: 0.99, pause: false },
+      { lt: 2.5, loop: true, expected: 0.5, pause: false },
+      { lt: 0.6, loop: false, pause: true },
+    ]) {
+      const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      try {
+        await page.route('**/boundary.mp4', async route => { await gate; await route.continue(); });
+        await page.goto(`http://127.0.0.1:${port}/${id}/${action.loop ? '?loop=1' : ''}`, { waitUntil: 'networkidle' });
+        await page.waitForFunction(() => window.__video);
+        const requested = page.waitForRequest('**/boundary.mp4', { timeout: 10000 });
+        await page.evaluate(t => __video.seek(t), 1 + action.lt);
+        await requested;
+        if (action.pause) {
+          await page.evaluate(() => __video.play());
+          await page.waitForFunction(() => !document.querySelector('video').paused);
+          await page.evaluate(() => __video.pause());
+        }
+        const at = await page.evaluate(() => __video.getSyncState().now);
+        release();
+        await page.waitForFunction(() => { const v = document.querySelector('video'); return v.readyState >= 2 && !v.seeking; });
+        const loaded = await page.locator('video').evaluate(v => ({ time: v.currentTime, paused: v.paused }));
+        assert.ok(Math.abs(loaded.time - (action.expected ?? (at - 1))) < 0.000001, 'Late metadata must apply the paused target, including end holds and loops');
+        assert.equal(loaded.paused, true, 'Metadata arrival must respect a pause requested during loading');
+        const ordinary = await page.locator('video').screenshot();
+        await page.evaluate(t => V.seekToAsync(t), at);
+        assert.ok(ordinary.equals(await page.locator('video').screenshot()), 'An ordinary paused seek must show the same pixels as an awaited seek');
+      } finally { release(); await page.close(); }
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+function createVideoBoundaryClip(outMp4) {
+  fs.mkdirSync(path.dirname(outMp4), { recursive: true });
+  const r = spawnSync(resolveFfmpeg(PKG_ROOT), [
+    '-y', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', 'color=c=red:s=320x180:d=0.5:r=4',
+    '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:d=0.5:r=4',
+    '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0[v]', '-map', '[v]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', outMp4,
+  ], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `Failed generating video frame boundary fixture: ${r.stderr}`);
+}
+
+async function verifyVideoSeekPrecision(page, port, id) {
+  await page.goto(`http://127.0.0.1:${port}/${id}/?record=1&precision=1`, { waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.V?.seekToAsync);
+  await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.499));
+  const before = await page.locator('video').screenshot();
+  await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.501));
+  const time = await page.locator('video').evaluate(v => v.currentTime);
+  assert.ok(Math.abs(time - 0.501) < 0.00001, `Record seek must cross nearby source frame boundaries, got ${time}`);
+  assert.ok(!before.equals(await page.locator('video').screenshot()), 'A two-millisecond seek across a source frame boundary must decode different pixels');
+  await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.499));
+  assert.ok(before.equals(await page.locator('video').screenshot()), 'Seeking backward across the same boundary must restore the original frame');
+
+  await page.goto(`http://127.0.0.1:${port}/${id}/?precision=1`, { waitUntil: 'networkidle' });
+  await page.waitForFunction(() => window.V?.seekToAsync);
+  await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.4));
+  const pausedBefore = await page.locator('video').screenshot();
+  await page.evaluate(() => window.__video.seek(V.scenes[1].start + 0.5));
+  await page.waitForFunction(() => !document.querySelector('video').seeking);
+  const paused = await page.locator('video').evaluate(v => ({ time: v.currentTime, paused: v.paused }));
+  assert.ok(paused.paused && Math.abs(paused.time - 0.5) < 0.00001, `Paused preview must seek to the requested frame, got ${paused.time}`);
+  assert.ok(!pausedBefore.equals(await page.locator('video').screenshot()), 'Paused preview seek must update the decoded video pixels');
+}
+
+async function verifyAsyncVideoFrameReadiness(browser, port, videoDir) {
+  const slow = createVideoHttpServer({ videosDir: path.join(videoDir, 'assets') });
+  const serveAsset = slow.listeners('request')[0];
+  slow.removeAllListeners('request');
+  slow.on('request', (req, res) => {
+    const timer = setTimeout(() => serveAsset.call(slow, req, res), 3000);
+    res.once('close', () => clearTimeout(timer));
+  });
+  await new Promise(resolve => slow.listen(0, '127.0.0.1', resolve));
+  const id = 'delayed-video';
+  const dir = path.join(TEST_ROOT, 'videos', id);
+  fs.mkdirSync(path.join(dir, 'js'), { recursive: true });
+  createVideoBoundaryClip(path.join(dir, 'assets/boundary.mp4'));
+  fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><head><link rel="stylesheet" href="../base/css/base.css"></head><body><script src="../base/js/engine.js"></script><script src="video.config.js"></script><script src="js/scenes.js"></script><script>V.boot();</script></body></html>');
+  fs.writeFileSync(path.join(dir, 'video.config.js'), 'V.config={width:320,height:180,fps:4,audioSrc:false,bgm:false,ui:{hud:false},sceneScripts:["js/scenes.js"]};');
+  const goodSrc = `http://127.0.0.1:${slow.address().port}/clip.mp4`;
+  const badSrc = `http://127.0.0.1:${port}/${id}/missing.mp4`;
+  const precisionSrc = `http://127.0.0.1:${port}/${id}/assets/boundary.mp4`;
+  fs.writeFileSync(path.join(dir, 'js/scenes.js'), `V.scene({duration:1,lines:[],build(root){root.textContent='First';},update(){}});
+V.scene({duration:3,lines:[],build(root){const params=new URLSearchParams(location.search);const src=params.has('broken')?${JSON.stringify(badSrc)}:(params.has('precision')?${JSON.stringify(precisionSrc)}:${JSON.stringify(goodSrc)});this.clip=V.u.videoClip(src,{loop:params.has('loop'),style:{width:'320px',height:'180px'}});root.append(this.clip);},update(t){V.u.syncVideoClip(this.clip,t);}});`);
+  const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+  try {
+    await page.goto(`http://127.0.0.1:${port}/${id}/?record=1`, { waitUntil: 'networkidle' });
+    await page.waitForFunction(() => window.V?.seekToAsync);
+    const state = await page.evaluate(async () => {
+      await V.seekToAsync(V.scenes[1].start + 0.6);
+      const v = document.querySelector('video');
+      return { ready: v.readyState, seeking: v.seeking, time: v.currentTime, target: v._vclip.targetTime };
+    });
+    assert.ok(state.ready >= 2 && !state.seeking, 'Record seek must await a decoded frame even when metadata takes more than two seconds');
+    assert.ok(Math.abs(state.time - state.target) < 0.008, 'Record seek must reach the requested video position');
+    const first = await page.screenshot();
+    await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.6));
+    assert.ok(first.equals(await page.screenshot()), 'Repeated video seek must produce identical pixels');
+    const dataWait = await page.evaluate(async () => {
+      const v = document.querySelector('video');
+      let ready = 1;
+      Object.defineProperty(v, 'readyState', { configurable: true, get: () => ready });
+      const timer = setTimeout(() => { ready = 2; v.dispatchEvent(new Event('loadeddata')); }, 250);
+      const start = performance.now();
+      try { await V.seekToAsync(V.scenes[1].start + 0.6); return performance.now() - start; }
+      finally { clearTimeout(timer); delete v.readyState; }
+    });
+    assert.ok(dataWait >= 200, 'Metadata alone must not count as a decoded first frame');
+    for (const loop of [false, true]) {
+      await page.goto(`http://127.0.0.1:${port}/${id}/?record=1${loop ? '&loop=1' : ''}`, { waitUntil: 'networkidle' });
+      await page.waitForFunction(() => window.V?.seekToAsync);
+      const end = await page.evaluate(async () => {
+        await V.seekToAsync(V.scenes[1].start + 2.5);
+        const v = document.querySelector('video');
+        return { time: v.currentTime, target: v._vclip.targetTime, duration: v.duration };
+      });
+      const expected = loop ? 2.5 % end.duration : end.duration - 0.01;
+      assert.ok(Math.abs(end.time - expected) < 0.008, 'Late metadata must resolve end holds and loops against the loaded clip duration');
+      assert.ok(Math.abs(end.time - end.target) < 0.008, 'Resolved video target must match the decoded position');
+    }
+    await page.goto(`http://127.0.0.1:${port}/${id}/?record=1&broken=1`, { waitUntil: 'networkidle' });
+    await page.waitForFunction(() => window.V?.seekToAsync);
+    await assert.rejects(page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.6)), /embedded video/i, 'Record mode must reject unavailable media instead of exporting a black frame');
+    await page.goto(`http://127.0.0.1:${port}/${id}/?broken=1`, { waitUntil: 'networkidle' });
+    await page.waitForFunction(() => window.V?.seekToAsync);
+    await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.6));
+    await verifyVideoSeekPrecision(page, port, id);
+  } finally {
+    await page.close();
+    slow.closeAllConnections();
+    await new Promise(resolve => slow.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function verifySceneImageReadiness(browser, port) {
+  const completed = new Set();
+  const requested = new Set();
+  const assets = http.createServer((req, res) => {
+    requested.add(req.url);
+    const timer = setTimeout(() => {
+      const color = req.url.includes('later') ? 'green' : 'red';
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=3600' });
+      res.end(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="${color}"/></svg>`);
+      completed.add(req.url);
+    }, 400);
+    res.once('close', () => clearTimeout(timer));
+  });
+  await new Promise(resolve => assets.listen(0, '127.0.0.1', resolve));
+  const id = 'css-image-readiness';
+  const dir = path.join(TEST_ROOT, 'videos', id);
+  fs.mkdirSync(path.join(dir, 'js'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><head><link rel="stylesheet" href="../base/css/base.css"><style>.probe,.probe::before{position:absolute;inset:0;background-image:var(--probe-image);background-size:cover}.probe.as-pseudo{background-image:none}.probe.as-pseudo::before{content:""}</style></head><body><script src="../base/js/engine.js"></script><script src="video.config.js"></script><script src="js/scenes.js"></script><script>V.boot();</script></body></html>');
+  fs.writeFileSync(path.join(dir, 'video.config.js'), 'V.config={width:320,height:180,fps:4,audioSrc:false,bgm:false,ui:{hud:false},sceneScripts:["js/scenes.js"]};');
+  fs.writeFileSync(path.join(dir, 'js/scenes.js'), `V.scene({duration:1,lines:[],build(){},update(){}});
+V.scene({duration:2,lines:[],build(root){
+  this.mode=new URLSearchParams(location.search).get('image')||'element';
+  if(this.mode==='svg'){
+    const svg=V.u.svg('<image width="320" height="180"/>','width="320" height="180"');
+    this.probe=svg.querySelector('image');root.append(svg);
+  }else{
+    this.probe=V.u.h(this.mode==='html'?'img':'div',{class:'probe'+(this.mode==='pseudo'?' as-pseudo':'')});root.append(this.probe);
+  }
+  const hidden=V.u.h('div',{style:{display:'none'}});
+  hidden.append(V.u.h('div',{style:{backgroundImage:'url("http://127.0.0.1:${assets.address().port}/'+this.mode+'/unused.svg")'}}));
+  root.append(hidden);
+},update(t){
+  const prefix='http://127.0.0.1:${assets.address().port}/'+this.mode+'/';
+  const src=t>=0.5?'later(green).svg':'initial(red).svg';
+  if(this.mode==='svg'){this.probe.setAttribute('href',prefix+src);return;}
+  if(this.mode==='html'){this.probe.src=prefix+src;return;}
+  this.probe.style.setProperty('--probe-image','url("'+prefix+src+'"), url("'+prefix+'layer.svg")');
+}});`);
+  const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+  try {
+    for (const mode of ['element', 'pseudo', 'html', 'svg']) {
+      await page.goto(`http://127.0.0.1:${port}/${id}/?record=1&image=${mode}`, { waitUntil: 'networkidle' });
+      await page.waitForFunction(() => window.V?.seekToAsync);
+      await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.4));
+      const files = ['html', 'svg'].includes(mode) ? ['initial(red).svg'] : ['initial(red).svg', 'layer.svg'];
+      for (const file of files) {
+        assert.ok(completed.has(`/${mode}/${file}`), `Async seek must wait for ${mode} images`);
+      }
+      assert.equal(requested.has(`/${mode}/unused.svg`), false, 'Hidden subtrees must not fetch unused CSS images');
+      const first = await page.screenshot();
+      await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.6));
+      assert.ok(completed.has(`/${mode}/later(green).svg`), 'An image changed by update(t) must be decoded before async seek completes');
+      assert.ok(!first.equals(await page.screenshot()), 'The changed image must appear in the captured pixels');
+      await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.4));
+      assert.ok(first.equals(await page.screenshot()), 'Seeking back must restore the same image pixels');
+    }
+  } finally {
+    await page.close();
+    assets.closeAllConnections();
+    await new Promise(resolve => assets.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function verifyShadowImageReadiness(browser, port) {
+  const completed = new Set();
+  const requested = new Set();
+  const assets = http.createServer((req, res) => {
+    requested.add(req.url);
+    const timer = setTimeout(() => {
+      const color = req.url.includes('green') ? 'green' : 'red';
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=3600' });
+      res.end(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="${color}"/></svg>`);
+      completed.add(req.url);
+    }, 400);
+    res.once('close', () => clearTimeout(timer));
+  });
+  await new Promise(resolve => assets.listen(0, '127.0.0.1', resolve));
+  const id = 'shadow-image-readiness';
+  const dir = path.join(TEST_ROOT, 'videos', id);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><head><link rel="stylesheet" href="../base/css/base.css"><style>#controls,#osd,#start-hint,#subs{display:none!important}</style></head><body><script src="../base/js/engine.js"></script><script src="video.config.js"></script><script src="scenes.js"></script><script>V.boot()</script></body></html>');
+  fs.writeFileSync(path.join(dir, 'video.config.js'), 'V.config={width:320,height:180,audioSrc:false,bgm:false,ui:{hud:false,livePause:false},sceneScripts:["scenes.js"]};');
+  fs.writeFileSync(path.join(dir, 'scenes.js'), `V.scene({duration:1,lines:[],build(){},update(){}});
+V.scene({duration:2,lines:[],build(root){
+  this.mode=new URLSearchParams(location.search).get('image');
+  const host=V.u.h('div',{style:{position:'absolute',inset:'0',background:'black'}});root.append(host);
+  let shadow=host.attachShadow({mode:'open'});
+  if(this.mode==='nested'){
+    const nested=V.u.h('div',{style:{position:'absolute',inset:'0'}});shadow.append(nested);
+    shadow=nested.attachShadow({mode:'open'});
+  }
+  shadow.append(V.u.h('style',null,'.probe{position:absolute;inset:0;width:320px;height:180px;background-size:cover}.probe.pseudo::before{content:"";position:absolute;inset:0;background-image:var(--image);background-size:cover}'));
+  if(this.mode==='svg'){
+    const svg=V.u.svg('<image width="320" height="180"/>','class="probe" width="320" height="180"');
+    this.probe=svg.querySelector('image');shadow.append(svg);
+  }else{
+    this.probe=V.u.h(['html','nested'].includes(this.mode)?'img':'div',{class:'probe '+this.mode});
+    shadow.append(this.probe);
+  }
+  const hidden=V.u.h('div',{style:{display:'none'}});
+  hidden.append(V.u.h('div',{style:{backgroundImage:'url("http://127.0.0.1:${assets.address().port}/'+this.mode+'/unused.svg")'}}));
+  shadow.append(hidden);
+},update(t){
+  const src='http://127.0.0.1:${assets.address().port}/'+this.mode+'/'+(t>=0.5?'green':'red')+'.svg';
+  if(this.mode==='svg'){this.probe.setAttribute('href',src);return;}
+  if(['html','nested'].includes(this.mode)){this.probe.src=src;return;}
+  this.probe.style.setProperty('--image','url("'+src+'")');
+  if(this.mode==='css')this.probe.style.backgroundImage='var(--image)';
+}});`);
+  const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+  try {
+    for (const mode of ['html', 'svg', 'css', 'pseudo', 'nested']) {
+      await page.goto(`http://127.0.0.1:${port}/${id}/?record=1&image=${mode}`, { waitUntil: 'networkidle' });
+      await page.waitForFunction(() => window.V?.seekToAsync);
+      await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.4));
+      assert.ok(completed.has(`/${mode}/red.svg`), `Async seek must wait for shadow ${mode} images`);
+      const first = await page.screenshot();
+      await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.6));
+      assert.ok(completed.has(`/${mode}/green.svg`), 'Updated shadow images must load before async seek returns');
+      assert.ok(!first.equals(await page.screenshot()), 'Updated shadow images must change captured pixels');
+      await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.4));
+      assert.ok(first.equals(await page.screenshot()), 'Seeking back must restore the same shadow image pixels');
+      assert.equal(requested.has(`/${mode}/unused.svg`), false, 'Hidden shadow subtrees must not fetch unused CSS images');
+    }
+  } finally {
+    await page.close();
+    assets.closeAllConnections();
+    await new Promise(resolve => assets.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function verifyTopLayerFrameReuse(browser) {
+  for (const mode of ['popover', 'popover-outside', 'popover-order', 'dialog', 'fallback-popover', 'fallback-dialog']) {
+    const kind = mode.replace('fallback-', '');
+    const fallback = mode.startsWith('fallback-');
+    const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+    try {
+      const content = kind === 'dialog' ? '<dialog id="popup">Dialog</dialog>' : '<div id="popup" popover="manual">Popover</div>' + (kind === 'popover-order' ? '<div id="other" popover="manual">Other</div>' : '');
+      const inside = kind === 'popover-outside' ? '' : content;
+      const outside = kind === 'popover-outside' ? content : '';
+      await page.setContent(`<style>html,body{margin:0}#stage{width:320px;height:180px;background:#00dd44}#popup,#other{inset:0;margin:0;box-sizing:border-box;width:320px;height:180px;max-width:none;max-height:none;outline:none;border:0;background:#00dd44;color:black;font:32px monospace;padding:12px}#popup:popover-open,#popup:modal{background:#ff2255}#other{background:#2255ff}</style><div id="stage">${inside}</div>${outside}`);
+      if (fallback) await page.evaluate(() => {
+        const original = CSS.supports;
+        CSS.supports = function (...args) {
+          if (String(args[0]).startsWith('selector(')) return false;
+          return original.apply(this, args);
+        };
+      });
+      await page.evaluate(installFrameReuseProbe);
+      await page.evaluate(kind => {
+        const popup = document.getElementById('popup');
+        const other = document.getElementById('other');
+        window.V = { async seekToAsync(sec) {
+          const later = sec >= 0.5;
+          if (kind === 'popover-order') {
+            for (const el of [popup, other]) if (el.matches(':popover-open')) el.hidePopover();
+            for (const el of later ? [other, popup] : [popup, other]) el.showPopover();
+            return;
+          }
+          if (kind === 'dialog') {
+            if (!popup.open || later !== popup.matches(':modal')) {
+              popup.close();
+              if (later) popup.showModal(); else popup.show();
+            }
+            return;
+          }
+          if (later !== popup.matches(':popover-open')) {
+            if (later) popup.showPopover(); else popup.hidePopover();
+          }
+        } };
+      }, kind);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.1)), false);
+      const before = await page.screenshot({ caret: 'initial' });
+      const html = await page.evaluate(() => document.getElementById('stage').innerHTML);
+      const ordinary = !fallback && kind !== 'popover-order';
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.2)), ordinary, `${mode}: ordinary stage content must retain static reuse`);
+      const reused = await page.evaluate(() => __seekAndDedupe(0.8));
+      assert.equal(await page.evaluate(() => document.getElementById('stage').innerHTML), html, 'Top-layer state must be tested independently of HTML mutations');
+      assert.ok(!before.equals(await page.screenshot({ caret: 'initial' })), `${mode}: top-layer state must change the visible frame`);
+      assert.equal(reused, false, `${mode}: a native top-layer frame must be captured`);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.9)), false, 'An open top layer can change stacking order without DOM changes');
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.1)), false);
+      assert.ok(before.equals(await page.screenshot({ caret: 'initial' })), `${mode}: backward seeking must restore the same pixels`);
+      await page.evaluate(() => {
+        for (const dialog of document.querySelectorAll('dialog')) dialog.close();
+        for (const popup of document.querySelectorAll('[popover]')) if (popup.matches(':popover-open')) popup.hidePopover();
+        document.body.innerHTML = '<div id="stage">Static</div>';
+        window.V.seekToAsync = async () => {};
+      });
+      assert.equal(await page.evaluate(() => __seekAndDedupe(1)), false);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(1.1)), true, 'Removing top-layer elements must restore ordinary static reuse');
+    } finally { await page.close(); }
+  }
+}
+
+async function verifySvgAnimationFrameReuse(browser) {
+  const drawings = {
+    animate: '<rect width="320" height="180" fill="#00dd44"><animate attributeName="fill" values="#00dd44;#ff2255" dur="1s" fill="freeze"/></rect>',
+    transform: '<rect width="160" height="180" fill="#ff2255"><animateTransform attributeName="transform" type="translate" values="0 0;160 0" dur="1s" fill="freeze"/></rect>',
+    motion: '<rect width="100" height="180" fill="#ff2255"><animateMotion path="M0,0 L160,0" dur="1s" fill="freeze"/></rect>',
+    set: '<rect width="320" height="180" fill="#00dd44"><set attributeName="fill" to="#ff2255" begin="0.5s" fill="freeze"/></rect>',
+  };
+  for (const [mode, drawing] of Object.entries(drawings)) {
+    const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
+    try {
+      await page.setContent('<style>html,body{margin:0}#stage{width:320px;height:180px;background:#2255ff}svg{display:block}</style><div id="stage"><svg id="drawing" width="320" height="180" xmlns="http://www.w3.org/2000/svg"><rect width="320" height="180" fill="#00dd44"/></svg></div>');
+      await page.evaluate(installFrameReuseProbe);
+      await page.evaluate(() => { window.V = { async seekToAsync() {} }; });
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0)), false);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.05)), true, `${mode}: ordinary static SVG must retain frame reuse`);
+      await page.evaluate(drawing => {
+        const svg = document.getElementById('drawing');
+        svg.innerHTML = drawing;
+        svg.pauseAnimations();
+        window.V.seekToAsync = async sec => { svg.setCurrentTime(sec); };
+      }, drawing);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.1)), false);
+      const before = await page.screenshot({ caret: 'initial' });
+      const html = await page.evaluate(() => document.getElementById('stage').innerHTML);
+      const reused = await page.evaluate(() => __seekAndDedupe(0.8));
+      assert.equal(await page.evaluate(() => document.getElementById('stage').innerHTML), html, `${mode}: native animation time must be tested independently of HTML mutations`);
+      assert.equal(await page.evaluate(() => document.getElementById('stage').getAnimations({ subtree: true }).length), 0, 'Native SVG animations are not exposed through the Web Animations API');
+      assert.ok(!before.equals(await page.screenshot({ caret: 'initial' })), `${mode}: authored SVG time must change the rendered pixels`);
+      assert.equal(reused, false, `${mode}: SVG animation state must produce a fresh frame`);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.8)), false, 'Native animation elements must bypass HTML-only frame reuse');
+      assert.equal(await page.evaluate(() => __seekAndDedupe(0.1)), false);
+      assert.ok(before.equals(await page.screenshot({ caret: 'initial' })), `${mode}: backward seeking must restore the same pixels`);
+      await page.evaluate(() => {
+        for (const el of document.querySelectorAll('animate,animateTransform,animateMotion,set')) el.remove();
+      });
+      assert.equal(await page.evaluate(() => __seekAndDedupe(1)), false);
+      assert.equal(await page.evaluate(() => __seekAndDedupe(1.1)), true, `${mode}: removing animation elements must restore static SVG reuse`);
+    } finally { await page.close(); }
+  }
+}
+
+async function verifySubtitleExportText(browser) {
+  const items = [
+    { start: 0, end: 1, text: '普通中文字幕与 English captions。', speaker: '' },
+    { start: 1, end: 2, text: '比较 a < b 且 c > d，A --> B。', speaker: '' },
+    { start: 2, end: 3, text: '标签 <b>重点</b>、<i>斜体</i>、<00:00:02.500> 与 <未知标签>。', speaker: '' },
+    { start: 3, end: 4, text: '字面实体 &amp; &lt; &gt; &nbsp; &#65; 与普通 &。', speaker: '' },
+    { start: 4, end: 5, text: '引号 "原样" 与单行换行\n下一行。', speaker: '讲者甲' },
+    { start: 5, end: 6, text: '讲者名称不应混入字幕正文。', speaker: '讲者 > 甲 <乙> &amp; "丙"' },
+  ];
+  const page = await browser.newPage();
+  try {
+    const parsed = await page.evaluate(async (vtt) => {
+      const video = document.createElement('video');
+      const track = document.createElement('track');
+      track.kind = 'subtitles';
+      const url = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
+      let timer;
+      try {
+        const loaded = new Promise((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('Subtitle track did not load')), 10000);
+          track.onload = resolve;
+          track.onerror = () => reject(new Error('Browser rejected the exported VTT'));
+        });
+        track.src = url;
+        video.append(track);
+        document.body.append(video);
+        track.track.mode = 'hidden';
+        await loaded;
+        return Array.from(track.track.cues, cue => {
+          const html = cue.getCueAsHTML();
+          const speaker = html.querySelector('span[title]');
+          return { start: cue.startTime, end: cue.endTime, text: html.textContent, speaker: speaker ? speaker.title : '' };
+        });
+      } finally {
+        clearTimeout(timer);
+        video.remove();
+        URL.revokeObjectURL(url);
+      }
+    }, buildVttContent(items));
+    assert.equal(parsed.length, items.length, 'Exported VTT must keep every cue');
+    for (let index = 0; index < items.length; index++) {
+      assert.deepEqual(parsed[index], items[index], 'Browser-parsed VTT must preserve the literal subtitle text, speaker and timing');
+    }
+  } finally { await page.close(); }
+}
+
 async function verifyBrowserCapabilities(videoDir) {
   const { srv, port } = await startEphemeralVideoServer({ videosDir: path.join(TEST_ROOT, 'videos'), watch: true });
   const chromium = await loadChromium(PKG_ROOT);
@@ -1497,6 +2547,21 @@ async function verifyBrowserCapabilities(videoDir) {
   });
 
   try {
+    await verifyFrameReuseStateTracking(browser);
+    await verifyAnimationClockFrameReuse(browser);
+    await verifyShadowDomFrameReuse(browser);
+    await verifySvgUseFrameReuse(browser);
+    await verifyNativeControlFrameReuse(browser);
+    await verifyTopLayerFrameReuse(browser);
+    await verifySvgAnimationFrameReuse(browser);
+    await verifySubtitleExportText(browser);
+    await verifyInitTitleEscaping(browser, port);
+    await verifyPersistentLayerFrameContext(browser, port);
+    await verifyConsumedInputEvents(browser, port);
+    await verifyAsyncVideoFrameReadiness(browser, port, videoDir);
+    await verifyPausedVideoMetadata(browser, port);
+    await verifySceneImageReadiness(browser, port);
+    await verifyShadowImageReadiness(browser, port);
     const hmrRes = await fetch(`http://127.0.0.1:${port}/__hmr`);
     assert.equal(hmrRes.status, 200);
     assert.ok((hmrRes.headers.get('content-type') || '').includes('text/event-stream'));
@@ -1552,6 +2617,9 @@ async function verifyBrowserCapabilities(videoDir) {
     await verifyPptDeckMode(page, port);
     await verifySfxAndMultiScriptContracts(page, port);
     await verifyRuntimeSetLangHotSwitch(page, port);
+    await verifyConcurrentLocaleSwitches(page, port);
+    await verifyDelayedLocalePlayback(browser, port);
+    await verifyLocaleResumeProgress(browser, port);
     await verifySingleLangOptOutSafety(browser, port);
     await verifyPptOptInDefaultOff(browser, port);
     await verifyOptionalReturnLink(browser, port);
@@ -1574,6 +2642,22 @@ function assertCliFails(args, msg) {
     env: Object.assign({}, process.env, { VIDEO_PROJECT_ROOT: TEST_ROOT }),
   });
   assert.notEqual(r.status, 0, msg || `Expected CLI failure for: ${args.join(' ')}`);
+  return r;
+}
+
+function verifyInvalidRenderCliArgs() {
+  const out = path.join(TEST_ROOT, 'invalid-render.mp4');
+  const cases = [
+    ['--fps', '0'], ['--fps', 'bad'], ['--fps', '1e308'], ['--range', '100:101'],
+    ['--range', '0:1:2'], ['--scene', '1.5'], ['--scene', 'bad'],
+  ];
+  const errors = { '--fps': /Invalid FPS|Render frame count/i, '--range': /--range/i, '--scene': /--scene/i };
+  for (const args of cases) {
+    const fpsArgs = args[0] === '--fps' ? [] : ['--fps', '4'];
+    const r = assertCliFails(['render', 'demo', out, ...fpsArgs, ...args]);
+    assert.match(r.stderr, errors[args[0]], 'CLI must explain the invalid render option');
+    assert.equal(fs.existsSync(out), false, 'Invalid render options must not create an output');
+  }
 }
 
 function verifyFreshUnbuiltAudit() {
@@ -1604,6 +2688,379 @@ function seedNestedBundleComponent(videoDir) {
   );
 }
 
+function verifySpecialCharacterVideoPaths() {
+  const id = '演示 # 50% +&';
+  const dir = path.join(TEST_ROOT, 'videos', id);
+  fs.mkdirSync(path.join(dir, 'js'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><head><link rel="stylesheet" href="../base/css/base.css"></head><body><script src="../base/js/engine.js"></script><script src="video.config.js"></script><script src="js/scenes.js"></script><script>V.boot();</script></body></html>');
+  fs.writeFileSync(path.join(dir, 'video.config.js'), 'V.config={title:"Special directory",width:320,height:180,fps:2,audioSrc:false,bgm:false,ui:{hud:false},sceneScripts:["js/scenes.js"]};');
+  fs.writeFileSync(path.join(dir, 'js/scenes.js'), 'V.scene({title:"Color",duration:1,lines:[],build(root){root.style.background="teal";},update(){}});');
+  runCliCmd(['audit', id]);
+  const outMp4 = path.join(dir, 'assets/rendered/special-directory.mp4');
+  runCliCmd(['render', id, outMp4, '--workers', '1']);
+  const warm = runCliCmd(['render', id, outMp4, '--workers', '1']);
+  assert.ok(warm.includes('1/1 scenes hit'), 'Rendering into the video asset tree must retain the scene cache');
+  const decoded = spawnSync(resolveFfmpeg(PKG_ROOT), ['-loglevel', 'error', '-i', outMp4, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
+  assert.equal(decoded.status, 0, String(decoded.stderr));
+  assert.equal(decoded.stdout.length, 320 * 180 * 3 * 2, 'Special-character video directory must render two complete frames');
+  const pixel = decoded.stdout.subarray((90 * 320 + 160) * 3, (90 * 320 + 160) * 3 + 3);
+  assert.ok(pixel[0] < 10 && pixel[1] > 100 && pixel[2] > 100, 'Special-character video directory must render the scene pixels');
+  const outHtml = path.join(TEST_ROOT, 'special-directory-storyboard.html');
+  runCliCmd(['storyboard', id, outHtml]);
+  assert.match(fs.readFileSync(outHtml, 'utf8'), /data:image\/jpeg;base64,/, 'Storyboard must embed a captured frame for the special-character video directory');
+  verifyOutputFilenameCase(dir);
+}
+
+function verifyOutputFilenameCase(videoDir) {
+  for (const [mode, extension, flags] of [['render', 'MP4', ['--workers', '1']], ['storyboard', 'HtMl', []]]) {
+    const root = path.join(TEST_ROOT, 'output-shortcuts', mode);
+    const id = `video.${extension}`;
+    fs.cpSync(videoDir, path.join(root, 'videos', id), { recursive: true });
+    for (const explicitId of [false, true]) {
+      const out = path.join(root, `${explicitId ? 'explicit' : '导出 文件'}.${extension}`);
+      runCliCmd([mode, ...(explicitId ? [id] : []), out, ...flags], root);
+      assert.ok(fs.statSync(out).size > 0, `${mode} must preserve the requested output filename`);
+      if (mode === 'storyboard') {
+        assert.match(fs.readFileSync(out, 'utf8'), /data:image\/jpeg;base64,/, 'Mixed-case HTML output must contain a captured frame');
+      } else {
+        const decoded = spawnSync(resolveFfmpeg(PKG_ROOT), ['-loglevel', 'error', '-i', out, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
+        assert.equal(decoded.status, 0, String(decoded.stderr));
+        assert.equal(decoded.stdout.length, 320 * 180 * 3 * 2, 'Uppercase MP4 output must contain two complete frames');
+        const pixel = decoded.stdout.subarray((90 * 320 + 160) * 3, (90 * 320 + 160) * 3 + 3);
+        assert.ok(pixel[0] < 10 && pixel[1] > 100 && pixel[2] > 100, 'Output shortcuts must render the selected video');
+      }
+    }
+  }
+}
+
+function verifyLargeAssetCacheInvalidation() {
+  const videoDir = path.join(TEST_ROOT, 'large-asset-cache');
+  fs.mkdirSync(path.join(videoDir, 'assets'), { recursive: true });
+  const asset = path.join(videoDir, 'assets/large.svg');
+  const padding = ' '.repeat(1100000);
+  const svg = color => `<svg xmlns="http://www.w3.org/2000/svg">${padding}<rect width="100" height="100" fill="${color}"/>${padding}</svg>`;
+  const V = { duration: 1, scenes: [{ start: 0, duration: 1, cues: [], subCues: [] }] };
+  const cacheId = `self-test-large-asset-${process.pid}`;
+  const cachePath = () => buildCachedSceneSegments(V, { ui: { hud: false } }, cacheId, videoDir, 4, 320, 180, 4, '')[0].partPath;
+  let initialPath;
+  try {
+    fs.writeFileSync(asset, svg('red'), 'utf8');
+    assert.ok(fs.statSync(asset).size > 2 * 1024 * 1024, 'Cache regression fixture must exceed the old sampling threshold');
+    initialPath = cachePath();
+    assert.equal(cachePath(), initialPath, 'Unchanged large assets must preserve the cache key');
+    fs.writeFileSync(asset, svg('tan'), 'utf8');
+    assert.notEqual(cachePath(), initialPath, 'Changing only the middle of a large visual asset must invalidate the render cache');
+  } finally {
+    if (initialPath) fs.rmdirSync(path.dirname(initialPath));
+  }
+}
+
+function verifyNestedStylesheetCacheInvalidation() {
+  const videoDir = path.join(TEST_ROOT, 'nested-styles-cache');
+  const stylesheet = path.join(videoDir, 'components/nested/card.css');
+  fs.mkdirSync(path.dirname(stylesheet), { recursive: true });
+  const V = { duration: 1, scenes: [{ start: 0, duration: 1, cues: [], subCues: [] }] };
+  const cacheId = `self-test-nested-styles-${process.pid}`;
+  const cachePath = () => buildCachedSceneSegments(V, { ui: { hud: false } }, cacheId, videoDir, 4, 320, 180, 4, '')[0].partPath;
+  let initialPath;
+  try {
+    fs.writeFileSync(stylesheet, '.card{background:red}');
+    initialPath = cachePath();
+    assert.equal(cachePath(), initialPath, 'Unchanged nested stylesheets must preserve the cache key');
+    fs.writeFileSync(stylesheet, '.card{background:blue}');
+    assert.notEqual(cachePath(), initialPath, 'Stylesheets in nested component directories must invalidate the render cache');
+  } finally {
+    if (initialPath) fs.rmdirSync(path.dirname(initialPath));
+  }
+}
+
+function verifyNestedVisualAssetCacheInvalidation() {
+  const videoDir = path.join(TEST_ROOT, 'nested-visual-cache');
+  const files = ['components/nested/card.svg', 'components/nested/assets/icon.svg'];
+  const svg = color => `<svg xmlns="http://www.w3.org/2000/svg"><rect width="100" height="100" fill="${color}"/></svg>`;
+  for (const file of files) {
+    fs.mkdirSync(path.dirname(path.join(videoDir, file)), { recursive: true });
+    fs.writeFileSync(path.join(videoDir, file), svg('red'));
+  }
+  const V = { duration: 1, scenes: [{ start: 0, duration: 1, cues: [], subCues: [] }] };
+  const cacheId = `self-test-nested-visuals-${process.pid}`;
+  const cachePath = () => buildCachedSceneSegments(V, { ui: { hud: false } }, cacheId, videoDir, 4, 320, 180, 4, '')[0].partPath;
+  let initialPath;
+  try {
+    initialPath = cachePath();
+    for (const file of files) {
+      const previous = cachePath();
+      fs.writeFileSync(path.join(videoDir, file), svg('blue'));
+      const changed = cachePath();
+      assert.notEqual(changed, previous, `Changing a nested visual asset must invalidate the scene cache: ${file}`);
+      assert.equal(cachePath(), changed, 'Unchanged nested visual assets must preserve the cache key');
+    }
+  } finally {
+    if (initialPath) fs.rmdirSync(path.dirname(initialPath));
+  }
+}
+
+function verifySceneCacheGranularity() {
+  const project = path.join(TEST_ROOT, 'scene-cache-granularity');
+  const videoDir = path.join(project, 'videos/demo');
+  fs.mkdirSync(path.join(videoDir, 'js'), { recursive: true });
+  fs.writeFileSync(path.join(videoDir, 'video.config.js'), 'V.config={width:320,height:180,audioSrc:false,bgm:false,ui:{hud:false},sceneScripts:["js/first.js","js/second.js"]};');
+  const scene = color => `V.scene({duration:1,lines:[],build(root){root.textContent='${color}';},update(){}});`;
+  fs.writeFileSync(path.join(videoDir, 'js/first.js'), scene('red'));
+  fs.writeFileSync(path.join(videoDir, 'js/second.js'), scene('red'));
+  const cacheId = `self-test-scene-granularity-${process.pid}`;
+  const cachePaths = () => {
+    const { sandbox } = loadVideoSandbox(project, 'demo');
+    return buildCachedSceneSegments(sandbox.V, sandbox.V.config, cacheId, videoDir, 8, 320, 180, 4, '').map(segment => segment.partPath);
+  };
+  let initial;
+  try {
+    initial = cachePaths();
+    fs.writeFileSync(path.join(videoDir, 'js/second.js'), scene('blue'));
+    const changed = cachePaths();
+    assert.equal(changed[0], initial[0], 'Changing the second scene must preserve the first scene cache key');
+    assert.notEqual(changed[1], initial[1], 'Changing the second scene must invalidate its own cache key');
+  } finally {
+    if (initial) fs.rmdirSync(path.dirname(initial[0]));
+  }
+}
+
+function verifyRenderOutputCacheExclusion() {
+  const videoDir = path.join(TEST_ROOT, 'render-output-cache');
+  fs.mkdirSync(videoDir, { recursive: true });
+  const V = { duration: 1, scenes: [{ start: 0, duration: 1, cues: [], subCues: [] }] };
+  const cacheId = `self-test-output-cache-${process.pid}`;
+  let initialPath;
+  try {
+    for (const rel of ['output.mp4', 'assets/output.mp4', 'assets/nested/output.mp4']) {
+      const output = path.join(videoDir, rel);
+      const cachePath = () => buildCachedSceneSegments(V, { ui: { hud: false } }, cacheId, videoDir, 4, 320, 180, 4, '', output)[0].partPath;
+      const before = cachePath();
+      initialPath = before;
+      fs.mkdirSync(path.dirname(output), { recursive: true });
+      fs.writeFileSync(output, 'generated output');
+      assert.equal(cachePath(), before, 'Creating the current output inside the source tree must not invalidate its own cache');
+      fs.writeFileSync(output, 'changed generated output');
+      assert.equal(cachePath(), before, 'Changing the current output must not invalidate its own cache');
+    }
+    const source = path.join(videoDir, 'assets/source.mp4');
+    const output = path.join(videoDir, 'output.mp4');
+    const cachePath = () => buildCachedSceneSegments(V, { ui: { hud: false } }, cacheId, videoDir, 4, 320, 180, 4, '', output)[0].partPath;
+    const before = cachePath();
+    fs.writeFileSync(source, 'source clip');
+    assert.notEqual(cachePath(), before, 'Other source videos must still participate in cache identity');
+  } finally {
+    if (initialPath) fs.rmdirSync(path.dirname(initialPath));
+  }
+}
+
+function verifyMixAudioRegressions() {
+  const py = resolvePython(PKG_ROOT, true);
+  const r = spawnSync(py, [path.join(PKG_ROOT, 'tools/test-mix-audio.py'), path.join(TEST_ROOT, 'mix-audio-check')], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `Mix audio regressions failed:\n${r.stdout}\n${r.stderr}`);
+}
+
+function verifyMixSpokenTextPreflight(videoDir) {
+  for (const spec of [
+    { text: '执行命令行', word: '直形命令航', config: {} },
+    { text: '品牌', word: 'Brand', config: { pronunciation: { '品牌': 'Brand' } } },
+    { text: '执行', word: '执行', config: { tts: { polyphoneFix: false } } },
+  ]) {
+    const errors = [];
+    const V = { config: spec.config, scenes: [{ lines: [{ text: spec.text }] }], voice: { durations: [[1]], words: [[[[0, spec.word]]]] } };
+    assert.equal(verifySpokenTimings(V, errors), 1);
+    assert.deepEqual(errors, [], 'Existing pronunciation rules must remain valid for offline remix');
+  }
+  const legacyErrors = [];
+  verifySpokenTimings({ scenes: [{ lines: [{ text: '旧版字幕。' }] }], voice: { durations: [[1]], segs: [[[[1, '旧版字幕。']]]] } }, legacyErrors);
+  assert.deepEqual(legacyErrors, [], 'Valid legacy subtitle-only timings must remain supported');
+  const cases = [
+    { name: 'object-line', args: ['mix', 'demo'], file: 'js/s01.js', from: '欢迎体验', to: '重新体验' },
+    { name: 'string-line-mix-only', args: ['build', 'demo', '--mix-only'], file: 'js/s02.js', from: '所有画面', to: '这些画面' },
+    { name: 'localized', args: ['mix', 'demo', '--lang', 'en'], file: 'locales/en.js', from: 'Welcome to', to: 'New welcome to', work: 'mix-demo-en' },
+    { name: 'legacy-segs', args: ['mix', 'demo'], file: 'js/s01.js', from: '欢迎体验', to: '重新体验', legacy: true },
+  ];
+  for (const spec of cases) {
+    const project = path.join(TEST_ROOT, `mix-preflight-${spec.name}`);
+    const copy = path.join(project, 'videos/demo');
+    fs.cpSync(videoDir, copy, { recursive: true });
+    if (spec.legacy) {
+      const { sandbox, timingsPath } = loadVideoSandbox(project, 'demo', { ignoreBaked: true, requireTimings: true });
+      const voice = sandbox.V.voice;
+      voice.segs = voice.subCues.map(scene => scene.map(line => line.map(([, end, text]) => [end, text])));
+      delete voice.words;
+      delete voice.subCues;
+      fs.writeFileSync(timingsPath, `V.voice=${JSON.stringify(voice)};`);
+    }
+    const file = path.join(copy, spec.file);
+    const content = fs.readFileSync(file, 'utf8');
+    assert.ok(content.includes(spec.from), `${spec.name}: the original spoken text must be present`);
+    fs.writeFileSync(file, content.replace(spec.from, spec.to));
+    const assets = path.join(copy, 'assets');
+    const voiceDir = path.join(assets, 'voice');
+    const outputs = fs.readdirSync(assets).filter(name => /\.(m4a|vtt|srt)$/i.test(name)).map(name => path.join(assets, name));
+    outputs.push(...fs.readdirSync(voiceDir).map(name => path.join(voiceDir, name)));
+    const marker = path.join(project, '.runtime', spec.work || 'mix-demo', 'keep.txt');
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, 'Previous remix work');
+    outputs.push(marker);
+    const previous = outputs.map(output => [output, fs.readFileSync(output)]);
+    const result = spawnSync(process.execPath, [CLI_BIN, ...spec.args], {
+      cwd: project, encoding: 'utf8', timeout: 60000,
+      env: { ...process.env, VIDEO_PROJECT_ROOT: project, PYTHON_BIN: resolvePython(PKG_ROOT, true), FFMPEG_BIN: resolveFfmpeg(PKG_ROOT) },
+    });
+    assert.equal(result.error, undefined, `${spec.name}: remix must settle`);
+    assert.notEqual(result.status, 0, `${spec.name}: changed spoken text must be rejected`);
+    for (const [output, bytes] of previous) {
+      assert.ok(fs.existsSync(output) && fs.readFileSync(output).equals(bytes), `${spec.name}: rejected remix must preserve ${path.relative(project, output)}`);
+    }
+    assert.match(result.stderr, /Spoken lines no longer match timings/, `${spec.name}: rejection must report stale spoken text`);
+    assert.doesNotMatch(result.stdout, /\[1\/3\]/, 'Invalid remix must be rejected before exporting or mixing');
+  }
+}
+
+function verifyTimingOutputRegressions() {
+  const r = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools/test-timing-output.mjs'), path.join(TEST_ROOT, 'timing-output')], { encoding: 'utf8', timeout: 60000 });
+  assert.equal(r.status, 0, `Timing output regressions failed:\n${r.stdout}\n${r.stderr}`);
+}
+
+function verifyUnicodePythonBuild() {
+  const root = path.join(TEST_ROOT, 'unicode-python');
+  const id = '视频😀';
+  const videoDir = path.join(root, 'videos', id);
+  const audioRel = 'assets/旁白😀.m4a';
+  fs.mkdirSync(videoDir, { recursive: true });
+  fs.writeFileSync(path.join(videoDir, 'index.html'), '<!doctype html><html><head><link rel="stylesheet" href="../base/css/base.css"></head><body><script src="../base/js/engine.js"></script><script src="video.config.js"></script><script src="scenes.js"></script><script>V.boot()</script></body></html>');
+  fs.writeFileSync(path.join(videoDir, 'video.config.js'), `V.config={width:320,height:180,fps:2,audioSrc:${JSON.stringify(audioRel)},bgm:false,sfx:false,tts:false,sceneScripts:["scenes.js"]};`);
+  fs.writeFileSync(path.join(videoDir, 'scenes.js'), 'V.scene({duration:1,lines:[],build(){},update(){}});');
+  const built = spawnSync(process.execPath, [CLI_BIN, 'build', id], {
+    cwd: root, encoding: 'utf8', timeout: 90000,
+    env: { ...process.env, VIDEO_PROJECT_ROOT: root, PYTHONUTF8: '0', PYTHONIOENCODING: 'ascii' },
+  });
+  assert.equal(built.error, undefined, `Unicode build must settle: ${built.stdout}\n${built.stderr}`);
+  assert.equal(built.status, 0, `Unicode paths must build independently of the parent Python stream encoding:\n${built.stdout}\n${built.stderr}`);
+  assert.ok(built.stdout.includes('旁白😀.m4a'), 'Python logs must preserve Unicode text as UTF-8');
+  assert.ok(built.stdout.includes('Audio verified:'), 'Unicode output must pass physical audio verification');
+  const output = path.join(videoDir, audioRel);
+  const decoded = spawnSync(resolveFfmpeg(PKG_ROOT), ['-loglevel', 'error', '-i', output, '-f', 's16le', '-ac', '2', '-ar', '48000', '-'], { timeout: 15000 });
+  assert.equal(decoded.status, 0, String(decoded.stderr));
+  const duration = decoded.stdout.length / (48000 * 2 * 2);
+  assert.ok(Math.abs(duration - 1) < 0.03, `Unicode output must decode to one second of stereo audio, got ${duration}`);
+}
+
+function verifyHttpFileMutationRegressions() {
+  const r = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools/test-http-file-races.mjs'), path.join(TEST_ROOT, 'http-file-mutations')], { encoding: 'utf8', timeout: 60000 });
+  assert.equal(r.status, 0, `HTTP file mutation regressions failed:\n${r.stdout}\n${r.stderr}`);
+}
+
+function verifyInputPathSafetyRegressions() {
+  const r = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools/test-input-path-safety.mjs'), path.join(TEST_ROOT, 'input-path-safety')], { encoding: 'utf8', timeout: 60000 });
+  assert.equal(r.status, 0, `Input path safety regressions failed:\n${r.stdout}\n${r.stderr}`);
+}
+
+function verifyRenderCacheIdentityRegressions() {
+  const r = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools/test-render-cache-identity.mjs'), path.join(TEST_ROOT, 'render-cache-identity')], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `Render cache identity regressions failed:\n${r.stdout}\n${r.stderr}`);
+}
+
+function verifyRenderEncoderExitRegression() {
+  const r = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools/test-render-encoder.mjs'), path.join(TEST_ROOT, 'render-encoder-exit')], { encoding: 'utf8', timeout: 130000 });
+  assert.equal(r.status, 0, `Early encoder exit regression failed:\n${r.stdout}\n${r.stderr}`);
+}
+
+function verifyRenderMuxRegression() {
+  const r = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools/test-render-mux.mjs'), path.join(TEST_ROOT, 'render-mux')], { encoding: 'utf8', timeout: 420000 });
+  assert.equal(r.status, 0, `Final mux output regression failed:\n${r.stdout}\n${r.stderr}`);
+}
+
+function verifyModuleEntryRegressions() {
+  const r = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools/test-module-entry.mjs'), path.join(TEST_ROOT, 'module-entry')], { encoding: 'utf8', timeout: 60000 });
+  assert.equal(r.status, 0, `Module entry regressions failed:\n${r.stdout}\n${r.stderr}`);
+}
+
+function verifyAuditLaunchFailureCleanup() {
+  const invalidBrowser = path.join(TEST_ROOT, 'invalid-browser.txt');
+  fs.writeFileSync(invalidBrowser, 'This file is not a browser executable.', 'utf8');
+  const auditUrl = pathToFileURL(path.join(PKG_ROOT, 'tools/audit-visual.mjs')).href;
+  const code = [
+    'import assert from "node:assert/strict";',
+    `import { auditVideos } from ${JSON.stringify(auditUrl)};`,
+    'await assert.rejects(auditVideos(["demo"]), /browserType.launch/);',
+    'console.log("Browser startup failure handled");',
+  ].join('\n');
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+    cwd: TEST_ROOT,
+    encoding: 'utf8',
+    timeout: 15000,
+    env: Object.assign({}, process.env, { VIDEO_PROJECT_ROOT: TEST_ROOT, CHROME_BIN: invalidBrowser }),
+  });
+  assert.equal(r.error, undefined, `Caught browser startup failure must not leave a running HTTP server: ${r.error}`);
+  assert.equal(r.status, 0, `Audit browser failure cleanup check failed:\n${r.stderr}`);
+  assert.ok(r.stdout.includes('Browser startup failure handled'), 'Audit must reject when the browser cannot start');
+}
+
+function verifyBundleSourcePreflight() {
+  const outDir = path.join(TEST_ROOT, 'dist-invalid-sources');
+  const marker = path.join(outDir, 'previous-build.txt');
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(marker, 'last known good build', 'utf8');
+  fs.writeFileSync(path.join(TEST_ROOT, 'videos/not-a-directory'), 'not a video directory', 'utf8');
+  fs.mkdirSync(path.join(TEST_ROOT, 'outside-video'), { recursive: true });
+  fs.writeFileSync(path.join(TEST_ROOT, 'outside-video/index.html'), '<h1>Outside videos</h1>', 'utf8');
+  const invalidTargets = [
+    ['demo', 'missing-video'],
+    ['not-a-directory'],
+    ['not-a-directory', '--single'],
+    ['../outside-video'],
+    ['../outside-video', '--single'],
+  ];
+  for (const args of invalidTargets) {
+    assertCliFails(['bundle', ...args, '--out', outDir], `bundle must reject invalid source: ${args.join(' ')}`);
+    assert.equal(fs.readFileSync(marker, 'utf8'), 'last known good build', 'Invalid bundle sources must preserve the previous output');
+  }
+  const validId = '演示 空格';
+  const html = '<h1>Valid video</h1>';
+  fs.mkdirSync(path.join(TEST_ROOT, 'videos', validId));
+  fs.writeFileSync(path.join(TEST_ROOT, 'videos', validId, 'index.html'), html, 'utf8');
+  runCliCmd(['bundle', validId, '--single', '--out', outDir]);
+  assert.equal(fs.readFileSync(path.join(outDir, 'index.html'), 'utf8'), html, 'Valid Unicode and space-containing video IDs must still bundle');
+}
+
+function verifyBundleProtectedDirectories() {
+  const pkg = path.join(TEST_ROOT, 'guarded-package');
+  fs.mkdirSync(path.join(pkg, 'tools/lib'), { recursive: true });
+  fs.copyFileSync(path.join(PKG_ROOT, 'tools/bundle.mjs'), path.join(pkg, 'tools/bundle.mjs'));
+  fs.copyFileSync(path.join(PKG_ROOT, 'tools/lib/paths.mjs'), path.join(pkg, 'tools/lib/paths.mjs'));
+  const fileOut = path.join(TEST_ROOT, 'existing-file.txt');
+  const markers = [
+    path.join(TEST_ROOT, '.git/HEAD'), path.join(pkg, '.git/HEAD'),
+    path.join(pkg, 'runtime/base/js/engine.js'), path.join(pkg, 'bin/html-video.mjs'),
+    path.join(pkg, 'skills/html-video/SKILL.md'), fileOut,
+  ];
+  for (const file of markers) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'protected source', 'utf8');
+  }
+  const alias = path.join(pkg, 'runtime-alias');
+  fs.symlinkSync(path.join(pkg, 'runtime'), alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const targets = [
+    path.join(TEST_ROOT, '.git'), path.join(pkg, '.git'),
+    path.join(pkg, 'runtime'), path.join(pkg, 'bin'), path.join(pkg, 'skills'), fileOut,
+    path.join(alias, 'base'), path.join(alias, 'new-output'),
+  ];
+  for (const target of targets) {
+    for (const flags of [[], ['--single']]) {
+      const r = spawnSync(process.execPath, [path.join(pkg, 'tools/bundle.mjs'), 'demo', ...flags, '--out', target], {
+        cwd: TEST_ROOT,
+        encoding: 'utf8',
+        env: Object.assign({}, process.env, { VIDEO_PROJECT_ROOT: TEST_ROOT }),
+      });
+      assert.notEqual(r.status, 0, `bundle must reject protected output: ${target}`);
+      for (const file of markers) assert.equal(fs.readFileSync(file, 'utf8'), 'protected source', 'Rejected output must preserve all source and metadata files');
+    }
+  }
+}
+
 function verifyBundleSafetyAndDepth(videoDir, colDir) {
   const nestedOut = fs.readFileSync(path.join(colDir, 'components/nested/card.js'), 'utf8');
   assert.ok(
@@ -1613,6 +3070,8 @@ function verifyBundleSafetyAndDepth(videoDir, colDir) {
   assertCliFails(['bundle', 'demo', '--out', TEST_ROOT], 'bundle must reject TEST_ROOT as --out');
   assertCliFails(['bundle', 'demo', '--single', '--out', path.join(TEST_ROOT, 'videos')], 'bundle must reject videos/ as --out');
   assert.equal(fs.existsSync(path.join(videoDir, 'index.html')), true, 'Rejected bundle --out must leave videos/demo untouched');
+  verifyBundleSourcePreflight();
+  verifyBundleProtectedDirectories();
 }
 
 function verifyRound4PipelineRegressions(videoDir) {
@@ -1658,7 +3117,24 @@ async function main() {
 
   try {
     await verifyProjectFileOwnership();
+    verifyHttpFileMutationRegressions();
+    verifyInputPathSafetyRegressions();
+    verifyRenderCacheIdentityRegressions();
+    verifyRenderEncoderExitRegression();
+    verifyRenderMuxRegression();
+    verifyModuleEntryRegressions();
+    verifyAuditLaunchFailureCleanup();
+    verifyLargeAssetCacheInvalidation();
+    verifyNestedStylesheetCacheInvalidation();
+    verifyNestedVisualAssetCacheInvalidation();
+    verifySceneCacheGranularity();
+    verifyRenderOutputCacheExclusion();
     verifyRound3UnitRegressions();
+    verifyRenderArgumentValidation();
+    verifyVoiceCacheRegressions();
+    verifyTimingOutputRegressions();
+    verifyMixAudioRegressions();
+    verifyUnicodePythonBuild();
     verifyRound5SoundAndI18nUnit();
     console.log('[SelfTest 1/5] Scaffolding isolated video project (zero local videos/base)...');
     runCliCmd(['init', 'demo', '--title', '微内核自检演示', '--skill']);
@@ -1669,6 +3145,7 @@ async function main() {
     const videoDir = path.join(TEST_ROOT, 'videos/demo');
     createSampleMp4(resolveFfmpeg(PKG_ROOT), path.join(videoDir, 'assets/clip.mp4'));
     writeTestProjectFiles(videoDir);
+    verifyInvalidRenderCliArgs();
 
     console.log('[SelfTest 2/5] Building default & localized (en) tracks + offline remix + visual audit...');
     runCliCmd(['build', 'demo', '--bitrate', '96k', '--visual']);
@@ -1681,6 +3158,7 @@ async function main() {
     fs.renameSync(path.join(videoDir, 'mock_tts.py.bak'), path.join(videoDir, 'mock_tts.py'));
     runCliCmd(['audit', 'demo', '--lang', 'en']);
     runCliCmd(['build', 'demo', '--lang', 'en']);
+    verifyMixSpokenTextPreflight(videoDir);
     verifyRound4PipelineRegressions(videoDir);
     const shotDir = path.join(TEST_ROOT, 'audit-shots');
     runCliCmd(['audit', 'demo', '--screenshots', shotDir]);
@@ -1735,6 +3213,7 @@ async function main() {
     const colThemeCss = fs.readFileSync(path.join(colDir, 'themes/collision-test.css'), 'utf8');
     assert.ok(colThemeCss.includes('../shared-assets/collide.svg') && colThemeCss.includes('my-assets/collide.svg'), 'Theme CSS must rewrite ../assets/ collisions without corrupting substring paths');
     verifyBundleSafetyAndDepth(videoDir, colDir);
+    verifySpecialCharacterVideoPaths();
 
     console.log('✅ All html-video-base v2.7 end-to-end self-tests PASSED.');
   } finally {

@@ -270,6 +270,11 @@
       volume: opts.volume || 0,
       targetTime: opts.trim || 0,
     };
+    el.addEventListener('loadedmetadata', () => {
+      const meta = el._vclip;
+      if (!el.isConnected || !meta || meta._lastLt === undefined) return;
+      syncVideoClip(el, meta._lastLt, !el.paused);
+    });
     V._videoClips.add(el);
     return el;
   }
@@ -285,12 +290,13 @@
   function syncVideoClip(el, lt, playing) {
     if (!el || !el._vclip) return;
     const meta = el._vclip;
+    meta._lastLt = lt;
     const usePlaying = playing === undefined ? Boolean(V._isPlaying) : Boolean(playing);
     meta._syncedTick = V._renderTick || 0;
     const { target, endedClip } = resolveClipPlaybackTarget(el, meta, lt);
     meta.targetTime = target;
     if (typeof el.pause !== 'function') return;
-    syncBrowserVideoTime(el, meta, lt >= meta.start && !endedClip && usePlaying, endedClip);
+    syncBrowserVideoTime(el, meta, lt >= meta.start && !endedClip && usePlaying);
   }
 
   function toggleBrowserVideoPlay(el, shouldPlay) {
@@ -303,8 +309,9 @@
     if (!el.paused) el.pause();
   }
 
-  function syncBrowserVideoTime(el, meta, shouldPlay, endedClip) {
-    const tol = endedClip ? 0.05 : 0.16;
+  function syncBrowserVideoTime(el, meta, shouldPlay) {
+    // 暂停与录制必须准确换帧；连续播放保留容差，避免反复打断解码。
+    const tol = shouldPlay && !V._isRecord ? 0.16 : 0.000001;
     const diff = Math.abs((el.currentTime || 0) - meta.targetTime);
     if (diff > tol && el.readyState >= 1) {
       try { el.currentTime = meta.targetTime; } catch {}

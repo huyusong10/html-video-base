@@ -3,8 +3,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { ROOT, listVideoIds, loadVideoSandbox, resolveFfmpeg, probeSceneAnchors, getSandboxCfg, isBgmDisabledCfg, extractRawBgmSrc, normalizeCliArgs } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, resolveFfmpeg, probeSceneAnchors, getSandboxCfg, isBgmDisabledCfg, extractRawBgmSrc, normalizeCliArgs, isMainModule } from './lib/paths.mjs';
 import { writeSubtitleFiles } from './lib/subtitles.mjs';
+import { writeUtf8FileAtomic } from './lib/file-output.mjs';
 import { auditVideos } from './audit-visual.mjs';
 
 const COMMON_HOMO_MAP = [
@@ -95,7 +96,7 @@ export function stampBakedLayout(videoId, lang = '') {
     'if (V.captureVoice) V.captureVoice(V.voice);',
     '',
   ].join('\n');
-  fs.writeFileSync(timingsPath, out, 'utf8');
+  writeUtf8FileAtomic(timingsPath, out);
   writeSubtitleFiles(videoDir, V, lang);
   console.log(`[${videoId}] Stamped bakedLayout & subtitles -> ${path.relative(ROOT, timingsPath)} (duration=${bakedLayout.duration}s)`);
 }
@@ -271,13 +272,23 @@ function shouldEnableZhCommonFix(ttsCfg, lang) {
   return !lang || /^zh\b/i.test(String(lang));
 }
 
+export function verifySpokenTimings(V, errors, lang = '') {
+  const cfg = getSandboxCfg(V);
+  const ttsCfg = cfg.tts && typeof cfg.tts === 'object' ? cfg.tts : {};
+  return verifyScenesAndTimings(
+    V,
+    V.voice || {},
+    buildSpokenNormalizer(ttsCfg.pronunciation || cfg.pronunciation, shouldEnableZhCommonFix(ttsCfg, lang)),
+    errors
+  );
+}
+
 export function verifyVideo(videoId, ffmpegBin, lang = '') {
   const errors = [];
   const { sandbox: dynamicSb, videoDir, audioRel, bgmRel } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: true, requireTimings: false, lang });
   const { sandbox: runtimeSb } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: false, requireTimings: false, lang });
   const V = dynamicSb.V;
   const cfg = getSandboxCfg(V);
-  const ttsCfg = cfg.tts && typeof cfg.tts === 'object' ? cfg.tts : {};
 
   for (const ae of probeSceneAnchors(dynamicSb)) errors.push(`Broken anchor: ${ae}`);
 
@@ -288,12 +299,7 @@ export function verifyVideo(videoId, ffmpegBin, lang = '') {
     return errors;
   }
 
-  const totalLines = verifyScenesAndTimings(
-    V,
-    V.voice,
-    buildSpokenNormalizer(ttsCfg.pronunciation || cfg.pronunciation, shouldEnableZhCommonFix(ttsCfg, lang)),
-    errors
-  );
+  const totalLines = verifySpokenTimings(V, errors, lang);
   verifyBakedLayoutMatch(V, V.voice, videoId, errors);
   if (Math.abs(runtimeSb.V.duration - V.duration) > 0.01) {
     errors.push(`Runtime V.duration (${runtimeSb.V.duration}) != dynamic V.duration (${V.duration})`);
@@ -341,5 +347,4 @@ async function runVerifyCli() {
   if (hasError) process.exit(1);
 }
 
-const isDirectRun = process.argv[1] && process.argv[1].endsWith('verify-sync.mjs');
-if (isDirectRun) await runVerifyCli();
+if (isMainModule(import.meta.url)) await runVerifyCli();

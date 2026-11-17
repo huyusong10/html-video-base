@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   ROOT, PKG_ROOT, VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR,
-  listVideoIds, normalizeCliArgs,
+  listVideoIds, normalizeCliArgs, isMainModule,
 } from './lib/paths.mjs';
 
 function parseBundleArgs(rawArgv) {
@@ -83,7 +83,17 @@ function buildCollisionRules(collisions, prefixFrom, prefixTo) {
 const BUNDLED_SYS_DIRS = new Set(['base', 'assets', 'shared-assets', 'themes']);
 
 function normCmpPath(p) {
-  const r = path.resolve(p);
+  const absolute = path.resolve(p);
+  let existing = absolute;
+  const suffix = [];
+  // 输出目录可能尚未创建；先解析已有父目录，识别 junction / symlink。
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    suffix.unshift(path.basename(existing));
+    existing = parent;
+  }
+  const r = fs.existsSync(existing) ? path.join(fs.realpathSync(existing), ...suffix) : absolute;
   return process.platform === 'win32' ? r.toLowerCase() : r;
 }
 
@@ -97,17 +107,37 @@ function assertSafeBundleOutDir(outDir, projectRoot = ROOT) {
   if (path.parse(resolved).root === resolved) {
     throw new Error(`Refusing to bundle into filesystem root: ${resolved}`);
   }
+  if (fs.existsSync(resolved) && !fs.statSync(resolved).isDirectory()) {
+    throw new Error(`Bundle output is not a directory: ${resolved}`);
+  }
   const videosDir = path.join(projectRoot, 'videos');
   for (const guarded of [projectRoot, PKG_ROOT, videosDir]) {
     if (isSameOrParent(resolved, guarded)) {
       throw new Error(`Refusing to bundle into project/package directory or ancestor: ${resolved}`);
     }
   }
-  for (const srcDir of [videosDir, RUNTIME_BASE_DIR, TEMPLATES_DIR, path.join(PKG_ROOT, 'tools')]) {
-    if (isSameOrParent(srcDir, resolved)) {
-      throw new Error(`Refusing to bundle inside protected source directory: ${resolved}`);
+  const protectedDirs = [
+    videosDir, path.join(PKG_ROOT, 'runtime'), TEMPLATES_DIR,
+    path.join(PKG_ROOT, 'tools'), path.join(PKG_ROOT, 'bin'), path.join(PKG_ROOT, 'skills'),
+    path.join(projectRoot, '.git'), path.join(PKG_ROOT, '.git'),
+  ];
+  for (const srcDir of protectedDirs) {
+    if (isSameOrParent(srcDir, resolved) || isSameOrParent(resolved, srcDir)) {
+      throw new Error(`Refusing to bundle into or over a protected directory: ${resolved}`);
     }
   }
+}
+
+function resolveVideoSource(videoId, videosDir) {
+  if (typeof videoId !== 'string' || !videoId) throw new Error('Invalid video id: expected a directory name');
+  const srcVideo = path.resolve(videosDir, videoId);
+  if (normCmpPath(path.dirname(srcVideo)) !== normCmpPath(videosDir) || path.basename(srcVideo) !== videoId) {
+    throw new Error(`Invalid video id: ${videoId}`);
+  }
+  if (!fs.existsSync(srcVideo) || !fs.statSync(srcVideo).isDirectory()) {
+    throw new Error(`Video directory not found: ${srcVideo}`);
+  }
+  return srcVideo;
 }
 
 function buildDepthRules(depth, collisions, includeDocLevel) {
@@ -152,8 +182,7 @@ function rewriteBundledRefs(targetOut, collisions) {
 
 export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
   const videosDir = path.join(projectRoot, 'videos');
-  const srcVideo = path.join(videosDir, videoId);
-  if (!fs.existsSync(srcVideo)) throw new Error(`Video directory not found: ${srcVideo}`);
+  const srcVideo = resolveVideoSource(videoId, videosDir);
   const targetOut = outDir || path.join(projectRoot, 'dist', videoId);
   assertSafeBundleOutDir(targetOut, projectRoot);
 
@@ -177,6 +206,7 @@ export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
   const targets = videoIds && videoIds.length ? videoIds : listVideoIds();
   if (!targets.length) throw new Error('No videos found under videos/ to bundle.');
   assertSafeBundleOutDir(outDir, ROOT);
+  const sources = targets.map(id => resolveVideoSource(id, VIDEOS_DIR));
 
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });
@@ -186,10 +216,8 @@ export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
   copyIfExists(path.join(VIDEOS_DIR, 'assets'), path.join(outDir, 'assets'));
   copyIfExists(path.join(VIDEOS_DIR, 'themes'), path.join(outDir, 'themes'));
 
-  for (const id of targets) {
-    const srcVideo = path.join(VIDEOS_DIR, id);
-    if (!fs.existsSync(srcVideo)) throw new Error(`Video directory not found: ${srcVideo}`);
-    fs.cpSync(srcVideo, path.join(outDir, id), { recursive: true, force: true });
+  for (let i = 0; i < targets.length; i++) {
+    fs.cpSync(sources[i], path.join(outDir, targets[i]), { recursive: true, force: true });
   }
 
   for (const entry of fs.readdirSync(VIDEOS_DIR, { withFileTypes: true })) {
@@ -200,8 +228,7 @@ export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
   return outDir;
 }
 
-const isDirectRun = process.argv[1] && process.argv[1].endsWith('bundle.mjs');
-if (isDirectRun) {
+if (isMainModule(import.meta.url)) {
   const { targets, outDir, single } = parseBundleArgs(process.argv.slice(2));
   if (single) {
     if (targets.length !== 1) throw new Error(`"--single" requires a single video id, got: ${targets.join(', ') || '(none)'}`);

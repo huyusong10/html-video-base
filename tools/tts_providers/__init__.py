@@ -170,6 +170,11 @@ def _xml_attr(val) -> str:
 AZURE_SHORT_LANG_MAP = {'en': 'en-US', 'zh': 'zh-CN', 'ja': 'ja-JP', 'ko': 'ko-KR', 'fr': 'fr-FR', 'de': 'de-DE', 'es': 'es-ES'}
 
 
+def _resolve_azure_endpoint(cfg: dict) -> str:
+    region = cfg.get('region') or os.environ.get('AZURE_SPEECH_REGION') or 'eastus'
+    return cfg.get('endpoint') or f'https://{region}.tts.speech.microsoft.com/cognitiveservices/v1'
+
+
 def _resolve_azure_xml_lang(voice: str, cfg: dict) -> str:
     if cfg.get('xmlLang'):
         return str(cfg['xmlLang'])
@@ -182,8 +187,7 @@ def _resolve_azure_xml_lang(voice: str, cfg: dict) -> str:
 
 
 async def synth_azure(text: str, out_path: str, cfg: dict):
-    region = cfg.get('region') or os.environ.get('AZURE_SPEECH_REGION') or 'eastus'
-    endpoint = cfg.get('endpoint') or f'https://{region}.tts.speech.microsoft.com/cognitiveservices/v1'
+    endpoint = _resolve_azure_endpoint(cfg)
     api_key = _resolve_api_key(cfg, 'AZURE_SPEECH_KEY', required=True)
     voice = cfg.get('voice') or DEFAULT_VOICE
     xml_lang = _resolve_azure_xml_lang(voice, cfg)

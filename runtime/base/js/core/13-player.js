@@ -25,8 +25,11 @@
   let wipeState = { name: '', handler: null, dom: null };
   const sandboxState = { active: false, entering: false, autoExitOnLast: true, returnTime: null, el: null, txtEl: null, backEl: null };
   const ui = {};
+  const cssImageDecodes = new Map();
   let audioRt = null;
   let pptRt = null;
+  let localeSwitch = Promise.resolve();
+  let localeLoading = false;
 
   function navigateModeSwitch(toPpt, sceneIdx) {
     try {
@@ -253,7 +256,7 @@
     for (const clip of V._videoClips) {
       if (!clip.isConnected) continue;
       if (clip._vclip && clip._vclip._syncedTick === tick) continue;
-      syncVideoClip(clip, lt, playing && !scrubbing);
+      syncVideoClip(clip, lt, playing && !scrubbing && !localeLoading);
     }
   }
 
@@ -336,14 +339,14 @@
     sc.ctx.alive = V._clock;
     sc.ctx.sceneClock = V._clock - sc.start;
     sc.ctx.idle = idle;
-    sc.ctx.playing = playing && !scrubbing;
+    sc.ctx.playing = playing && !scrubbing && !localeLoading;
     sc.ctx.ended = ended;
     sc.ctx.pointer = ptr;
   }
 
   function runSceneUpdate(sc, lt, idle) {
     V._renderTick = (V._renderTick || 0) + 1;
-    V._isPlaying = playing && !scrubbing;
+    V._isPlaying = playing && !scrubbing && !localeLoading;
     V._inSceneUpdate = true;
     try {
       sc.update(shouldContinueSceneAtEnd(sc, idle) ? lt + idle : lt, sc.ctx);
@@ -580,7 +583,9 @@
     const rawDt = lastFrameTs > 0 ? clamp((ts - lastFrameTs) / 1000, 0, 0.1) : 0;
     lastFrameTs = ts;
     stepPointerSmoothing(rawDt);
-    if (V.pptMode && pptRt) {
+    if (localeLoading) {
+      lastTs = ts;
+    } else if (V.pptMode && pptRt) {
       stepAmbientIdle(rawDt);
     } else if (scrubbing) {
       lastTs = ts;
@@ -1020,6 +1025,7 @@
       ArrowLeft: e => { if (e.target !== ui.volRange) seekDeltaShortcut(e.shiftKey ? -1 : -5); },
     };
     document.addEventListener('keydown', e => {
+      if (e.defaultPrevented) return;
       if (e.key === 'Escape') { handleEscapeKey(bar, e); return; }
       if (e.ctrlKey || e.metaKey || e.altKey || isEditableTarget(e.target)) return;
       if (e.code === 'Space') {
@@ -1268,50 +1274,117 @@
     if (vp) vp.style.setProperty('--k', k);
   }
 
-  function waitVideoMetadata(vid, timeoutMs = 2000) {
+  function waitVideoReady(vid, minimum, timeoutMs) {
     return new Promise(resolve => {
+      if (vid.error) { resolve(false); return; }
+      const isReady = () => vid.readyState >= minimum && !vid.seeking;
+      if (isReady()) { resolve(true); return; }
+      const events = ['loadedmetadata', 'loadeddata', 'canplay', 'seeked'];
       const done = ok => {
         clearTimeout(timer);
-        vid.removeEventListener('loadedmetadata', onMeta);
+        events.forEach(event => vid.removeEventListener(event, onReady));
         vid.removeEventListener('error', onErr);
         resolve(ok);
       };
-      const onMeta = () => done(true);
+      const onReady = () => { if (isReady()) done(true); };
       const onErr = () => done(false);
       const timer = setTimeout(() => done(false), timeoutMs);
-      vid.addEventListener('loadedmetadata', onMeta, { once: true });
+      events.forEach(event => vid.addEventListener(event, onReady));
       vid.addEventListener('error', onErr, { once: true });
     });
   }
 
+  function videoFrameError(vid, phase) {
+    const src = vid.currentSrc || vid.src;
+    const detail = vid.error ? (vid.error.message || `media error ${vid.error.code}`) : 'Media did not become ready for seeking';
+    return new Error(`Cannot prepare embedded video "${src}" (${phase}, currentTime=${vid.currentTime.toFixed(3)}): ${detail}`);
+  }
+
+  function resolveLoadedVideoTime(vid, targetSec) {
+    const duration = Number.isFinite(vid.duration) && vid.duration > 0 ? vid.duration : null;
+    if (!duration) return targetSec;
+    const target = vid._vclip.loop ? targetSec % duration : Math.min(targetSec, duration - 0.01);
+    return Math.max(0, target);
+  }
+
   async function seekVideoElementAsync(vid, targetSec) {
-    if (vid.readyState === 0) {
-      const ready = await waitVideoMetadata(vid, 2000);
-      if (!ready || vid.readyState === 0) return;
+    const metadataReady = await waitVideoReady(vid, 1, RECORD ? 15000 : 2000);
+    if (!metadataReady) {
+      if (RECORD) throw videoFrameError(vid, 'metadata');
+      return;
     }
-    if (Math.abs((vid.currentTime || 0) - targetSec) < 0.008 && !vid.seeking) return;
-    await new Promise(resolve => {
-      const done = () => {
-        clearTimeout(timer);
-        vid.removeEventListener('seeked', done);
-        vid.removeEventListener('error', done);
-        resolve();
-      };
-      const timer = setTimeout(done, 1500);
-      vid.addEventListener('seeked', done, { once: true });
-      vid.addEventListener('error', done, { once: true });
-      try { vid.currentTime = targetSec; } catch { done(); }
+    // 元数据可能晚于场景更新到达，按真实片长重新计算末帧或循环位置。
+    targetSec = resolveLoadedVideoTime(vid, targetSec);
+    vid._vclip.targetTime = targetSec;
+    if (Math.abs((vid.currentTime || 0) - targetSec) > 0.000001 || vid.seeking) {
+      try { vid.currentTime = targetSec; } catch (err) {
+        if (RECORD) throw err;
+        return;
+      }
+    }
+    const frameReady = await waitVideoReady(vid, 2, RECORD ? 15000 : 1500);
+    const atTarget = frameReady && Math.abs(vid.currentTime - targetSec) <= 0.000001;
+    if (RECORD && !atTarget) throw videoFrameError(vid, `frame at ${targetSec.toFixed(3)}s`);
+  }
+
+  function unescapeCssImageUrl(value) {
+    return value.replace(/\\([0-9a-f]{1,6}\s?|.)/gi, (_match, escaped) => {
+      return /^[0-9a-f]/i.test(escaped) ? String.fromCodePoint(parseInt(escaped, 16) || 0xfffd) : escaped;
     });
   }
 
-  async function waitStageAssets() {
-    if (!stage) return;
-    const tasks = [];
-    for (const img of stage.querySelectorAll('img')) {
+  function collectCssImageUrls(style, sources) {
+    const images = [style.backgroundImage, style.maskImage, style.borderImageSource, style.listStyleImage, style.content].join(' ');
+    for (const match of images.matchAll(/url\("((?:\\.|[^"\\])*)"\)/g)) {
+      sources.add(unescapeCssImageUrl(match[1]));
+    }
+  }
+
+  function decodeCssImage(src) {
+    if (!cssImageDecodes.has(src)) {
+      const image = new Image();
+      image.src = src;
+      cssImageDecodes.set(src, image.decode().catch(() => {}));
+    }
+    return cssImageDecodes.get(src);
+  }
+
+  function waitCssImages() {
+    const sources = new Set();
+    const pending = [stage];
+    while (pending.length) {
+      const el = pending.pop();
+      const style = getComputedStyle(el);
+      if (style.display === 'none') continue;
+      pending.push(...el.children);
+      if (el.shadowRoot) pending.push(...el.shadowRoot.children);
+      if (style.visibility === 'visible' && style.display !== 'contents') collectCssImageUrls(style, sources);
+      for (const pseudo of ['::before', '::after']) {
+        const pseudoStyle = getComputedStyle(el, pseudo);
+        if (pseudoStyle.content !== 'none' && pseudoStyle.content !== 'normal' && pseudoStyle.display !== 'none' && pseudoStyle.visibility === 'visible') {
+          collectCssImageUrls(pseudoStyle, sources);
+        }
+      }
+    }
+    return Promise.all(Array.from(sources, decodeCssImage));
+  }
+
+  function collectImageDecodes(root, tasks) {
+    for (const img of root.querySelectorAll('img, image')) {
       if (!(img._decoded && img.complete) && typeof img.decode === 'function') {
         tasks.push(img.decode().then(() => { img._decoded = true; }).catch(() => {}));
       }
     }
+    if (root.shadowRoot) collectImageDecodes(root.shadowRoot, tasks);
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) collectImageDecodes(el.shadowRoot, tasks);
+    }
+  }
+
+  async function waitStageAssets() {
+    if (!stage) return;
+    const tasks = [waitCssImages()];
+    collectImageDecodes(stage, tasks);
     for (const clip of V._videoClips) {
       if (clip.isConnected && clip._vclip) tasks.push(seekVideoElementAsync(clip, clip._vclip.targetTime));
     }
@@ -1463,7 +1536,7 @@
     return (V.getBaseLang && V.getBaseLang()) || '';
   }
 
-  function applyPostLocaleReload(pos, wasPlaying, target) {
+  function applyPostLocaleReload(pos, target) {
     if (V.syncDocLangAttrs) V.syncDocLangAttrs();
     if (current && current.root) current.root.remove();
     current = null;
@@ -1476,30 +1549,40 @@
     refreshLocalizedChrome(cfg, uiCfg);
     lastSeekTarget = -1;
     seek(resolveMappedPos(pos), true);
-    if (wasPlaying && audioRt) audioRt.startPlayback();
     V.emit('onLocaleChange', { lang: V.getActiveLang(), duration: V.duration });
     const hit = V.getAvailableLocales ? V.getAvailableLocales().find(x => x.code.toLowerCase() === target.toLowerCase()) : null;
     if (hit) flashOsd(hit.label);
   }
 
-  async function setLang(nextLang) {
+  async function applyLang(nextLang) {
     const target = resolveTargetLangCode(nextLang);
     const prevLang = V.getActiveLang();
     if (target === prevLang) return prevLang;
-    const pos = captureLogicalPos();
-    const wasPlaying = playing;
-    if (wasPlaying && audioRt) audioRt.pausePlayback();
-    if (V.captureVoice && V.voice) V.captureVoice(V.voice);
-    V.__langOverridden = true;
-    V.__activeLang = target;
-    const ok = await ensureLocaleAssetsLoaded(target, prevLang);
-    if (!ok && V.getActiveLang() === prevLang) {
-      if (wasPlaying && audioRt) audioRt.startPlayback();
-      return prevLang;
+    // 等待资源时保留用户的播放意图，暂停时间轴与旧媒体。
+    localeLoading = true;
+    try {
+      if (audioRt) audioRt.pausePlayback();
+      for (const clip of V._videoClips) if (clip.pause) clip.pause();
+      if (V.captureVoice && V.voice) V.captureVoice(V.voice);
+      V.__langOverridden = true;
+      V.__activeLang = target;
+      const ok = await ensureLocaleAssetsLoaded(target, prevLang);
+      if (!ok && V.getActiveLang() === prevLang) return prevLang;
+      const pos = captureLogicalPos();
+      V.resetCheckpoints();
+      applyPostLocaleReload(pos, V.getActiveLang());
+      return V.getActiveLang();
+    } finally {
+      localeLoading = false;
+      lastTs = performance.now();
+      if (playing && audioRt) audioRt.startPlayback();
     }
-    V.resetCheckpoints();
-    applyPostLocaleReload(pos, wasPlaying, V.getActiveLang());
-    return V.getActiveLang();
+  }
+
+  function setLang(nextLang) {
+    const pending = localeSwitch.then(() => applyLang(nextLang));
+    localeSwitch = pending.catch(() => {});
+    return pending;
   }
 
   function exposeBridge(cfg) {
@@ -1621,7 +1704,7 @@
     audioRt = V._createAudioRuntime({
       params,
       isRecord: RECORD,
-      isPlaying: () => playing,
+      isPlaying: () => playing && !localeLoading,
       getNow: () => now,
       getCurrentScene: () => current,
       markSeekApplied: target => { lastSeekTarget = target; lastSeekAt = performance.now(); },

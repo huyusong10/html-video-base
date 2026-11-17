@@ -37,11 +37,23 @@ function safeDecodePath(rawPath) {
   try { return decodeURIComponent(rawPath); } catch { return null; }
 }
 
-function pipeFileSafe(res, fp, opts) {
-  const stream = fs.createReadStream(fp, opts);
-  stream.on('error', () => {
-    if (!res.headersSent) res.writeHead(500);
-    res.end();
+function parseRequestUrl(req) {
+  try { return new URL(req.url, `http://${req.headers.host || 'localhost'}`); } catch { return null; }
+}
+
+function pipeFileSafe(res, fp, { status = 200, headers, range }) {
+  const stream = fs.createReadStream(fp, range);
+  let opened = false;
+  stream.on('open', () => {
+    opened = true;
+    res.writeHead(status, headers);
+  });
+  stream.on('error', err => {
+    if (opened || res.headersSent) { res.destroy(); return; }
+    res.writeHead(err.code === 'ENOENT' ? 404 : 500, { 'Content-Length': 0 }).end();
+  });
+  stream.on('end', () => {
+    if (stream.bytesRead !== Number(headers['Content-Length'])) res.destroy();
   });
   res.on('close', () => stream.destroy());
   stream.pipe(res);
@@ -90,15 +102,15 @@ function serveRangeResponse(req, res, fp, size, contentType) {
     return true;
   }
   const { start, end } = parsed;
-  res.writeHead(206, {
+  const headers = {
     'Content-Type': contentType,
     'Content-Range': `bytes ${start}-${end}/${size}`,
     'Accept-Ranges': 'bytes',
     'Content-Length': end - start + 1,
     'Cache-Control': 'no-cache',
-  });
-  if (req.method === 'HEAD') res.end();
-  else pipeFileSafe(res, fp, { start, end });
+  };
+  if (req.method === 'HEAD') res.writeHead(206, headers).end();
+  else pipeFileSafe(res, fp, { status: 206, headers, range: { start, end } });
   return true;
 }
 
@@ -135,7 +147,8 @@ export function createVideoHttpServer({ videosDir = VIDEOS_DIR, watch = false } 
   const stopWatch = watch ? attachHmrWatchers([videosDir, RUNTIME_BASE_DIR], hmrClients) : () => {};
 
   const srv = http.createServer((req, res) => {
-    const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const u = parseRequestUrl(req);
+    if (!u) { res.writeHead(400).end('Bad Request'); return; }
     if (u.pathname === '/__hmr') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
       res.write(':\n\n');
@@ -154,20 +167,21 @@ export function createVideoHttpServer({ videosDir = VIDEOS_DIR, watch = false } 
       return;
     }
 
-    const stat = fs.statSync(fp);
+    let stat;
+    try { stat = fs.statSync(fp); } catch { res.writeHead(404).end('Not Found'); return; }
     if (stat.isDirectory()) { res.writeHead(302, { Location: u.pathname + '/' + u.search }).end(); return; }
 
     const contentType = MIME[path.extname(fp).toLowerCase()] || 'application/octet-stream';
     if (req.headers.range && serveRangeResponse(req, res, fp, stat.size, contentType)) return;
 
-    res.writeHead(200, {
+    const headers = {
       'Content-Type': contentType,
       'Content-Length': stat.size,
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-cache',
-    });
-    if (req.method === 'HEAD') res.end();
-    else pipeFileSafe(res, fp);
+    };
+    if (req.method === 'HEAD' || stat.size === 0) res.writeHead(200, headers).end();
+    else pipeFileSafe(res, fp, { headers, range: { start: 0, end: stat.size - 1 } });
   });
 
   const origClose = srv.close.bind(srv);

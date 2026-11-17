@@ -330,6 +330,7 @@
     };
 
     function handlePptKeyDown(bar, e) {
+      if (e.defaultPrevented) return;
       if (e.key === 'Escape') { handlePptEscape(bar, e); return; }
       if (e.ctrlKey || e.metaKey || e.altKey || isEditableKeyTarget(e.target)) return;
       if (e.key === ' ' || e.code === 'Space' || e.key === 'Enter') {
@@ -353,6 +354,7 @@
       const vp = document.getElementById('viewport');
       if (vp) {
         vp.addEventListener('wheel', e => {
+          if (e.defaultPrevented) return;
           if (Math.abs(e.deltaY) < 8 || shouldAllowNativeWheel(e.target, vp, e.deltaY)) return;
           e.preventDefault();
           const nowTs = performance.now();

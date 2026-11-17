@@ -1,5 +1,5 @@
 """通用混音管线：支持 BGM 侧链闪避、48kHz 程序化动作微音效、受控 <video> 切片原声混入与 AAC 封装。"""
-import json, math, os, subprocess, sys
+import json, math, os, subprocess, sys, uuid
 import imageio_ffmpeg, numpy as np, soundfile as sf
 from scipy.signal import fftconvolve, resample_poly
 
@@ -55,7 +55,7 @@ def decode_audio_file(path, channels=2, trim_start=0.0, speed=1.0):
     if trim_start > 0:
         cmd += ['-ss', f'{trim_start:.3f}']
     cmd += ['-i', path]
-    if abs(speed - 1.0) > 0.01:
+    if speed != 1.0:
         cmd += ['-af', _build_atempo_chain(speed)]
     cmd += ['-f', 'f32le', '-ac', str(channels), '-ar', str(SR), '-']
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -536,22 +536,22 @@ def normalize_audio_bitrate(raw) -> str:
 
 
 def write_master_output(mix, out, bitrate='128k'):
-    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    if not out.endswith('.m4a'):
-        sf.write(out, mix.astype(np.float32), SR)
-        return
-    pid = os.getpid()
-    tmp_wav = f'{out}.{pid}.tmp.wav'
-    tmp_m4a = f'{out}.{pid}.tmp.m4a'
-    sf.write(tmp_wav, mix.astype(np.float32), SR)
+    output_dir = os.path.dirname(os.path.abspath(out))
+    os.makedirs(output_dir, exist_ok=True)
+    prefix = os.path.join(output_dir, f'.html-video-{os.getpid()}-{uuid.uuid4().hex}.tmp')
+    is_m4a = out.lower().endswith('.m4a')
+    tmp_wav = f'{prefix}.wav'
+    tmp_out = f'{prefix}.m4a' if is_m4a else prefix + os.path.splitext(out)[1]
     try:
-        subprocess.run([
-            FFMPEG, '-y', '-loglevel', 'error', '-i', tmp_wav,
-            '-c:a', 'aac', '-b:a', normalize_audio_bitrate(bitrate), '-ac', '2', '-ar', '48000', '-movflags', '+faststart', tmp_m4a,
-        ], check=True)
-        os.replace(tmp_m4a, out)
+        sf.write(tmp_wav if is_m4a else tmp_out, mix.astype(np.float32), SR)
+        if is_m4a:
+            subprocess.run([
+                FFMPEG, '-y', '-loglevel', 'error', '-i', tmp_wav,
+                '-c:a', 'aac', '-b:a', normalize_audio_bitrate(bitrate), '-ac', '2', '-ar', '48000', '-movflags', '+faststart', tmp_out,
+            ], check=True)
+        os.replace(tmp_out, out)
     finally:
-        for p in (tmp_wav, tmp_m4a):
+        for p in (tmp_wav, tmp_out):
             if os.path.exists(p):
                 os.remove(p)
 

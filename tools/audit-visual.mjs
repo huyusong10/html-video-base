@@ -3,7 +3,7 @@
 // 用法：node tools/audit-visual.mjs [video-id ...] [--strict] [--lang en] [--screenshots .runtime/audit]
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable, getSandboxCfg, localizeMediaRel, normalizeCliArgs } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, loadChromium, findBrowserExecutable, getSandboxCfg, localizeMediaRel, normalizeCliArgs, isMainModule } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
 
 function clampInScene(sc, rawT) {
@@ -305,7 +305,7 @@ async function auditSingleVideo(browser, port, id, opts) {
   });
 
   const q = lang ? `?record=1&lang=${encodeURIComponent(lang)}` : '?record=1';
-  await page.goto(`http://127.0.0.1:${port}/${id}/${q}`, { waitUntil: 'networkidle' });
+  await page.goto(`http://127.0.0.1:${port}/${encodeURIComponent(id)}/${q}`, { waitUntil: 'networkidle' });
   await page.waitForFunction(() => window.__video && window.V && window.V.seekToAsync, null, { timeout: 15000 });
 
   for (const sel of await page.evaluate(IN_PAGE_CSS_AUDIT)) {
@@ -342,16 +342,16 @@ export async function auditVideos(videoIds, { strict = false, lang = '', screens
   if (!targets.length) return { errors: 0, warnings: 0, screenshots: [] };
 
   const { srv, port } = await startEphemeralVideoServer();
-  const chromium = await loadChromium(ROOT);
-  const browser = await chromium.launch({
-    executablePath: findBrowserExecutable(),
-    headless: true,
-    args: ['--use-gl=angle', '--enable-webgl', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required'],
-  });
-
+  let browser;
   let totalErrors = 0, totalWarnings = 0;
   const allShots = [];
   try {
+    const chromium = await loadChromium(ROOT);
+    browser = await chromium.launch({
+      executablePath: findBrowserExecutable(),
+      headless: true,
+      args: ['--use-gl=angle', '--enable-webgl', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required'],
+    });
     for (const id of targets) {
       const res = await auditSingleVideo(browser, port, id, { lang, screenshotDir });
       const { errCount, warnCount, screenshots } = reportAuditResult(id, res, strict);
@@ -360,8 +360,7 @@ export async function auditVideos(videoIds, { strict = false, lang = '', screens
       allShots.push(...screenshots);
     }
   } finally {
-    await browser.close();
-    srv.close();
+    try { await browser?.close(); } finally { srv.close(); }
   }
   return { errors: totalErrors, warnings: totalWarnings, screenshots: allShots };
 }
@@ -379,8 +378,7 @@ function parseAuditCliArgs(rawInput) {
   return { ids, lang, screenshotDir, strict: raw.includes('--strict') };
 }
 
-const isDirectRun = process.argv[1] && process.argv[1].endsWith('audit-visual.mjs');
-if (isDirectRun) {
+if (isMainModule(import.meta.url)) {
   const parsed = parseAuditCliArgs(process.argv.slice(2));
   const { errors } = await auditVideos(parsed.ids, parsed);
   if (errors > 0) process.exit(1);

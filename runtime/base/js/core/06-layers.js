@@ -28,10 +28,19 @@
     }
   }
 
-  function resolveLayerState(layer, sc, si) {
+  function resolveLayerState(layer, sc, si, frameCtx) {
     const prop = layer.prop || layer.id;
     const raw = sc ? sc[prop] : null;
-    const val = typeof raw === 'function' ? raw(sc.ctx || V.makeCtx(sc, si), sc, si) : raw;
+    let val = raw;
+    if (typeof raw === 'function') {
+      const ctx = sc.ctx || (sc.ctx = V.makeCtx(sc, si));
+      ctx.dur = sc.duration;
+      if (frameCtx) {
+        const { clock, alive, idle, playing, ended, pointer } = frameCtx;
+        Object.assign(ctx, { clock, alive, idle, playing, ended, pointer, sceneClock: clock - sc.start });
+      }
+      val = raw(ctx, sc, si);
+    }
     return Object.assign({}, layer.defaults || layer.defaultState || {}, val || {});
   }
 
@@ -51,7 +60,7 @@
     if (idx <= 0 || blendDur <= 0 || lt >= blendDur) {
       return { state: curState, prevState: curState, curState, blend: 1 };
     }
-    const prevState = resolveLayerState(layer, V.scenes[idx - 1], idx - 1);
+    const prevState = resolveLayerState(layer, V.scenes[idx - 1], idx - 1, sc.ctx);
     const blend = ease.io(clamp(lt / blendDur));
     return { state: blendLayerStates(prevState, curState, blend), prevState, curState, blend };
   }

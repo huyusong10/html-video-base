@@ -27,7 +27,7 @@
         h('div', { class: 'tpl-head' },
           h('div', null,
             h('div', { class: 'tpl-kicker' }, 'PURE FUNCTION TIMELINE'),
-            h('h1', { class: 'tpl-title' }, '__VIDEO_TITLE__')),
+            h('h1', { class: 'tpl-title' }, __VIDEO_TITLE_JSON__)),
           h('div', { class: 'tpl-kpi' }, E.fpsNum, h('span', null, 'FPS 确定性渲染'))),
         h('div', { class: 'tpl-grid' }, ...E.cards));
 

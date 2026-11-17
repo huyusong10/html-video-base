@@ -21,7 +21,7 @@ function parseStoryboardArgs(rawInput) {
   const lang = langIdx >= 0 && rawArgs[langIdx + 1] ? rawArgs[langIdx + 1] : '';
   const pos = rawArgs.filter((a, i) => !a.startsWith('--') && (langIdx < 0 || i !== langIdx + 1));
   const defaultVideo = listVideoIds()[0] || 'starter';
-  const firstIsHtml = Boolean(pos[0] && pos[0].endsWith('.html'));
+  const firstIsHtml = pos.length === 1 && /\.html$/i.test(pos[0]);
   const videoId = firstIsHtml ? defaultVideo : (pos[0] || defaultVideo);
   const outHtml = firstIsHtml ? path.resolve(pos[0]) : path.resolve(pos[1] || path.join(ROOT, `${videoId}-storyboard.html`));
   return { videoId, outHtml, perCue: rawArgs.includes('--per-cue'), wantPdf: rawArgs.includes('--pdf'), lang };
@@ -163,7 +163,7 @@ const browser = await chromium.launch({
 try {
   const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
   const langQuery = args.lang ? `&lang=${encodeURIComponent(args.lang)}` : '';
-  await page.goto(`http://127.0.0.1:${port}/${args.videoId}/?record=1&nosubs=1${langQuery}`, { waitUntil: 'networkidle' });
+  await page.goto(`http://127.0.0.1:${port}/${encodeURIComponent(args.videoId)}/?record=1&nosubs=1${langQuery}`, { waitUntil: 'networkidle' });
   await page.waitForFunction(() => window.__video && window.V && window.V.seekToAsync, null, { timeout: 15000 });
   await page.evaluate(() => (document.fonts ? document.fonts.ready : Promise.resolve()));
 

@@ -244,6 +244,7 @@
     });
 
     document.addEventListener('keydown', e => {
+      if (e.defaultPrevented) return;
       const isCmdK = (e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K');
       const isSlash = !e.ctrlKey && !e.metaKey && !e.altKey && e.key === '/' && !isTypingInField(e.target);
       if (!isCmdK && !isSlash) return;

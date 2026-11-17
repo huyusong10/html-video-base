@@ -17,7 +17,56 @@ export function getProjectRoot() {
 export const ROOT = getProjectRoot();
 export const VIDEOS_DIR = path.join(ROOT, 'videos');
 
+export function isMainModule(moduleUrl) {
+  if (!process.argv[1]) return false;
+  try {
+    const entry = fs.realpathSync(process.argv[1]);
+    return path.relative(entry, fs.realpathSync(fileURLToPath(moduleUrl))) === '';
+  } catch { return false; }
+}
+
 const RESERVED_DIRS = new Set(['base', 'themes', 'templates', 'assets', 'vendor']);
+const sceneCacheSnapshots = new WeakMap();
+
+function encodeSceneCacheValue(value, seen) {
+  const type = typeof value;
+  if (value === null || type === 'string' || type === 'boolean') return [type, value];
+  if (type === 'number') return [type, Object.is(value, -0) ? '-0' : String(value)];
+  if (type === 'undefined') return [type];
+  if (type === 'function') return [type, Function.prototype.toString.call(value)];
+  if (type !== 'object') throw new Error('Scene definition requires source hashing');
+  return encodeSceneCacheObject(value, seen);
+}
+
+function encodeSceneCacheObject(value, seen) {
+  if (seen.has(value) || Object.getOwnPropertySymbols(value).length) {
+    throw new Error('Scene definition requires source hashing');
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && proto && (Object.getPrototypeOf(proto) !== null || proto.constructor?.name !== 'Object')) {
+    throw new Error('Scene definition has a custom prototype');
+  }
+  seen.add(value);
+  const entries = Object.getOwnPropertyNames(value).map(name => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, name);
+    if (!Object.hasOwn(descriptor, 'value')) throw new Error('Scene definition has an accessor');
+    return [name, encodeSceneCacheValue(descriptor.value, seen)];
+  });
+  seen.delete(value);
+  return [Array.isArray(value) ? 'array' : 'object', entries];
+}
+
+function rememberSceneCacheDefinitions(scenes) {
+  for (const scene of scenes) {
+    if (!scene || typeof scene !== 'object') continue;
+    try { sceneCacheSnapshots.set(scene, JSON.stringify(encodeSceneCacheValue(scene, new Set()))); }
+    catch { sceneCacheSnapshots.set(scene, null); }
+  }
+}
+
+export function getSceneCacheSnapshot(scene) {
+  return sceneCacheSnapshots.get(scene) ?? null;
+}
 
 export function resolveBaseFile(relFromBase, videosDir = VIDEOS_DIR) {
   const localOverride = path.join(videosDir, 'base', relFromBase);
@@ -214,12 +263,21 @@ export function extractRawBgmSrc(cfg) {
   return typeof b === 'string' && !BUILTIN_BGM_PRESETS.has(b) ? b : null;
 }
 
+function assertSinglePathComponent(value, label) {
+  const segment = String(value ?? '');
+  if (!segment.replace(/[. ]+$/, '') || /[\/\\\u0000]/.test(segment)) {
+    throw new Error('Invalid ' + label + ': "' + segment + '". Use a single name without path separators.');
+  }
+}
+
 export function localizeMediaRel(rel, lang) {
+  if (lang) assertSinglePathComponent(lang, 'language code');
   if (!rel || !lang) return rel;
   return rel.replace(/(\.[a-z0-9]+)$/i, `.${lang}$1`);
 }
 
 export function resolveLangMediaPaths(cfg, lang = '') {
+  if (lang) assertSinglePathComponent(lang, 'language code');
   const baseTimings = (cfg && cfg.timingsScript) || 'assets/voice/timings.js';
   const baseAudio = cfg && cfg.audioSrc === false ? null : ((cfg && cfg.audioSrc) || 'assets/soundtrack.m4a');
   const baseBgm = isBgmDisabledCfg(cfg) ? null : ((cfg && cfg.bgmSrc) || 'assets/bgm.m4a');
@@ -315,6 +373,8 @@ function loadOptionalTimings(sandbox, timingsPath, timingsRel, videoId, requireT
 }
 
 export function loadVideoSandbox(root, videoId, { ignoreBaked = false, requireTimings = false, lang = '' } = {}) {
+  assertSinglePathComponent(videoId, 'video id');
+  if (lang) assertSinglePathComponent(lang, 'language code');
   const videosDir = path.join(root, 'videos');
   const videoDir = path.join(videosDir, videoId);
   if (!fs.existsSync(videoDir)) throw new Error(`Video directory not found: ${videoDir}`);
@@ -348,6 +408,8 @@ export function loadVideoSandbox(root, videoId, { ignoreBaked = false, requireTi
     }
   }
 
+  // 排布和素材探测会修改分镜；缓存先记录用户编写的属性与回调。
+  rememberSceneCacheDefinitions(sandbox.V.scenes);
   sandbox.V.layout();
   return { sandbox, videoDir, timingsPath, timingsRel, audioRel, bgmRel };
 }

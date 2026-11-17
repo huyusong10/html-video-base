@@ -4,7 +4,7 @@
   const V = (rootScope.V = rootScope.V || {});
   V.config = {
     id: '__VIDEO_ID__',
-    title: '__VIDEO_TITLE__',
+    title: __VIDEO_TITLE_JSON__,
     subtitle: '基于纯函数时间轴驱动的交互式 HTML 视频',
     width: __STAGE_WIDTH__,
     height: __STAGE_HEIGHT__,

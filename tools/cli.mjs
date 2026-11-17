@@ -2,10 +2,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { verifySpokenTimings } from './verify-sync.mjs';
 import {
   ROOT, PKG_ROOT, TOOLS_DIR, VIDEOS_DIR, TEMPLATES_DIR,
   listVideoIds, resolvePython, loadVideoSandbox, resolveLangMediaPaths, getSandboxCfg,
-  normalizeCliArgs,
+  normalizeCliArgs, isMainModule,
 } from './lib/paths.mjs';
 
 function run(bin, args, label, extraEnv = {}) {
@@ -13,7 +14,8 @@ function run(bin, args, label, extraEnv = {}) {
   const r = spawnSync(bin, args, {
     cwd: ROOT,
     stdio: 'inherit',
-    env: Object.assign({}, process.env, { VIDEO_PROJECT_ROOT: ROOT }, extraEnv),
+    // Python 日志统一使用 UTF-8，避免本地代码页拒绝合法 Unicode 路径。
+    env: Object.assign({}, process.env, { VIDEO_PROJECT_ROOT: ROOT, PYTHONIOENCODING: 'utf-8' }, extraEnv),
   });
   if (r.status !== 0) process.exit(r.status || 1);
 }
@@ -44,6 +46,8 @@ function stripFlags(args, valueFlags = []) {
 function copyTemplateDir(src, dest, replacements) {
   fs.mkdirSync(dest, { recursive: true });
   const textExts = new Set(['.html', '.js', '.css', '.md', '.json']);
+  const tokens = Object.keys(replacements).map(key => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = new RegExp(tokens.join('|'), 'g');
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
     const s = path.join(src, entry.name);
     const d = path.join(dest, entry.name);
@@ -55,8 +59,8 @@ function copyTemplateDir(src, dest, replacements) {
       fs.copyFileSync(s, d);
       continue;
     }
-    let txt = fs.readFileSync(s, 'utf8');
-    for (const [k, v] of Object.entries(replacements)) txt = txt.replaceAll(k, v);
+    // 一次按字面值替换，保留标题中的 $& 和其他占位符文本。
+    const txt = fs.readFileSync(s, 'utf8').replace(pattern, token => replacements[token]);
     fs.writeFileSync(d, txt, 'utf8');
   }
 }
@@ -65,6 +69,11 @@ function resolveAspectDims(aspect) {
   if (aspect === '9:16') return [1080, 1920];
   if (aspect === '1:1') return [1080, 1080];
   return [1920, 1080];
+}
+
+function escapeHtml(value) {
+  const chars = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  return value.replace(/[&<>"']/g, char => chars[char]);
 }
 
 function exportSkillDoc(outDir) {
@@ -97,7 +106,9 @@ function cmdInit(args) {
 
   copyTemplateDir(tplDir, targetDir, {
     '__VIDEO_ID__': videoId,
-    '__VIDEO_TITLE__': title,
+    '__VIDEO_TITLE__': title, // 兼容业务自定义模板；内置模板使用下方的 JSON/HTML 占位符。
+    '__VIDEO_TITLE_JSON__': JSON.stringify(title),
+    '__VIDEO_TITLE_HTML__': escapeHtml(title),
     '__STAGE_WIDTH__': String(width),
     '__STAGE_HEIGHT__': String(height),
   });
@@ -154,6 +165,13 @@ function assertMixReady(videoId, lang) {
     || sandbox.V.scenes.some((sc, i) => !Array.isArray(durs[i]) || sc.lines.length !== durs[i].length);
   if (mismatch) {
     console.error(`Error: Spoken line count changed for '${videoId}'. Run "html-video build ${videoId}" instead of "mix".`);
+    process.exit(1);
+  }
+  const errors = [];
+  verifySpokenTimings(sandbox.V, errors, lang);
+  if (errors.length) {
+    const build = `html-video build ${videoId}${lang ? ' --lang ' + lang : ''}`;
+    console.error(`Error: Spoken lines no longer match timings for '${videoId}'. Run "${build}" instead of "mix".\n${errors.join('\n')}`);
     process.exit(1);
   }
   return { timingsRel, audioRel, bgmRel };
@@ -320,5 +338,4 @@ export function runCli(argv = process.argv.slice(2)) {
   else printHelp();
 }
 
-const isDirectRun = process.argv[1] && process.argv[1].endsWith('cli.mjs');
-if (isDirectRun) runCli();
+if (isMainModule(import.meta.url)) runCli();

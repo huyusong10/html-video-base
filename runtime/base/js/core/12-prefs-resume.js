@@ -4,6 +4,7 @@
 
   let lastFlushTs = 0;
   let lastSavedT = null;
+  let lastSavedKey = null;
   let boundPageHide = false;
 
   function getStorageKey() {
@@ -40,6 +41,7 @@
 
   function clearSavedState() {
     lastSavedT = null;
+    lastSavedKey = null;
     try { localStorage.removeItem(getStorageKey()); } catch {}
   }
 
@@ -62,8 +64,10 @@
     const uiCfg = V._getUiCfg ? V._getUiCfg(V.getCfg()) : null;
     if (!canResume(uiCfg) || !V.duration) return;
     const nextT = resolveProgressTimestamp(curNow, isEnded, uiCfg.resumeMinSec, V.duration);
-    if (nextT === null || nextT === lastSavedT) return;
+    const key = getStorageKey();
+    if (nextT === null || (nextT === lastSavedT && key === lastSavedKey)) return;
     lastSavedT = nextT;
+    lastSavedKey = key;
     writeSaved(uiCfg, { t: nextT });
   }
 
@@ -95,6 +99,7 @@
       const uiCfg = V._getUiCfg(V.getCfg());
       if (!canResume(uiCfg)) return;
       lastSavedT = 0;
+      lastSavedKey = getStorageKey();
       writeSaved(uiCfg, { t: 0 });
     },
     onRender(st) {

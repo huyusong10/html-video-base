@@ -1,12 +1,15 @@
 """多模型 TTS 配音合成、声学词边界对齐与 30Hz 真实语音振幅包络提取管线。"""
-import asyncio, hashlib, json, os, re, shutil, subprocess, sys, threading
+import asyncio, hashlib, json, os, re, shutil, subprocess, sys, threading, uuid
 import imageio_ffmpeg, numpy as np, soundfile as sf
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 
-from tts_providers import DEFAULT_PROVIDER, DEFAULT_VOICE, resolve_provider
+from tts_providers import (
+    DEFAULT_PROVIDER, DEFAULT_VOICE, resolve_provider,
+    _resolve_openai_base_url, _resolve_azure_endpoint,
+)
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 PROJECT_ROOT = os.path.abspath(os.environ.get('VIDEO_PROJECT_ROOT') or os.getcwd())
@@ -239,11 +242,17 @@ def post_process_audio(src_audio, raw_wav, out_wav, words, en_ratio, spoken, cfg
     y, trim_s = trim(y)
     if adj_words:
         adj_words = [(round(max(0.0, t - trim_s), 3), w) for t, w in adj_words]
-    sf.write(out_wav, y, 24000)
-    if not adj_words:
-        adj_words = align_words_acoustic(y, 24000, spoken, out_wav, cfg)
-    env_30hz = extract_envelope_30hz(y, 24000)
-    return round(len(y) / 24000, 3), adj_words, env_30hz
+    temporary = os.path.join(os.path.dirname(out_wav), f'.html-video-{os.getpid()}-{uuid.uuid4().hex}.tmp{os.path.splitext(out_wav)[1]}')
+    try:
+        sf.write(temporary, y, 24000)
+        if not adj_words:
+            adj_words = align_words_acoustic(y, 24000, spoken, temporary, cfg)
+        env_30hz = extract_envelope_30hz(y, 24000)
+        os.replace(temporary, out_wav)
+        return round(len(y) / 24000, 3), adj_words, env_30hz
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def compute_en_ratio(cfg: dict) -> float:
@@ -261,14 +270,17 @@ _CACHE_CFG_KEYS = (
 )
 
 
-def _script_sha256(script_rel, video_dir):
-    if not script_rel:
+def _file_sha256(file_rel, base_dir=None):
+    if not file_rel:
         return ''
-    path = script_rel if os.path.isabs(script_rel) else os.path.join(video_dir or os.getcwd(), script_rel)
+    path = file_rel if os.path.isabs(file_rel) else os.path.join(base_dir or os.getcwd(), file_rel)
     if not os.path.exists(path):
         return ''
+    digest = hashlib.sha256()
     with open(path, 'rb') as f:
-        return hashlib.sha256(f.read()).hexdigest()
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def make_cache_key(cfg: dict, spoken: str, en_ratio: float, video_dir=None) -> str:
@@ -279,12 +291,16 @@ def make_cache_key(cfg: dict, spoken: str, en_ratio: float, video_dir=None) -> s
         'pitch': str(cfg.get('pitch', '+0Hz')),
         'align': str(cfg.get('align', 'acoustic')),
         'en_ratio': en_ratio,
-        'scriptHash': _script_sha256(cfg.get('script'), video_dir),
+        'scriptHash': _file_sha256(cfg.get('script'), video_dir),
         'spoken': spoken,
     }
     for k in _CACHE_CFG_KEYS:
         if k in cfg and cfg[k] is not None:
             payload[k] = cfg[k]
+    if payload['provider'] == 'openai':
+        payload['baseUrl'] = _resolve_openai_base_url(cfg)
+    elif payload['provider'] == 'azure':
+        payload['endpoint'] = _resolve_azure_endpoint(cfg)
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]
 
@@ -304,17 +320,29 @@ def normalize_line_item(item, base_cfg: dict):
 def _try_load_cached_voice(c_wav: str, c_meta: str, out_wav: str):
     if not (os.path.exists(c_wav) and os.path.exists(c_meta)):
         return None
+    tmp_out = f'{out_wav}.{os.getpid()}.{threading.get_ident()}.cache.tmp'
     try:
         with open(c_meta, encoding='utf-8') as mf:
             cached = json.load(mf)
-        shutil.copyfile(c_wav, out_wav)
+        shutil.copyfile(c_wav, tmp_out)
+        dur = float(cached['dur'])
+        # 配音时长按毫秒保存，允许舍入误差，同时检查旧版缓存。
+        if not (abs(dur - sf.info(tmp_out).duration) <= 0.001):
+            return None
+        if 'wavSha256' in cached and _file_sha256(tmp_out) != cached['wavSha256']:
+            return None
+        words = [tuple(x) for x in cached['words']]
         env = cached.get('env')
         if not isinstance(env, list):
-            y_c, sr_c = sf.read(c_wav, dtype='float32')
+            y_c, sr_c = sf.read(tmp_out, dtype='float32')
             env = extract_envelope_30hz(y_c, sr_c)
-        return float(cached['dur']), [tuple(x) for x in cached['words']], env
+        os.replace(tmp_out, out_wav)
+        return dur, words, env
     except Exception:
         return None
+    finally:
+        if os.path.exists(tmp_out):
+            os.remove(tmp_out)
 
 
 def _resolve_media_ext(cfg: dict) -> str:
@@ -330,9 +358,10 @@ def _write_cache_entry_atomic(out_wav: str, c_wav: str, c_meta: str, payload: di
     tmp_wav, tmp_meta = c_wav + suffix, c_meta + suffix
     try:
         shutil.copyfile(out_wav, tmp_wav)
+        metadata = dict(payload, wavSha256=_file_sha256(tmp_wav))
         os.replace(tmp_wav, c_wav)
         with open(tmp_meta, 'w', encoding='utf-8') as mf:
-            json.dump(payload, mf, ensure_ascii=False)
+            json.dump(metadata, mf, ensure_ascii=False)
         os.replace(tmp_meta, c_meta)
     except Exception:
         for p in (tmp_wav, tmp_meta):
@@ -431,24 +460,31 @@ def hydrate_cached_voices(scenes, out_dir, base_cfg, rules, video_dir=None):
             spoken = speakable(text, rules)
             digest = make_cache_key(line_cfg, spoken, compute_en_ratio(line_cfg), video_dir=video_dir)
             c_wav = os.path.join(CACHE_DIR, f'{digest}.wav')
-            if os.path.exists(c_wav):
-                shutil.copyfile(c_wav, f'{out_dir}/{si:02d}_{li:02d}.wav')
+            c_meta = os.path.join(CACHE_DIR, f'{digest}.json')
+            if _try_load_cached_voice(c_wav, c_meta, f'{out_dir}/{si:02d}_{li:02d}.wav') is not None:
                 hits += 1
     print(f'  Cache-only voice lookup: {hits}/{total} dry clips hit ({total - hits} fallback to stem).')
 
 
 def _write_timings_js(timings_path, audio_src, bgm_src, voice_label, durs, all_words, all_envs, lang):
-    os.makedirs(os.path.dirname(timings_path), exist_ok=True)
-    with open(timings_path, 'w', encoding='utf-8') as f:
-        f.write('/* 配音时长（秒）、逐词时间轴与 30Hz 语音包络，由构建管线生成。 */\n')
-        f.write('window.V = window.V || {};\n')
-        meta = {'src': audio_src, 'voice': voice_label, 'durations': durs, 'words': all_words, 'envelopes': all_envs}
-        if lang:
-            meta['lang'] = lang
-        if bgm_src:
-            meta['bgmSrc'] = bgm_src
-        f.write('V.voice = ' + json.dumps(meta, ensure_ascii=False) + ';\n')
-        f.write('if (V.captureVoice) V.captureVoice(V.voice);\n')
+    directory = os.path.dirname(timings_path)
+    os.makedirs(directory, exist_ok=True)
+    temporary = os.path.join(directory, f'.html-video-{os.getpid()}-{uuid.uuid4().hex}.tmp.js')
+    try:
+        with open(temporary, 'w', encoding='utf-8') as f:
+            f.write('/* 配音时长（秒）、逐词时间轴与 30Hz 语音包络，由构建管线生成。 */\n')
+            f.write('window.V = window.V || {};\n')
+            meta = {'src': audio_src, 'voice': voice_label, 'durations': durs, 'words': all_words, 'envelopes': all_envs}
+            if lang:
+                meta['lang'] = lang
+            if bgm_src:
+                meta['bgmSrc'] = bgm_src
+            f.write('V.voice = ' + json.dumps(meta, ensure_ascii=False) + ';\n')
+            f.write('if (V.captureVoice) V.captureVoice(V.voice);\n')
+        os.replace(temporary, timings_path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def _run_synthesis_stage(scenes, out_dir, tts_cfg, provider, rules, video_dir):
