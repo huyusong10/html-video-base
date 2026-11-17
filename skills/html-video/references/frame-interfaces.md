@@ -38,6 +38,8 @@ V.player.replay();
 
 `V.seekTo()` 与 `V.seekToAsync()` 保留工具定位画面的语义，不替代用户跳转。自定义导出和截图仍使用异步定位或巡检会话，以等待外部画面完成。
 
+播放、暂停会同步更新公共帧的播放状态，即使关闭 `ui.livePause` 也可立即读取。用户跳转和 PPT 翻页在绘制前重置需要清除的手动选择；`onSeek` 仍在定位后通知，回调读取到的是目标位置。
+
 ## 接入外部画面
 
 ```js
@@ -58,6 +60,8 @@ const unregister = V.frameSource({
 框架先更新分镜、字幕、持久层和同步 `onRender` 回调，再准备外部源。`await V.seekToAsync(t)` 等待图片、视频和所有活跃外部源，返回这次帧快照。正常播放不阻塞音频与界面；新帧取消旧请求，适配器须检查 `signal`，防止过期结果写回。跨 iframe 时还应匹配请求编号和目标窗口。
 
 每次准备有独立的超时预算。精确定位、录制与导出遇到错误会失败；预览通过 `onFrameError({ frame, error })` 和控制台报告错误。注销会取消该源正在等待的任务，并调用 `dispose()`；重复注销无副作用。
+
+内置图片和视频的单次等待上限为 30 秒；超时会拒绝本次精确定位并释放播放器，之后可以再次定位。新帧会立即取消旧帧的资源等待。这个上限不占用受管画面自行配置的初始化预算。
 
 活跃外部源和 iframe 默认不复用静止帧。业务必须在录制时停止自由镜头、自发补间等独立更新，以保证同一时间产生同一画面。同步等待本身不会让任意外部程序自动满足这个约束。
 
@@ -84,7 +88,7 @@ await withAuditSession({ projectRoot: '/project/course' }, async audit => {
 - `video.seek(t)`：等待精确定位，返回帧快照。
 - `video.capture(t, options)`：串行完成定位和 PNG 截图，返回 `{ frame, image }`；可传入截图路径等 Playwright 截图选项。
 - `video.page`：供业务发送鼠标事件、读取角色 DOM。交互截图中的环境时钟仍会推进；精确帧比较应使用 `record` 模式。
-- `video.issues`：运行错误、非可选资源错误及帧准备错误的快照。业务负责断言与最终门禁策略。
-- `video.close()`：提前关闭视频页面；会话结束会关闭剩余页面。
+- `video.issues`：运行错误、非可选资源的 HTTP 或网络请求错误，以及帧准备错误的快照。正常取消请求的 `ERR_ABORTED` 不计为问题。业务负责断言与最终门禁策略。
+- `video.close()`：立即关闭视频页面，取消未完成或排队中的定位与捕获；这些操作以 `AbortError` 拒绝，已保存的 PNG 保留。重复关闭返回同一个 Promise，关闭后不能再定位或捕获。可以在 `onCapture` 回调内调用；会话结束会关闭剩余页面。
 
-只需要静态服务时，可使用 `startVideoServer({ projectRoot, host, port, watch })`，从 `html-video-base/server` 导入。默认监听本机随机端口，返回 `{ origin, close }`；`await close()` 会结束连接并释放服务。
+只需要静态服务时，可使用 `startVideoServer({ projectRoot, host, port, watch })`，从 `html-video-base/server` 导入。`host` 须为非空字符串，默认监听本机随机端口，返回 `{ origin, close }`；`await close()` 会结束连接并释放服务。

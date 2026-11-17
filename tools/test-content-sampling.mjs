@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import { PKG_ROOT } from './lib/paths.mjs';
 import { readVideoMetadata, readVideoCatalog, createSearchIndex, createVideoManifest, readVideoManifest } from './content.mjs';
 import { sampleFrames } from './sampling.mjs';
 import { captureBatch } from './audit-capture.mjs';
+import { startVideoServer } from './server.mjs';
 
 const root = fs.mkdtempSync(path.join(PKG_ROOT, '.runtime/content-api-'));
 const videoDir = path.join(root, 'videos/demo');
@@ -41,6 +43,64 @@ test('catalog, index and manifest share the same scene times and allow business 
   assert.equal(manifest[0].department, 'Training');
   fs.writeFileSync(path.join(root, 'videos/manifest.js'), `/* generated */\nwindow.VIDEO_MANIFEST = ${JSON.stringify(manifest)};\n`);
   assert.deepEqual(readVideoManifest({ projectRoot: root }), manifest);
+});
+
+test('search dictionaries preserve valid IDs that match Object prototype names', () => {
+  const catalog = readVideoCatalog({ projectRoot: root, ids: ['demo'] });
+  const index = createSearchIndex([{ ...catalog[0], id: '__proto__' }]);
+  assert.ok(Object.hasOwn(index.videos, '__proto__'));
+  assert.equal(index.scenes[0].videoId, '__proto__');
+  assert.equal(JSON.parse(JSON.stringify(index)).videos.__proto__.title, 'Demo');
+});
+
+function layoutWithBaked(baked) {
+  const sandbox = vm.createContext({ console });
+  for (const name of ['01-registry.js', '02-math.js', '04-timeline.js']) {
+    vm.runInContext(fs.readFileSync(path.join(PKG_ROOT, 'runtime/base/js/core', name), 'utf8'), sandbox);
+  }
+  const V = sandbox.V;
+  V.scene({ lines: ['Example sentence'] });
+  V.voice = { bakedLayout: baked };
+  V.layout();
+  return V;
+}
+
+test('incomplete, invalid or non-finite baked times fall back to an estimated, sampleable layout', () => {
+  const valid = { duration: 10, scenes: [{ start: 0, duration: 10, cues: [[0.1, 0.9]] }] };
+  const changes = [
+    baked => { delete baked.duration; },
+    baked => { delete baked.scenes[0].start; },
+    baked => { delete baked.scenes[0].duration; },
+    baked => { baked.duration = -1; },
+    baked => { baked.duration = 0; },
+    baked => { baked.scenes[0].start = -1; },
+    baked => { baked.scenes[0].duration = -1; },
+    baked => { baked.scenes[0].start = Infinity; },
+    baked => { baked.scenes[0].duration = NaN; },
+    baked => { baked.scenes[0].cues = [null]; },
+    baked => { baked.scenes[0].cues = [[0.1]]; },
+    baked => { baked.scenes[0].cues = [[0.1, NaN]]; },
+    baked => { baked.scenes[0].cues = [[0.9, 0.1]]; },
+  ];
+  for (const change of changes) {
+    const baked = structuredClone(valid);
+    change(baked);
+    const V = layoutWithBaked(baked);
+    assert.equal(V.layoutInfo.source, 'estimated');
+    assert.ok(Number.isFinite(V.duration) && Number.isFinite(V.scenes[0].start) && Number.isFinite(V.scenes[0].duration));
+    assert.equal(sampleFrames({ scenes: V.scenes }).length, 3);
+  }
+  for (const cue of [[0.1, 0.9], [0.5, 0.5], [-0.2, 0.9], [0.1, 0.9, 'legacy extra field']]) {
+    const baked = structuredClone(valid);
+    baked.scenes[0].cues = [cue];
+    const V = layoutWithBaked(baked);
+    assert.equal(V.layoutInfo.source, 'baked');
+    assert.equal(V.duration, 10);
+  }
+  const zeroScene = structuredClone(valid);
+  zeroScene.scenes[0].duration = 0;
+  zeroScene.scenes[0].cues = [[0, 0]];
+  assert.equal(layoutWithBaked(zeroScene).layoutInfo.source, 'baked', 'Zero-duration scenes must remain compatible');
 });
 
 const timeline = { scenes: [
@@ -83,6 +143,24 @@ test('batch capture serializes points, streams images and keeps generated names 
   assert.equal(result[0].image, undefined);
 });
 
+test('batch capture preserves every requested output when generated or explicit names collide', async () => {
+  const outDir = path.join(root, 'collisions');
+  const capture = async (time, options) => {
+    const image = Buffer.from(String(time));
+    fs.writeFileSync(options.path, image);
+    return { frame: { now: time }, image };
+  };
+  const result = await captureBatch([{ name: 'shot', time: 1.001 }, { name: 'shot', time: 1.004 }], { outDir }, capture);
+  assert.equal(path.basename(result[0].path), 'shot_1.00s.png');
+  assert.equal(path.basename(result[1].path), 'shot_1.00s_2.png');
+  assert.equal(fs.readFileSync(result[0].path, 'utf8'), '1.001');
+  assert.equal(fs.readFileSync(result[1].path, 'utf8'), '1.004');
+  const explicit = await captureBatch([1, 2], { screenshot: { path: path.join(outDir, 'explicit.png') } }, capture);
+  assert.notEqual(explicit[0].path, explicit[1].path);
+  assert.equal(fs.readFileSync(explicit[0].path, 'utf8'), '1');
+  assert.equal(fs.readFileSync(explicit[1].path, 'utf8'), '2');
+});
+
 test('batch cancellation stops before the next capture', async () => {
   const abort = new AbortController(), captured = [];
   await assert.rejects(captureBatch([1, 2], { signal: abort.signal }, async time => {
@@ -90,4 +168,19 @@ test('batch cancellation stops before the next capture', async () => {
   }), { name: 'AbortError' });
   assert.deepEqual(captured, [1]);
   await assert.rejects(captureBatch([NaN], {}, async () => {}), /finite time/);
+});
+
+test('invalid server hosts reject without leaving a listening server', async () => {
+  const servers = () => process._getActiveHandles().filter(handle => handle.constructor.name === 'Server' && handle.listening);
+  const before = new Set(servers());
+  let added;
+  try {
+    for (const host of [null, 12, {}, '', '  ']) {
+      await assert.rejects(startVideoServer({ projectRoot: root, host }), /host must be a non-empty string/);
+    }
+  } finally {
+    added = servers().filter(server => !before.has(server));
+    await Promise.all(added.map(server => new Promise(resolve => { server.close(resolve); server.closeAllConnections?.(); })));
+  }
+  assert.equal(added.length, 0);
 });

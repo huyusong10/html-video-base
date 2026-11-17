@@ -1400,13 +1400,22 @@
     return !(V.isSecondaryLocale && V.isSecondaryLocale(activeLang));
   }
 
+  function isBakedCueValid(cue) {
+    return Array.isArray(cue) && cue.length >= 2 && Number.isFinite(cue[0]) && Number.isFinite(cue[1]) && cue[1] >= cue[0];
+  }
+
+  function isBakedSceneValid(scene, bakedScene) {
+    return bakedScene && Number.isFinite(bakedScene.start) && bakedScene.start >= 0
+      && Number.isFinite(bakedScene.duration) && bakedScene.duration >= 0
+      && Array.isArray(bakedScene.cues) && bakedScene.cues.length === (scene.lines ? scene.lines.length : 0)
+      && bakedScene.cues.every(isBakedCueValid);
+  }
+
   function isBakedValid(baked) {
     if (!baked || V.__ignoreBakedLayout || !isLangBakedMatch(baked)) return false;
+    if (!Number.isFinite(baked.duration) || baked.duration <= 0) return false;
     if (!Array.isArray(baked.scenes) || baked.scenes.length !== V.scenes.length) return false;
-    return V.scenes.every((sc, idx) => {
-      const bs = baked.scenes[idx];
-      return bs && Array.isArray(bs.cues) && bs.cues.length === (sc.lines ? sc.lines.length : 0);
-    });
+    return V.scenes.every((sc, idx) => isBakedSceneValid(sc, baked.scenes[idx]));
   }
 
   function resolveCueTiming(bSc, voiceDurs, si, li, lineObj, lt, CPS) {
@@ -3397,6 +3406,7 @@
       if (nextIdx === pageIdx && hasRendered && !opts.force) return pageIdx;
       pageIdx = nextIdx;
       hasRendered = true;
+      V.emit('onBeforeSeek', next.globalT);
       renderInternal(next.globalT);
       syncUI();
       V.emit('onSeek', next.globalT);
@@ -3666,12 +3676,13 @@
   }
 
   function sourceError(source, frame, error) {
-    if (error.name === 'AbortError') return error;
-    return new Error(`Frame source "${source.id}" failed (scene=${frame.sceneIndex}, time=${frame.now.toFixed(3)}): ${error.message}`, { cause: error });
+    if (error?.name === 'AbortError') return error;
+    return new Error(`Frame source "${source.id}" failed (scene=${frame.sceneIndex}, time=${frame.now.toFixed(3)}): ${error?.message ?? String(error)}`, { cause: error });
   }
 
   function report(error, frame = current) {
-    if (error.name === 'AbortError') return;
+    if (error?.name === 'AbortError') return;
+    if (typeof error?.message !== 'string') error = new Error(String(error), { cause: error });
     let cause = error;
     const seen = new Set();
     while (cause.cause && !seen.has(cause.cause)) { seen.add(cause); cause = cause.cause; }
@@ -3680,7 +3691,8 @@
       reportedErrors.add(cause);
     }
     console.error(error);
-    V.emit('onFrameError', { frame, error });
+    try { V.emit('onFrameError', { frame, error }); }
+    catch (cause) { console.error(new Error(`onFrameError callback failed: ${cause?.message ?? String(cause)}`, { cause })); }
   }
 
   function prepareSource(source, frame, parentSignal) {
@@ -3742,6 +3754,10 @@
 
   V.getFrameState = () => current;
   V._frameRuntime = { begin, forScene, prepare, report,
+    signal(frame) {
+      if (!current || frame !== current) throw abortError();
+      return controller.signal;
+    },
     isHeld: () => Boolean(current && heldId === current.id),
     hold(frame) {
       heldId = frame.id;
@@ -3810,8 +3826,8 @@
         return result;
       }, cause => {
         if (!disposed) phase = 'failed';
-        if (cause.name === 'AbortError') throw cause;
-        throw new Error(`Frame source "${definition.id}" failed during initialization: ${cause.message}`, { cause });
+        if (cause?.name === 'AbortError') throw cause;
+        throw new Error(`Frame source "${definition.id}" failed during initialization: ${cause?.message ?? String(cause)}`, { cause });
       });
       initialized.catch(error => { if (!disposed) V._frameRuntime.report(error); });
       return initialized;
@@ -3863,7 +3879,7 @@
       get status() { return phase; },
       get state() { return state; },
       dispose() {
-        if (!disposing) disposing = Promise.resolve(unregister());
+        if (!disposing) disposing = new Promise(resolve => resolve(unregister()));
         return disposing;
       },
     };
@@ -3899,7 +3915,7 @@
     let sequence = 0, closed = false, completed = false, closedError;
 
     function send(type, requestId, payload = {}) {
-      frame.contentWindow.postMessage({ protocol: PROTOCOL, sourceId: definition.id, session,
+      frame.contentWindow?.postMessage({ protocol: PROTOCOL, sourceId: definition.id, session,
         type, requestId, ...payload }, origin);
     }
 
@@ -3909,9 +3925,11 @@
       const requestId = ++sequence;
       return new Promise((resolve, reject) => {
         const cancel = () => { pending.delete(requestId); send('cancel', requestId); reject(aborted()); };
-        pending.set(requestId, { resolve, reject, cleanup: () => requestSignal.removeEventListener('abort', cancel) });
+        const cleanup = () => requestSignal.removeEventListener('abort', cancel);
+        pending.set(requestId, { resolve, reject, cleanup });
         requestSignal.addEventListener('abort', cancel, { once: true });
-        send(type, requestId, payload);
+        try { send(type, requestId, payload); }
+        catch (error) { pending.delete(requestId); cleanup(); reject(error); }
       });
     }
 
@@ -4018,9 +4036,12 @@
     return api;
   };
 
+  function resetManualSeek() { for (const state of manualStates) state.reset('seek'); }
+
   V.use({ id: 'builtin-manual-state',
     onPlay() { for (const state of manualStates) state.reset('play'); },
-    onSeek() { for (const state of manualStates) state.reset('seek'); },
+    onBeforeSeek: resetManualSeek,
+    onSeek: resetManualSeek,
     onSceneEnter(info) { for (const state of manualStates) state.reset('sceneExit', info.sceneIndex); },
   });
 
@@ -4093,7 +4114,9 @@
 
   V.subtitleCompanion = function ({ slot = 'lead', create, update, enabled = () => true }) {
     let element = null;
-    const previous = V.subtitles.onUpdate || V.subtitles.update;
+    const config = V.getCfg ? V.getCfg() : V.config;
+    const callbacks = Object.assign({}, config.subtitles, V.subtitles);
+    const previous = callbacks.onUpdate || callbacks.update;
     V.subtitle({
       [slot]: (h, runtime) => (element = create(h, runtime)),
       onUpdate(cue, info, dom) {
@@ -4347,15 +4370,45 @@
   V.actor = function (definition) {
     if (!definition?.id || !definition.renderer) throw new TypeError('actor requires id and renderer');
     const renderer = definition.renderer;
-    let mounted = null, ready = null, current = null, source = null, disposed = false, disposal = null;
+    let mounted = null, ready = null, current = null, source = null, disposed = false, disposal = null, cleanup = null;
     let layer = null, layerParent = null, ownedLayer = false;
     const context = (request = current, extra = {}) => ({ ...request, element: mounted?.element, data: mounted?.data,
       capabilities: renderer.capabilities || {}, ...extra });
 
     function apply(request, extra) {
-      const updated = renderer.update?.(request.state, context(request, extra));
-      if (updated && typeof updated.then === 'function') throw new TypeError('actor renderer.update must be synchronous; use prepare');
+      try {
+        const updated = renderer.update?.(request.state, context(request, extra));
+        if (updated && typeof updated.then === 'function') {
+          Promise.resolve(updated).catch(() => {});
+          throw new TypeError('actor renderer.update must be synchronous; use prepare');
+        }
+      } catch (error) { request.failed = true; request.error = error; }
       request.applied = true;
+    }
+
+    function cleanupRenderer() {
+      if (!cleanup) {
+        cleanup = Promise.resolve().then(() => renderer.dispose?.(context()));
+        cleanup.catch(error => V._frameRuntime.report(error, current?.frame));
+      }
+      return cleanup;
+    }
+
+    async function initializeRenderer(frame, { signal, mode }) {
+      try {
+        mounted.data = await renderer.mount?.(mounted.element, { frame, signal, mode, capabilities: renderer.capabilities || {} });
+      } catch (error) {
+        mounted.settled = true;
+        if (signal.aborted || disposed) await cleanupRenderer();
+        throw error;
+      }
+      mounted.settled = true;
+      if (signal.aborted || disposed) {
+        await cleanupRenderer();
+        throw new DOMException('Actor disposed', 'AbortError');
+      }
+      mounted.pending = false;
+      return mounted.data;
     }
 
     function mount(frame) {
@@ -4365,16 +4418,12 @@
       source = V.managedSource({ id: `actor:${definition.id}`, element: () => mounted?.element,
         active: (_frame, request) => request.state.visible !== false,
         timeoutMs: definition.timeoutMs, readyTimeoutMs: definition.readyTimeoutMs,
-        async initialize({ signal, mode }) {
-          const data = await renderer.mount?.(mounted.element, { frame, signal, mode, capabilities: renderer.capabilities || {} });
-          if (signal.aborted || disposed) throw new DOMException('Actor disposed', 'AbortError');
-          mounted.data = data; mounted.pending = false;
-          return data;
-        },
+        initialize: options => initializeRenderer(frame, options),
         async prepare(request, preparedFrame, { signal, data }) {
           if (signal.aborted || disposed || current !== request) throw new DOMException('Actor frame superseded', 'AbortError');
           const extra = { frame: preparedFrame, signal, data };
           if (!request.applied) apply(request, extra);
+          if (request.failed) throw request.error;
           if (renderer.prepare) await renderer.prepare(request.state, context(request, extra));
           if (signal.aborted || disposed) throw new DOMException('Actor frame superseded', 'AbortError');
         },
@@ -4408,7 +4457,7 @@
         const sourceDisposal = source?.dispose();
         disposal = (async () => {
           try { await sourceDisposal; await ready; } catch {}
-          try { await renderer.dispose?.(context()); }
+          try { if (!mounted || mounted.settled) await cleanupRenderer(); }
           finally {
             if (mounted?.owned) mounted.element?.remove();
             if (ownedLayer) layerParent?.remove();
@@ -4793,6 +4842,16 @@
     });
   }
 
+  function syncPlaybackFrame() {
+    const previous = V.getFrameState();
+    const active = playing && !scrubbing && !localeLoading;
+    if (!current || !previous || (previous.playing === active && previous.ended === ended)) return;
+    publishFrame(current, previous.clock, idleSec, true);
+    syncSceneCtxAndEndState(current, idleSec);
+    V._isPlaying = active;
+    if (!RECORD) V._frameRuntime.preview(V.getFrameState());
+  }
+
   function completeFrameUI() {
     if (RECORD) return;
     updateUI();
@@ -5097,6 +5156,7 @@
     lastTs = performance.now();
     if (audioRt) audioRt.startPlayback();
     document.body.classList.add('playing');
+    syncPlaybackFrame();
     V.emit('onPlay', { now, playing: true });
     if (!RECORD) {
       if (!inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
@@ -5112,6 +5172,7 @@
     document.body.classList.toggle('is-ended', ended);
     if (audioRt) audioRt.pausePlayback();
     for (const clip of V._videoClips) if (clip.pause) clip.pause();
+    syncPlaybackFrame();
     V.emit('onPause', { now, ended, playing: false });
     if (!RECORD) updateUI();
   }
@@ -5175,6 +5236,7 @@
     lastSeekTarget = target;
     lastSeekAt = ts;
     if (V._checkpointsRuntime && V._checkpointsRuntime.onSeek) V._checkpointsRuntime.onSeek(target);
+    V.emit('onBeforeSeek', target);
     render(target, 0);
     V.emit('onSeek', target);
     if (audioRt) audioRt.seekTracks(now);
@@ -5723,7 +5785,7 @@
     if (vp) vp.style.setProperty('--k', k);
   }
 
-  function waitVideoReady(vid, minimum, timeoutMs) {
+  function waitVideoReady(vid, minimum, timeoutMs, signal) {
     return new Promise(resolve => {
       if (vid.error) { resolve(false); return; }
       const isReady = () => vid.readyState >= minimum && !vid.seeking;
@@ -5733,6 +5795,7 @@
         clearTimeout(timer);
         events.forEach(event => vid.removeEventListener(event, onReady));
         vid.removeEventListener('error', onErr);
+        signal.removeEventListener('abort', onErr);
         resolve(ok);
       };
       const onReady = () => { if (isReady()) done(true); };
@@ -5740,6 +5803,8 @@
       const timer = setTimeout(() => done(false), timeoutMs);
       events.forEach(event => vid.addEventListener(event, onReady));
       vid.addEventListener('error', onErr, { once: true });
+      signal.addEventListener('abort', onErr, { once: true });
+      if (signal.aborted) done(false);
     });
   }
 
@@ -5756,8 +5821,13 @@
     return Math.max(0, target);
   }
 
-  async function seekVideoElementAsync(vid, targetSec) {
-    const metadataReady = await waitVideoReady(vid, 1, RECORD ? 15000 : 2000);
+  function assertAssetRequestActive(signal) {
+    if (signal.aborted) throw new DOMException('Frame superseded', 'AbortError');
+  }
+
+  async function seekVideoElementAsync(vid, targetSec, signal) {
+    const metadataReady = await waitVideoReady(vid, 1, RECORD ? 15000 : 2000, signal);
+    assertAssetRequestActive(signal);
     if (!metadataReady) {
       if (RECORD) throw videoFrameError(vid, 'metadata');
       return;
@@ -5771,7 +5841,8 @@
         return;
       }
     }
-    const frameReady = await waitVideoReady(vid, 2, RECORD ? 15000 : 1500);
+    const frameReady = await waitVideoReady(vid, 2, RECORD ? 15000 : 1500, signal);
+    assertAssetRequestActive(signal);
     const atTarget = frameReady && Math.abs(vid.currentTime - targetSec) <= 0.000001;
     if (RECORD && !atTarget) throw videoFrameError(vid, `frame at ${targetSec.toFixed(3)}s`);
   }
@@ -5863,14 +5934,34 @@
     }
   }
 
-  async function waitStageAssets() {
+  async function waitStageAssets(signal) {
     if (!stage) return;
     const tasks = [waitCssImages()];
     collectImageDecodes(stage, tasks);
     for (const clip of V._videoClips) {
-      if (clip.isConnected && clip._vclip) tasks.push(seekVideoElementAsync(clip, clip._vclip.targetTime));
+      if (clip.isConnected && clip._vclip) tasks.push(seekVideoElementAsync(clip, clip._vclip.targetTime, signal));
     }
     if (tasks.length) await Promise.all(tasks);
+  }
+
+  async function waitFrameAssets(frame) {
+    const signal = V._frameRuntime.signal(frame);
+    const assets = new AbortController();
+    let timer, cancel;
+    const stopped = new Promise((_, reject) => {
+      cancel = () => {
+        reject(new DOMException('Frame superseded', 'AbortError'));
+        assets.abort();
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+      timer = setTimeout(() => {
+        reject(new Error('Stage asset preparation timed out after 30000ms'));
+        assets.abort();
+      }, 30000);
+      if (signal.aborted) cancel();
+    });
+    try { await Promise.race([waitStageAssets(assets.signal), stopped]); }
+    finally { clearTimeout(timer); signal.removeEventListener('abort', cancel); }
   }
 
   function consumeHmrTime() {
@@ -6239,11 +6330,12 @@
 
     V.seekTo = t => render(t, 0);
     V.seekToAsync = async t => {
+      if (!Number.isFinite(t)) throw new TypeError('seek time must be finite');
       render(t, 0);
       const snapshot = V.getFrameState();
       const release = V._frameRuntime.hold(snapshot);
       try {
-        await Promise.all([waitStageAssets(), V._frameRuntime.prepare(snapshot)]);
+        await Promise.all([waitFrameAssets(snapshot), V._frameRuntime.prepare(snapshot)]);
         if (snapshot !== V.getFrameState()) throw new DOMException('Frame superseded', 'AbortError');
         return snapshot;
       } finally { release(); }

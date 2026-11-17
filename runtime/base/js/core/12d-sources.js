@@ -54,8 +54,8 @@
         return result;
       }, cause => {
         if (!disposed) phase = 'failed';
-        if (cause.name === 'AbortError') throw cause;
-        throw new Error(`Frame source "${definition.id}" failed during initialization: ${cause.message}`, { cause });
+        if (cause?.name === 'AbortError') throw cause;
+        throw new Error(`Frame source "${definition.id}" failed during initialization: ${cause?.message ?? String(cause)}`, { cause });
       });
       initialized.catch(error => { if (!disposed) V._frameRuntime.report(error); });
       return initialized;
@@ -107,7 +107,7 @@
       get status() { return phase; },
       get state() { return state; },
       dispose() {
-        if (!disposing) disposing = Promise.resolve(unregister());
+        if (!disposing) disposing = new Promise(resolve => resolve(unregister()));
         return disposing;
       },
     };
@@ -143,7 +143,7 @@
     let sequence = 0, closed = false, completed = false, closedError;
 
     function send(type, requestId, payload = {}) {
-      frame.contentWindow.postMessage({ protocol: PROTOCOL, sourceId: definition.id, session,
+      frame.contentWindow?.postMessage({ protocol: PROTOCOL, sourceId: definition.id, session,
         type, requestId, ...payload }, origin);
     }
 
@@ -153,9 +153,11 @@
       const requestId = ++sequence;
       return new Promise((resolve, reject) => {
         const cancel = () => { pending.delete(requestId); send('cancel', requestId); reject(aborted()); };
-        pending.set(requestId, { resolve, reject, cleanup: () => requestSignal.removeEventListener('abort', cancel) });
+        const cleanup = () => requestSignal.removeEventListener('abort', cancel);
+        pending.set(requestId, { resolve, reject, cleanup });
         requestSignal.addEventListener('abort', cancel, { once: true });
-        send(type, requestId, payload);
+        try { send(type, requestId, payload); }
+        catch (error) { pending.delete(requestId); cleanup(); reject(error); }
       });
     }
 

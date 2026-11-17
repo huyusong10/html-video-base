@@ -363,6 +363,16 @@
     });
   }
 
+  function syncPlaybackFrame() {
+    const previous = V.getFrameState();
+    const active = playing && !scrubbing && !localeLoading;
+    if (!current || !previous || (previous.playing === active && previous.ended === ended)) return;
+    publishFrame(current, previous.clock, idleSec, true);
+    syncSceneCtxAndEndState(current, idleSec);
+    V._isPlaying = active;
+    if (!RECORD) V._frameRuntime.preview(V.getFrameState());
+  }
+
   function completeFrameUI() {
     if (RECORD) return;
     updateUI();
@@ -667,6 +677,7 @@
     lastTs = performance.now();
     if (audioRt) audioRt.startPlayback();
     document.body.classList.add('playing');
+    syncPlaybackFrame();
     V.emit('onPlay', { now, playing: true });
     if (!RECORD) {
       if (!inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
@@ -682,6 +693,7 @@
     document.body.classList.toggle('is-ended', ended);
     if (audioRt) audioRt.pausePlayback();
     for (const clip of V._videoClips) if (clip.pause) clip.pause();
+    syncPlaybackFrame();
     V.emit('onPause', { now, ended, playing: false });
     if (!RECORD) updateUI();
   }
@@ -745,6 +757,7 @@
     lastSeekTarget = target;
     lastSeekAt = ts;
     if (V._checkpointsRuntime && V._checkpointsRuntime.onSeek) V._checkpointsRuntime.onSeek(target);
+    V.emit('onBeforeSeek', target);
     render(target, 0);
     V.emit('onSeek', target);
     if (audioRt) audioRt.seekTracks(now);
@@ -1293,7 +1306,7 @@
     if (vp) vp.style.setProperty('--k', k);
   }
 
-  function waitVideoReady(vid, minimum, timeoutMs) {
+  function waitVideoReady(vid, minimum, timeoutMs, signal) {
     return new Promise(resolve => {
       if (vid.error) { resolve(false); return; }
       const isReady = () => vid.readyState >= minimum && !vid.seeking;
@@ -1303,6 +1316,7 @@
         clearTimeout(timer);
         events.forEach(event => vid.removeEventListener(event, onReady));
         vid.removeEventListener('error', onErr);
+        signal.removeEventListener('abort', onErr);
         resolve(ok);
       };
       const onReady = () => { if (isReady()) done(true); };
@@ -1310,6 +1324,8 @@
       const timer = setTimeout(() => done(false), timeoutMs);
       events.forEach(event => vid.addEventListener(event, onReady));
       vid.addEventListener('error', onErr, { once: true });
+      signal.addEventListener('abort', onErr, { once: true });
+      if (signal.aborted) done(false);
     });
   }
 
@@ -1326,8 +1342,13 @@
     return Math.max(0, target);
   }
 
-  async function seekVideoElementAsync(vid, targetSec) {
-    const metadataReady = await waitVideoReady(vid, 1, RECORD ? 15000 : 2000);
+  function assertAssetRequestActive(signal) {
+    if (signal.aborted) throw new DOMException('Frame superseded', 'AbortError');
+  }
+
+  async function seekVideoElementAsync(vid, targetSec, signal) {
+    const metadataReady = await waitVideoReady(vid, 1, RECORD ? 15000 : 2000, signal);
+    assertAssetRequestActive(signal);
     if (!metadataReady) {
       if (RECORD) throw videoFrameError(vid, 'metadata');
       return;
@@ -1341,7 +1362,8 @@
         return;
       }
     }
-    const frameReady = await waitVideoReady(vid, 2, RECORD ? 15000 : 1500);
+    const frameReady = await waitVideoReady(vid, 2, RECORD ? 15000 : 1500, signal);
+    assertAssetRequestActive(signal);
     const atTarget = frameReady && Math.abs(vid.currentTime - targetSec) <= 0.000001;
     if (RECORD && !atTarget) throw videoFrameError(vid, `frame at ${targetSec.toFixed(3)}s`);
   }
@@ -1433,14 +1455,34 @@
     }
   }
 
-  async function waitStageAssets() {
+  async function waitStageAssets(signal) {
     if (!stage) return;
     const tasks = [waitCssImages()];
     collectImageDecodes(stage, tasks);
     for (const clip of V._videoClips) {
-      if (clip.isConnected && clip._vclip) tasks.push(seekVideoElementAsync(clip, clip._vclip.targetTime));
+      if (clip.isConnected && clip._vclip) tasks.push(seekVideoElementAsync(clip, clip._vclip.targetTime, signal));
     }
     if (tasks.length) await Promise.all(tasks);
+  }
+
+  async function waitFrameAssets(frame) {
+    const signal = V._frameRuntime.signal(frame);
+    const assets = new AbortController();
+    let timer, cancel;
+    const stopped = new Promise((_, reject) => {
+      cancel = () => {
+        reject(new DOMException('Frame superseded', 'AbortError'));
+        assets.abort();
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+      timer = setTimeout(() => {
+        reject(new Error('Stage asset preparation timed out after 30000ms'));
+        assets.abort();
+      }, 30000);
+      if (signal.aborted) cancel();
+    });
+    try { await Promise.race([waitStageAssets(assets.signal), stopped]); }
+    finally { clearTimeout(timer); signal.removeEventListener('abort', cancel); }
   }
 
   function consumeHmrTime() {
@@ -1809,11 +1851,12 @@
 
     V.seekTo = t => render(t, 0);
     V.seekToAsync = async t => {
+      if (!Number.isFinite(t)) throw new TypeError('seek time must be finite');
       render(t, 0);
       const snapshot = V.getFrameState();
       const release = V._frameRuntime.hold(snapshot);
       try {
-        await Promise.all([waitStageAssets(), V._frameRuntime.prepare(snapshot)]);
+        await Promise.all([waitFrameAssets(snapshot), V._frameRuntime.prepare(snapshot)]);
         if (snapshot !== V.getFrameState()) throw new DOMException('Frame superseded', 'AbortError');
         return snapshot;
       } finally { release(); }

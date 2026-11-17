@@ -190,6 +190,7 @@
       if (nextIdx === pageIdx && hasRendered && !opts.force) return pageIdx;
       pageIdx = nextIdx;
       hasRendered = true;
+      V.emit('onBeforeSeek', next.globalT);
       renderInternal(next.globalT);
       syncUI();
       V.emit('onSeek', next.globalT);

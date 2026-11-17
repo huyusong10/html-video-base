@@ -356,13 +356,22 @@
     return !(V.isSecondaryLocale && V.isSecondaryLocale(activeLang));
   }
 
+  function isBakedCueValid(cue) {
+    return Array.isArray(cue) && cue.length >= 2 && Number.isFinite(cue[0]) && Number.isFinite(cue[1]) && cue[1] >= cue[0];
+  }
+
+  function isBakedSceneValid(scene, bakedScene) {
+    return bakedScene && Number.isFinite(bakedScene.start) && bakedScene.start >= 0
+      && Number.isFinite(bakedScene.duration) && bakedScene.duration >= 0
+      && Array.isArray(bakedScene.cues) && bakedScene.cues.length === (scene.lines ? scene.lines.length : 0)
+      && bakedScene.cues.every(isBakedCueValid);
+  }
+
   function isBakedValid(baked) {
     if (!baked || V.__ignoreBakedLayout || !isLangBakedMatch(baked)) return false;
+    if (!Number.isFinite(baked.duration) || baked.duration <= 0) return false;
     if (!Array.isArray(baked.scenes) || baked.scenes.length !== V.scenes.length) return false;
-    return V.scenes.every((sc, idx) => {
-      const bs = baked.scenes[idx];
-      return bs && Array.isArray(bs.cues) && bs.cues.length === (sc.lines ? sc.lines.length : 0);
-    });
+    return V.scenes.every((sc, idx) => isBakedSceneValid(sc, baked.scenes[idx]));
   }
 
   function resolveCueTiming(bSc, voiceDurs, si, li, lineObj, lt, CPS) {

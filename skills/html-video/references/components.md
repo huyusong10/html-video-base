@@ -33,6 +33,19 @@ view.manualTab = null; // 清除手动值
 
 绑定属性的自动值默认是 `null`，第三个参数可显式指定 `undefined` 或其他值。赋 `null` 或 `undefined` 会清除选择；需要保存这些值时直接使用 `set()` 和 `resolve()`。对象和数组应整体替换，例如 `state.set({ ...old, expanded: true })`，不要修改 `resolve()` 返回的自动对象。
 
+创建手动状态的场景或组件负责释放它。场景会在再次进入时重新执行 `build()`；移除旧 DOM 不会注销状态。将句柄保存在场景上，重建前调用旧句柄的 `dispose()`：
+
+```js
+build(root) {
+  this.tabState?.dispose();
+  const view = this.view = {};
+  this.tabState = V.manualState({ resetOn: [] }).bind(view, 'manualTab');
+  // 创建本次视图。
+}
+```
+
+组件工厂可以返回 `dispose()`，由持有旧组件的调用方在替换前调用。`resetOn` 只决定何时恢复自动值，不替代实例清理；需要长期保留的状态仍由其长期持有者管理。
+
 ## 让角色响应指针
 
 `V.pointerResponse()` 处理暂停时的平滑视线、悬停问候和轻跳；角色主题提供自己的位置与命中区域。每个角色创建一个实例，同一个 `frame.id` 只推进一次平滑计算，可从多个绘制分支读取同一结果。
@@ -75,6 +88,10 @@ guide.update({ x: 680, y: 540, pose: 'wave' }, x.frame);
 `element()` 返回已经连接的宿主。省略时，组件在舞台内创建 `.video-actor` 宿主，并在销毁时删除。`mount()` 在首次挂载时运行一次，返回的对象作为后续上下文的 `data`。`capabilities` 用来描述渲染器支持的维度或姿态，供业务选择合适的表现。
 
 `update()` 必须同步完成。异步加载放在 `mount()`，异步绘制放在 `prepare()`。组件通过 [受管画面](external-sources.md) 统一初始化、取消旧请求、等待精确定位和管理宿主显隐：`readyTimeoutMs` 限制一次初始化，`timeoutMs` 限制初始化完成后的单帧准备，均默认 15000 毫秒。状态设为 `{ visible: false }` 时隐藏宿主且不等待绘制。`await actor.mount(frame)` 可等待初始化，`await actor.dispose()` 取消等待并释放资源；初始化失败也会执行销毁后的宿主清理。
+
+同步绘制出错时，预览通过 `onFrameError` 和控制台报告，播放器继续更新；精确定位与导出会失败。误将 `update()` 写成异步函数时同样报告接口错误，不使用其异步结果。
+
+底层加载器不响应取消时，`await actor.dispose()` 不等待它结束，自有宿主仍会移除。加载器随后返回或拒绝时，框架再调用一次 `renderer.dispose()`；成功返回的数据会传入销毁上下文，迟到的清理错误通过 `onFrameError` 和控制台报告。加载器始终不结束且不响应 `signal` 时，适配器需自行释放它持有的部分资源。
 
 `update()` 和 `prepare()` 的上下文包含 `frame`、`state`、`sceneIndex`、`lt`、`element`、`data` 和 `capabilities`。`mount(element, context)` 将宿主作为第一个参数，上下文提供 `frame`、`signal`、`mode` 和 `capabilities`。`prepare()` 的上下文也提供 `signal`；异步适配器必须在提交结果前检查取消信号，避免旧请求覆盖新画面。
 

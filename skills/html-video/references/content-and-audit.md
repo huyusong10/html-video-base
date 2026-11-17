@@ -41,6 +41,8 @@ const index = createSearchIndex(catalog, {
 
 `readVideoCatalog({ ids })` 保留传入 ID 的顺序；省略 `ids` 时发现当前工程中的全部视频。它只读取数据，不启动浏览器。
 
+固化布局的全片时长须为正数，场景起点与时长须为非负数。缺失这些字段、含有非有限数值，或台词区间格式有误时，框架会回退到 `estimated` 布局。
+
 `createVideoManifest()` 生成默认清单字段，`mapVideo` 可以补充或覆盖字段。`createSearchIndex()` 返回 `{ videos, scenes }`，默认跳过章节过场和无台词的 PPT 跳过页，`mapVideo/mapScene` 负责业务字段。`readVideoManifest({ projectRoot })` 可读取框架格式的 `window.VIDEO_MANIFEST = [...]` 数据文件，用于保留业务额外字段。
 
 ## 只选择需要的截图点
@@ -75,10 +77,10 @@ await withAuditSession({ projectRoot }, async audit => {
 
 | 选项 | 用途 |
 | --- | --- |
-| `outDir` | 保存截图的目录。生成文件名根据采样点命名，过滤路径分隔符。方法不会清理已有文件。 |
+| `outDir` | 保存截图的目录。生成文件名根据采样点命名，过滤路径分隔符。同批路径重复时追加 `_2`、`_3` 等编号，保留每张截图；方法不会清理已有文件。 |
 | `screenshot` | 传给单张截图的 Playwright 截图选项。 |
 | `retainImages: true` | 在返回结果中保留 `image`，适合少量帧比较。 |
-| `onCapture(item, image)` | 每帧完成后的异步回调，适合流式保存业务检查结果。不要在回调内等待同一视频会话的另一次定位。 |
+| `onCapture(item, image)` | 每帧完成后的异步回调，适合流式保存业务检查结果。不要在回调内等待同一视频会话的另一次定位。可调用 `video.close()` 结束会话；当前批次以 `AbortError` 结束，已保存的 PNG 保留。 |
 | `signal` | 取消任务；取消后不开始下一张截图，已经保存的文件保留。 |
 
 角色骨骼、模型路线和业务文字的正确性仍由业务断言。默认根据改动选择场景或代表性接入，确实需要时再显式扩大范围。

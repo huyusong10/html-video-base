@@ -47,12 +47,13 @@
   }
 
   function sourceError(source, frame, error) {
-    if (error.name === 'AbortError') return error;
-    return new Error(`Frame source "${source.id}" failed (scene=${frame.sceneIndex}, time=${frame.now.toFixed(3)}): ${error.message}`, { cause: error });
+    if (error?.name === 'AbortError') return error;
+    return new Error(`Frame source "${source.id}" failed (scene=${frame.sceneIndex}, time=${frame.now.toFixed(3)}): ${error?.message ?? String(error)}`, { cause: error });
   }
 
   function report(error, frame = current) {
-    if (error.name === 'AbortError') return;
+    if (error?.name === 'AbortError') return;
+    if (typeof error?.message !== 'string') error = new Error(String(error), { cause: error });
     let cause = error;
     const seen = new Set();
     while (cause.cause && !seen.has(cause.cause)) { seen.add(cause); cause = cause.cause; }
@@ -61,7 +62,8 @@
       reportedErrors.add(cause);
     }
     console.error(error);
-    V.emit('onFrameError', { frame, error });
+    try { V.emit('onFrameError', { frame, error }); }
+    catch (cause) { console.error(new Error(`onFrameError callback failed: ${cause?.message ?? String(cause)}`, { cause })); }
   }
 
   function prepareSource(source, frame, parentSignal) {
@@ -123,6 +125,10 @@
 
   V.getFrameState = () => current;
   V._frameRuntime = { begin, forScene, prepare, report,
+    signal(frame) {
+      if (!current || frame !== current) throw abortError();
+      return controller.signal;
+    },
     isHeld: () => Boolean(current && heldId === current.id),
     hold(frame) {
       heldId = frame.id;

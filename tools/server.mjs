@@ -3,6 +3,7 @@ import { ROOT } from './lib/paths.mjs';
 import { createVideoHttpServer } from './lib/http-static.mjs';
 
 export async function startVideoServer({ projectRoot = ROOT, host = '127.0.0.1', port = 0, watch = false } = {}) {
+  if (typeof host !== 'string' || !host.trim()) throw new TypeError('Video server host must be a non-empty string');
   const server = createVideoHttpServer({ videosDir: path.join(path.resolve(projectRoot), 'videos'), watch });
   try {
     await new Promise((resolve, reject) => {

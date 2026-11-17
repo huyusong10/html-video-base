@@ -90,7 +90,7 @@ export function readVideoCatalog({ projectRoot = ROOT, ids, lang = '', ...option
 }
 
 export function createSearchIndex(catalog, { mapVideo = () => ({}), mapScene = () => ({}) } = {}) {
-  const videos = {}, scenes = [];
+  const videos = Object.create(null), scenes = [];
   for (const video of catalog) {
     videos[video.id] = { id: video.id, title: video.title, ...mapVideo(video) };
     for (const scene of video.scenes) {

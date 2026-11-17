@@ -38,7 +38,7 @@
         ready = false;
         cancelCurrent();
         lifetime?.abort();
-        cleanup = cleanup.then(() => options.dispose?.());
+        cleanup = cleanup.catch(() => {}).then(() => options.dispose?.());
         cleanup.catch(error => console.error(error));
         return cleanup;
       }
@@ -62,7 +62,7 @@
           ready = true;
           reply(target, 0, 'ready');
         }, error => {
-          if (target === connection && error.name !== 'AbortError') reply(target, 0, 'error', { message: error.message });
+          if (target === connection && error?.name !== 'AbortError') reply(target, 0, 'error', { message: error?.message ?? String(error) });
         });
       }
 
@@ -79,8 +79,8 @@
           frameId = data.frame.id;
           reply(target, data.requestId, 'complete', { frameId });
         } catch (error) {
-          if (error.name !== 'AbortError' && target === connection && !request.abort.signal.aborted) {
-            reply(target, data.requestId, 'error', { message: error.message });
+          if (error?.name !== 'AbortError' && target === connection && !request.abort.signal.aborted) {
+            reply(target, data.requestId, 'error', { message: error?.message ?? String(error) });
           }
         } finally { if (current === request) current = null; }
       }

@@ -16,13 +16,23 @@ function outputFile(outDir, point) {
   return path.join(outDir, `${name}_${point.time.toFixed(2)}s.png`);
 }
 
+function uniqueOutput(file, used) {
+  if (!file) return file;
+  const { dir, name, ext } = path.parse(file);
+  const key = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+  let candidate = file, suffix = 2;
+  while (used.has(key(candidate))) candidate = path.join(dir, `${name}_${suffix++}${ext}`);
+  used.add(key(candidate));
+  return candidate;
+}
+
 export async function captureBatch(points, { outDir = '', screenshot = {}, retainImages = false, signal, onCapture } = {}, capture) {
   const normalized = points.map(capturePoint);
   if (outDir) await fs.mkdir(outDir, { recursive: true });
-  const results = [];
+  const results = [], usedFiles = new Set();
   for (const point of normalized) {
     checkSignal(signal);
-    const file = outDir ? outputFile(path.resolve(outDir), point) : screenshot.path;
+    const file = uniqueOutput(outDir ? outputFile(path.resolve(outDir), point) : screenshot.path, usedFiles);
     const result = await capture(point.time, { ...screenshot, ...(file ? { path: file } : {}) });
     checkSignal(signal);
     const item = { point, frame: result.frame, path: file || null };

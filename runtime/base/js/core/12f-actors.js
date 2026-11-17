@@ -215,15 +215,45 @@
   V.actor = function (definition) {
     if (!definition?.id || !definition.renderer) throw new TypeError('actor requires id and renderer');
     const renderer = definition.renderer;
-    let mounted = null, ready = null, current = null, source = null, disposed = false, disposal = null;
+    let mounted = null, ready = null, current = null, source = null, disposed = false, disposal = null, cleanup = null;
     let layer = null, layerParent = null, ownedLayer = false;
     const context = (request = current, extra = {}) => ({ ...request, element: mounted?.element, data: mounted?.data,
       capabilities: renderer.capabilities || {}, ...extra });
 
     function apply(request, extra) {
-      const updated = renderer.update?.(request.state, context(request, extra));
-      if (updated && typeof updated.then === 'function') throw new TypeError('actor renderer.update must be synchronous; use prepare');
+      try {
+        const updated = renderer.update?.(request.state, context(request, extra));
+        if (updated && typeof updated.then === 'function') {
+          Promise.resolve(updated).catch(() => {});
+          throw new TypeError('actor renderer.update must be synchronous; use prepare');
+        }
+      } catch (error) { request.failed = true; request.error = error; }
       request.applied = true;
+    }
+
+    function cleanupRenderer() {
+      if (!cleanup) {
+        cleanup = Promise.resolve().then(() => renderer.dispose?.(context()));
+        cleanup.catch(error => V._frameRuntime.report(error, current?.frame));
+      }
+      return cleanup;
+    }
+
+    async function initializeRenderer(frame, { signal, mode }) {
+      try {
+        mounted.data = await renderer.mount?.(mounted.element, { frame, signal, mode, capabilities: renderer.capabilities || {} });
+      } catch (error) {
+        mounted.settled = true;
+        if (signal.aborted || disposed) await cleanupRenderer();
+        throw error;
+      }
+      mounted.settled = true;
+      if (signal.aborted || disposed) {
+        await cleanupRenderer();
+        throw new DOMException('Actor disposed', 'AbortError');
+      }
+      mounted.pending = false;
+      return mounted.data;
     }
 
     function mount(frame) {
@@ -233,16 +263,12 @@
       source = V.managedSource({ id: `actor:${definition.id}`, element: () => mounted?.element,
         active: (_frame, request) => request.state.visible !== false,
         timeoutMs: definition.timeoutMs, readyTimeoutMs: definition.readyTimeoutMs,
-        async initialize({ signal, mode }) {
-          const data = await renderer.mount?.(mounted.element, { frame, signal, mode, capabilities: renderer.capabilities || {} });
-          if (signal.aborted || disposed) throw new DOMException('Actor disposed', 'AbortError');
-          mounted.data = data; mounted.pending = false;
-          return data;
-        },
+        initialize: options => initializeRenderer(frame, options),
         async prepare(request, preparedFrame, { signal, data }) {
           if (signal.aborted || disposed || current !== request) throw new DOMException('Actor frame superseded', 'AbortError');
           const extra = { frame: preparedFrame, signal, data };
           if (!request.applied) apply(request, extra);
+          if (request.failed) throw request.error;
           if (renderer.prepare) await renderer.prepare(request.state, context(request, extra));
           if (signal.aborted || disposed) throw new DOMException('Actor frame superseded', 'AbortError');
         },
@@ -276,7 +302,7 @@
         const sourceDisposal = source?.dispose();
         disposal = (async () => {
           try { await sourceDisposal; await ready; } catch {}
-          try { await renderer.dispose?.(context()); }
+          try { if (!mounted || mounted.settled) await cleanupRenderer(); }
           finally {
             if (mounted?.owned) mounted.element?.remove();
             if (ownedLayer) layerParent?.remove();

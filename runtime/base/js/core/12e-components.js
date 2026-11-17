@@ -40,9 +40,12 @@
     return api;
   };
 
+  function resetManualSeek() { for (const state of manualStates) state.reset('seek'); }
+
   V.use({ id: 'builtin-manual-state',
     onPlay() { for (const state of manualStates) state.reset('play'); },
-    onSeek() { for (const state of manualStates) state.reset('seek'); },
+    onBeforeSeek: resetManualSeek,
+    onSeek: resetManualSeek,
     onSceneEnter(info) { for (const state of manualStates) state.reset('sceneExit', info.sceneIndex); },
   });
 
@@ -115,7 +118,9 @@
 
   V.subtitleCompanion = function ({ slot = 'lead', create, update, enabled = () => true }) {
     let element = null;
-    const previous = V.subtitles.onUpdate || V.subtitles.update;
+    const config = V.getCfg ? V.getCfg() : V.config;
+    const callbacks = Object.assign({}, config.subtitles, V.subtitles);
+    const previous = callbacks.onUpdate || callbacks.update;
     V.subtitle({
       [slot]: (h, runtime) => (element = create(h, runtime)),
       onUpdate(cue, info, dom) {
