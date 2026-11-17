@@ -216,7 +216,7 @@ V.scenes.push({
 | `npm test` | 日常小改后的基本检查 | 引擎组装、圈复杂度、参数与路径、时间轴与字幕、缓存标识，以及初始化／预览服务／静态打包 |
 | `npm run test:full` | 核心行为修改、较大重构、发布前 | 包含全部轻量检查，再验证 Chromium 交互与帧复用、音频处理、真实视频导出及失败恢复 |
 
-文档、文案和局部样式调整通常运行 `npm test`。修改时间轴、播放器交互、缓存规则、渲染、混音或文件覆盖逻辑时，应运行 `npm run test:full`，即使只改了一行。
+按改动范围选择检查：文档和文案检查内容与链接；代码先运行轻量检查，再选择受影响接口或代表性分镜的回归。跨模块修改或发布前运行完整回归。全量视频截图与逐帧巡检由调用者明确选择。
 
 轻量测试需要 Node.js 和基础 Python 环境；全量测试还需要工具链使用的 Python 音频依赖、FFmpeg 和 Chromium。每次测试使用独立临时目录，结束后自动清理。
 
@@ -227,3 +227,7 @@ node tools/test-render-cache-identity.mjs .runtime/cache-check-1
 ```
 
 本仓库要求所有 JS/MJS 与 Python 函数的圈复杂度 `< 15`（`<= 14`）。两级测试都包含该检查，也可以单独运行 `npm run lint:cc`。
+
+帧状态、外部画面准备与自定义巡检见 [接入指南](skills/html-video/references/frame-interfaces.md)。
+
+公共实现包括 [受管外部画面](skills/html-video/references/external-sources.md)、[交互与可替换渲染器的角色组件](skills/html-video/references/components.md) 和 [内容读取与采样巡检](skills/html-video/references/content-and-audit.md)。角色渲染器可使用 SVG、Canvas 或 3D 引擎，平台统一编排和异步画面等待，不依赖具体骨骼或模型格式。多课程和共享资源仍由业务组织。

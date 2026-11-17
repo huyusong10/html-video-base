@@ -16,7 +16,7 @@
     ['config', () => ({})],
     ['c', () => ({})],
     ['checkpointState', () => ({})],
-    ['pointer', () => ({ x: 960, y: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, inside: false, down: false })],
+    ['pointer', () => ({ x: 960, y: 540, rawX: 960, rawY: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, active: false, inside: false, down: false, overUI: false })],
     ['_videoClips', () => new Set()],
   ];
   for (const [k, make] of DEFAULTS) {
@@ -31,6 +31,13 @@
     return raw === '1' || raw === 'true' || (sp.get('mode') || '').toLowerCase() === 'ppt';
   }
   if (V.pptMode === undefined) V.pptMode = detectInitialPptMode();
+  const startupQuery = typeof location === 'undefined' ? null : new URLSearchParams(location.search);
+  const startupRecord = Boolean(startupQuery && (startupQuery.has('record') || startupQuery.has('capture')));
+  V.environment = Object.freeze({
+    isRecord: startupRecord,
+    get pptMode() { return Boolean(V.pptMode); },
+    get mode() { return startupRecord ? 'record' : (V.pptMode ? 'ppt' : 'interactive'); },
+  });
 
   function upsertById(list, item) {
     const key = item.id || item.name;
@@ -1176,6 +1183,7 @@
       at: (i, kw, opts) => resolveAnchor(sc, si, i, kw, opts),
       t: (key, fb, vars) => (V.t ? V.t(key, fb, vars, si) : (fb === undefined ? key : fb)),
       sfx: (type, vol) => (V.sfx ? V.sfx(type, vol) : false),
+      frame: V._frameRuntime ? V._frameRuntime.forScene(sc, si) : null,
       dur: sc.duration,
       clock: 0,
       alive: 0,
@@ -1540,6 +1548,7 @@
     V.scenes.forEach((sc, si) => syncSceneLocaleMeta(sc, si));
     const baked = vv.bakedLayout;
     const useBaked = isBakedValid(baked);
+    V.layoutInfo = Object.freeze({ source: useBaked ? 'baked' : 'estimated' });
 
     let t = 0;
     V.scenes.forEach((sc, si) => {
@@ -1710,6 +1719,7 @@
     if (typeof raw === 'function') {
       const ctx = sc.ctx || (sc.ctx = V.makeCtx(sc, si));
       ctx.dur = sc.duration;
+      ctx.frame = V._frameRuntime.forScene(sc, si);
       if (frameCtx) {
         const { clock, alive, idle, playing, ended, pointer } = frameCtx;
         Object.assign(ctx, { clock, alive, idle, playing, ended, pointer, sceneClock: clock - sc.start });
@@ -1748,6 +1758,7 @@
       if (!layer || !layer._mounted || typeof layer.update !== 'function') continue;
       const f = computeLayerFrame(layer, sc, idx, lt);
       layer.update(f.state, {
+        frame: V.getFrameState(),
         t: now,
         lt,
         clock,
@@ -2438,6 +2449,7 @@
     if (typeof fn !== 'function') return;
     const lineCue = activeCueIdx >= 0 ? sc.cues[activeCueIdx] : null;
     const info = {
+      frame: V.getFrameState(),
       t: now, clock, alive: clock, playing: Boolean(V._isPlaying), pointer: V.pointer,
       lt, scene: sc, sceneIndex: idx, lineCue, speaking: Boolean(cue), energy: V.getSceneEnergy(sc, idx, lt),
     };
@@ -3605,6 +3617,817 @@
   };
 })(globalThis.V = globalThis.V || {});
 
+/* 公共帧快照与外部画面准备；业务组件通过 Promise 参与精确定位。 */
+(function (V) {
+  let current = null, sequence = 0, lastTick = 0, controller = null, prepared = null;
+  const sources = new Map();
+  const reportedErrors = new WeakSet();
+  let heldId = 0;
+
+  function abortError() { return new DOMException('Frame superseded or source removed', 'AbortError'); }
+
+  function sceneFrame(base, scene, index) {
+    return Object.freeze(Object.assign({}, base, {
+      sceneIndex: index,
+      lt: base.now - scene.start,
+      sceneClock: base.clock - scene.start,
+      energy: V.getSceneEnergy(scene, index, base.now - scene.start),
+    }));
+  }
+
+  function begin(scene, index, now, clock, idle, options) {
+    if (controller) controller.abort();
+    controller = new AbortController();
+    prepared = null;
+    const ts = performance.now();
+    const uiDt = options.isRecord || options.precise || !lastTick ? 0 : Math.min(0.1, (ts - lastTick) / 1000);
+    lastTick = ts;
+    const pointer = options.isRecord
+      ? { x: 0, y: 0, nx: 0, ny: 0, sx: 0, sy: 0, rawX: 0, rawY: 0, active: false, inside: false, down: false, presence: 0, overUI: false }
+      : Object.assign({}, V.pointer);
+    current = sceneFrame({ id: ++sequence, now, clock, alive: clock, idle, uiDt,
+      playing: options.playing, ended: options.ended, isRecord: options.isRecord,
+      pptMode: Boolean(V.pptMode), pointer: Object.freeze(pointer) }, scene, index);
+    return current;
+  }
+
+  function forScene(scene, index) {
+    if (!current) return null;
+    return index === current.sceneIndex ? current : sceneFrame(current, scene, index);
+  }
+
+  function isActive(source, frame) {
+    const el = source.element();
+    return Boolean(el && el.isConnected && source.active(frame));
+  }
+
+  function activeSources(frame) {
+    return [...sources.values()].filter(source => isActive(source, frame));
+  }
+
+  function sourceError(source, frame, error) {
+    if (error.name === 'AbortError') return error;
+    return new Error(`Frame source "${source.id}" failed (scene=${frame.sceneIndex}, time=${frame.now.toFixed(3)}): ${error.message}`, { cause: error });
+  }
+
+  function report(error, frame = current) {
+    if (error.name === 'AbortError') return;
+    let cause = error;
+    const seen = new Set();
+    while (cause.cause && !seen.has(cause.cause)) { seen.add(cause); cause = cause.cause; }
+    if (typeof cause === 'object' && cause !== null) {
+      if (reportedErrors.has(cause)) return;
+      reportedErrors.add(cause);
+    }
+    console.error(error);
+    V.emit('onFrameError', { frame, error });
+  }
+
+  function prepareSource(source, frame, parentSignal) {
+    const abort = new AbortController();
+    const cancel = () => abort.abort();
+    parentSignal.addEventListener('abort', cancel, { once: true });
+    source.pending.add(abort);
+    let timer, onAbort, timeoutError;
+    const stopped = new Promise((_, reject) => {
+      onAbort = () => reject(timeoutError || abortError());
+      abort.signal.addEventListener('abort', onAbort, { once: true });
+    });
+    if (parentSignal.aborted) abort.abort();
+    const work = Promise.resolve().then(() => source.ready ? source.ready() : undefined).then(() => {
+      if (abort.signal.aborted) throw abortError();
+      timer = setTimeout(() => {
+        timeoutError = new Error(`Preparation timed out after ${source.timeoutMs}ms`);
+        abort.abort();
+      }, source.timeoutMs);
+      return source.prepare(frame, { signal: abort.signal });
+    });
+    return Promise.race([work, stopped]).catch(error => { throw sourceError(source, frame, error); }).finally(() => {
+      clearTimeout(timer);
+      parentSignal.removeEventListener('abort', cancel);
+      abort.signal.removeEventListener('abort', onAbort);
+      source.pending.delete(abort);
+    });
+  }
+
+  function prepare(frame) {
+    if (frame !== current) return Promise.reject(abortError());
+    if (!prepared) {
+      const signal = controller.signal;
+      prepared = Promise.resolve().then(() => activeSources(frame)).then(list =>
+        Promise.all(list.map(source => prepareSource(source, frame, signal))));
+    }
+    return prepared.then(() => {
+      if (frame !== current || controller.signal.aborted) throw abortError();
+      return frame;
+    });
+  }
+
+  V.frameSource = function (definition) {
+    if (!definition || !definition.id || typeof definition.element !== 'function' || typeof definition.prepare !== 'function') {
+      throw new TypeError('frameSource requires id, element() and prepare()');
+    }
+    if (sources.has(definition.id)) throw new Error(`Duplicate frame source: ${definition.id}`);
+    const timeoutMs = definition.timeoutMs === undefined ? 15000 : Number(definition.timeoutMs);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new TypeError('frameSource timeoutMs must be positive');
+    const source = Object.assign({ active: () => true }, definition, { timeoutMs, pending: new Set() });
+    sources.set(source.id, source);
+    return () => {
+      if (sources.get(source.id) !== source) return;
+      sources.delete(source.id);
+      for (const pending of source.pending) pending.abort();
+      if (source.dispose) return source.dispose();
+    };
+  };
+
+  V.getFrameState = () => current;
+  V._frameRuntime = { begin, forScene, prepare, report,
+    isHeld: () => Boolean(current && heldId === current.id),
+    hold(frame) {
+      heldId = frame.id;
+      return () => { if (heldId === frame.id) heldId = 0; };
+    },
+    hasActive: () => Boolean(current && activeSources(current).length),
+    preview(frame) {
+      prepare(frame).catch(error => report(error, frame));
+    },
+  };
+})(globalThis.V = globalThis.V || {});
+
+/* 外部受管画面：共享初始化、状态提交、宿主显隐与可选 iframe 协议。 */
+(function (V) {
+  const PROTOCOL = 'html-video-source-v1';
+
+  function aborted() { return new DOMException('Source operation cancelled', 'AbortError'); }
+
+  function timeout(value, fallback, name) {
+    const result = value === undefined ? fallback : Number(value);
+    if (!Number.isFinite(result) || result <= 0) throw new TypeError(`${name} must be positive`);
+    return result;
+  }
+
+  function initializeSource(definition, lifetime, waitMs) {
+    let timer, cancel;
+    const stopped = new Promise((_, reject) => {
+      cancel = () => reject(aborted());
+      lifetime.signal.addEventListener('abort', cancel, { once: true });
+      timer = setTimeout(() => {
+        reject(new Error(`Initialization timed out after ${waitMs}ms`));
+        lifetime.abort();
+      }, waitMs);
+    });
+    const work = Promise.resolve().then(() => {
+      if (lifetime.signal.aborted) throw aborted();
+      return definition.initialize?.({ signal: lifetime.signal, mode: V.environment.mode });
+    });
+    return Promise.race([work, stopped]).finally(() => {
+      clearTimeout(timer);
+      lifetime.signal.removeEventListener('abort', cancel);
+    });
+  }
+
+  function removePlugin(plugin) {
+    const index = V.plugins.indexOf(plugin);
+    if (index >= 0) V.plugins.splice(index, 1);
+  }
+
+  V.managedSource = function (definition) {
+    if (!definition?.id || typeof definition.element !== 'function' || typeof definition.prepare !== 'function') {
+      throw new TypeError('managedSource requires id, element() and prepare()');
+    }
+    const readyMs = timeout(definition.readyTimeoutMs, 15000, 'readyTimeoutMs');
+    let state = null, lifetime = null, initialized = null, initializedData, phase = 'idle';
+    let disposed = false, visibility = null, previousVisibility = '', disposing = null;
+
+    function ready() {
+      if (disposed) return Promise.reject(aborted());
+      if (initialized) return initialized;
+      lifetime = new AbortController();
+      phase = 'loading';
+      initialized = initializeSource(definition, lifetime, readyMs).then(result => {
+        if (!disposed) phase = 'ready';
+        initializedData = result;
+        return result;
+      }, cause => {
+        if (!disposed) phase = 'failed';
+        if (cause.name === 'AbortError') throw cause;
+        throw new Error(`Frame source "${definition.id}" failed during initialization: ${cause.message}`, { cause });
+      });
+      initialized.catch(error => { if (!disposed) V._frameRuntime.report(error); });
+      return initialized;
+    }
+
+    function active(frame) {
+      return !disposed && state !== null && (!definition.active || definition.active(frame, state));
+    }
+
+    function updateHost(frame) {
+      if (disposed) return;
+      const element = definition.element();
+      if (element && element !== visibility) {
+        visibility = element;
+        previousVisibility = element.style.visibility;
+      }
+      const visible = active(frame);
+      if (element) element.style.visibility = visible ? previousVisibility : 'hidden';
+      const preload = typeof definition.preload === 'function' ? definition.preload(V.environment) : definition.preload;
+      if (element?.isConnected && (visible || preload)) ready().catch(() => {});
+    }
+
+    const plugin = { id: `managed-source:${definition.id}`, onRender: info => updateHost(info.frame) };
+    const unregister = V.frameSource({
+      id: definition.id, element: definition.element, active, ready,
+      timeoutMs: definition.timeoutMs,
+      prepare(frame, context) {
+        if (context.signal.aborted) throw aborted();
+        return definition.prepare(state, frame, { ...context, data: initializedData });
+      },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        phase = 'disposed';
+        lifetime?.abort();
+        removePlugin(plugin);
+        if (visibility) visibility.style.visibility = previousVisibility;
+        return definition.dispose?.();
+      },
+    });
+    V.use(plugin);
+    return {
+      setState(next) { if (disposed) throw aborted(); state = next === undefined ? null : next; },
+      ready,
+      retry() {
+        if (phase === 'failed') { lifetime?.abort(); lifetime = null; initialized = null; }
+        return ready();
+      },
+      get status() { return phase; },
+      get state() { return state; },
+      dispose() {
+        if (!disposing) disposing = Promise.resolve(unregister());
+        return disposing;
+      },
+    };
+  };
+
+  function iframeElement(definition) {
+    const host = definition.element();
+    const frame = host?.tagName === 'IFRAME' ? host : host?.querySelector('iframe');
+    if (!frame) throw new Error('iframeSource element must contain an iframe');
+    return frame;
+  }
+
+  function iframeUrl(definition, frame) {
+    const value = typeof definition.src === 'function' ? definition.src() : definition.src;
+    const url = new URL(value || frame.src, document.baseURI);
+    if (definition.passMode !== false) {
+      url.searchParams.delete('record');
+      url.searchParams.delete('capture');
+      url.searchParams.delete('ppt');
+      if (V.environment.isRecord) url.searchParams.set('record', '1');
+      else if (V.environment.pptMode) url.searchParams.set('ppt', '1');
+    }
+    return url;
+  }
+
+  function createIframeConnection(definition, signal) {
+    const frame = iframeElement(definition);
+    const url = iframeUrl(definition, frame);
+    const origin = definition.origin || url.origin;
+    if (!origin || origin === '*' || origin === 'null') throw new TypeError('iframeSource requires an exact HTTP(S) origin');
+    const session = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    const pending = new Map();
+    let sequence = 0, closed = false, completed = false, closedError;
+
+    function send(type, requestId, payload = {}) {
+      frame.contentWindow.postMessage({ protocol: PROTOCOL, sourceId: definition.id, session,
+        type, requestId, ...payload }, origin);
+    }
+
+    function request(type, payload, requestSignal) {
+      if (closed) return Promise.reject(closedError || aborted());
+      if (requestSignal.aborted) return Promise.reject(aborted());
+      const requestId = ++sequence;
+      return new Promise((resolve, reject) => {
+        const cancel = () => { pending.delete(requestId); send('cancel', requestId); reject(aborted()); };
+        pending.set(requestId, { resolve, reject, cleanup: () => requestSignal.removeEventListener('abort', cancel) });
+        requestSignal.addEventListener('abort', cancel, { once: true });
+        send(type, requestId, payload);
+      });
+    }
+
+    function receive(event) {
+      const data = event.data;
+      if (event.source !== frame.contentWindow || event.origin !== origin) return;
+      if (data?.protocol !== PROTOCOL || data.sourceId !== definition.id || data.session !== session) return;
+      const entry = pending.get(data.requestId);
+      if (!entry) return;
+      pending.delete(data.requestId);
+      entry.cleanup();
+      if (data.type === 'error') entry.reject(new Error(data.message || 'External frame failed'));
+      else if (data.type === 'ready' || data.type === 'complete') entry.resolve(data.frameId);
+      else entry.reject(new Error(`Unexpected iframe response: ${data.type}`));
+    }
+
+    function hello() {
+      if (closed) return;
+      if (completed) { dispose(new Error('External iframe reloaded; recreate the source')); return; }
+      send('hello', 0, { mode: V.environment.mode });
+    }
+
+    function dispose(error = aborted()) {
+      if (closed) return;
+      send('dispose', 0);
+      closed = true;
+      closedError = error;
+      window.removeEventListener('message', receive);
+      frame.removeEventListener('load', hello);
+      signal.removeEventListener('abort', stop);
+      for (const entry of pending.values()) { entry.cleanup(); entry.reject(error); }
+      pending.clear();
+    }
+
+    const stop = () => dispose();
+    window.addEventListener('message', receive);
+    frame.addEventListener('load', hello);
+    signal.addEventListener('abort', stop, { once: true });
+    const ready = new Promise((resolve, reject) => {
+      pending.set(0, { resolve: value => { completed = true; resolve(value); }, reject, cleanup() {} });
+    });
+    if (frame.src !== url.href) frame.src = url.href;
+    else hello();
+    return { ready, dispose, prepare: (state, snapshot, context) => request('prepare', { state, frame: snapshot }, context.signal) };
+  }
+
+  V.iframeSource = function (definition) {
+    let connection;
+    return V.managedSource({ ...definition,
+      initialize({ signal }) {
+        connection?.dispose();
+        connection = createIframeConnection(definition, signal);
+        return connection.ready;
+      },
+      prepare(state, frame, context) {
+        return connection.prepare(state, frame, context).then(frameId => {
+          if (frameId !== frame.id) throw new Error('External frame acknowledgement does not match');
+        });
+      },
+      dispose() { connection?.dispose(); return definition.dispose?.(); },
+    });
+  };
+})(globalThis.V = globalThis.V || {});
+
+/* 交互值、指针响应与字幕伴随组件。组件只消费帧，不创建独立时钟。 */
+(function (V) {
+  const manualStates = new Set();
+  const { clamp, lerp } = V.u;
+
+  function recordFrame(frame) { return Boolean(frame ? frame.isRecord : V.environment?.isRecord); }
+
+  V.manualState = function ({ resetOn = ['play', 'seek', 'sceneExit'], enabled = () => true } = {}) {
+    const resets = new Set(resetOn);
+    let active = false, value, sceneIndex, previous = null;
+    const api = {
+      get active() { return active; },
+      get value() { return value; },
+      set(next, frame = V.getFrameState()) {
+        if (recordFrame(frame) || !enabled(frame)) return api;
+        value = next; active = true;
+        if (frame) sceneIndex = frame.sceneIndex;
+        return api;
+      },
+      clear() { active = false; value = undefined; return api; },
+      resolve(automatic, frame = V.getFrameState()) {
+        if (frame && previous && resets.has('play') && frame.playing && !previous.playing) api.clear();
+        if (frame && sceneIndex !== undefined && resets.has('sceneExit') && frame.sceneIndex !== sceneIndex) api.clear();
+        previous = frame;
+        return active && !recordFrame(frame) && enabled(frame) ? value : automatic;
+      },
+      reset(event, nextScene) {
+        if (!resets.has(event)) return;
+        if (event !== 'sceneExit' || sceneIndex !== nextScene) api.clear();
+      },
+      bind(owner, key, automatic) {
+        if (arguments.length < 3) automatic = null;
+        Object.defineProperty(owner, key, { configurable: true,
+          get: () => api.resolve(automatic), set: next => next == null ? api.clear() : api.set(next) });
+        return api;
+      },
+      dispose() { manualStates.delete(api); api.clear(); },
+    };
+    manualStates.add(api);
+    return api;
+  };
+
+  V.use({ id: 'builtin-manual-state',
+    onPlay() { for (const state of manualStates) state.reset('play'); },
+    onSeek() { for (const state of manualStates) state.reset('seek'); },
+    onSceneEnter(info) { for (const state of manualStates) state.reset('sceneExit', info.sceneIndex); },
+  });
+
+  function pointerTarget(pointer, geometry, previous) {
+    const width = geometry.stageWidth || V.stageWidth || 1920;
+    const height = geometry.stageHeight || V.stageHeight || 1080;
+    if (pointer.inside) return { active: true, x: pointer.x, y: pointer.y };
+    if (pointer.active) return { active: true,
+      x: clamp(pointer.rawX, -width * 0.25, width * 1.25),
+      y: clamp(pointer.rawY, -height * 0.25, height * 1.25) };
+    return { active: pointer.presence > 0.001, x: previous.x, y: previous.y };
+  }
+
+  function ellipseHit(pointer, geometry, hovered) {
+    const rx = geometry.hitRx || 48, ry = geometry.hitRy || 48;
+    const distance = Math.hypot((pointer.x - geometry.hitX) / rx, (pointer.y - geometry.hitY) / ry);
+    return distance <= (hovered ? 1.18 : 1);
+  }
+
+  function pointerHit(target, pointer, geometry, frame, state, options) {
+    if (frame.playing || !target.active || pointer.overUI || geometry.opacity <= 0.15) return false;
+    const width = geometry.stageWidth || V.stageWidth || 1920;
+    const height = geometry.stageHeight || V.stageHeight || 1080;
+    if (target.x < -20 || target.x > width + 20 || target.y < -20 || target.y > height + 20) return false;
+    return (options.hitTest || ellipseHit)(target, geometry, state.hovered, frame);
+  }
+
+  function smoothPointer(state, target, focus, hit, dt, options, suppressed) {
+    if (!suppressed) {
+      const k = options.snapOnFirst && state.focus < 0.02 ? 1 : 1 - Math.exp(-dt * (options.positionRate || 14));
+      state.x = lerp(state.x, target.x, k); state.y = lerp(state.y, target.y, k);
+    }
+    state.focus = lerp(state.focus, focus, 1 - Math.exp(-dt * (options.focusRate || 10)));
+    state.greet = lerp(state.greet, Number(hit), 1 - Math.exp(-dt * (hit ? 13 : 10)));
+    state.hoverSec = hit ? Math.min(10, (state.hovered ? state.hoverSec : 0) + dt) : 0;
+    state.hovered = hit;
+  }
+
+  function pointerResult(state, geometry, options) {
+    const duration = options.hopDuration || 0.36;
+    const hop = state.hovered && state.hoverSec < duration ? Math.sin(state.hoverSec / duration * Math.PI) * state.greet : 0;
+    const dx = state.x - geometry.x, dy = state.y - geometry.eyeY;
+    return Object.freeze({ x: state.x, y: state.y, w: state.focus, focus: state.focus,
+      greet: state.greet, hoverSec: state.hoverSec, hovered: state.hovered, hop,
+      lx: dx / Math.hypot(dx, options.gazeDistanceX || 380),
+      ly: dy / Math.hypot(dy, options.gazeDistanceY || 280) });
+  }
+
+  V.pointerResponse = function (options = {}) {
+    const state = { x: 960, y: 540, focus: 0, greet: 0, hovered: false, hoverSec: 0 };
+    let frameId, result = Object.freeze({ x: 960, y: 540, w: 0, focus: 0, lx: 0, ly: 0, greet: 0, hop: 0, hovered: false, hoverSec: 0 });
+    return {
+      update(frame = V.getFrameState(), suppliedGeometry) {
+        if (!frame || frame.id === frameId) return result;
+        frameId = frame.id;
+        const geometry = suppliedGeometry || options.geometry?.(frame) || {};
+        if (frame.isRecord) return result = Object.freeze({ ...result, w: 0, focus: 0, lx: 0, ly: 0, greet: 0, hop: 0, hovered: false });
+        const pointer = frame.pointer;
+        const target = pointerTarget(pointer, geometry, state);
+        const suppressed = Boolean(options.suppressUIInPpt && frame.pptMode && pointer.overUI);
+        const focus = !frame.playing && target.active && !suppressed ? (pointer.active ? 1 : clamp(pointer.presence)) : 0;
+        const hit = pointerHit(target, pointer, geometry, frame, state, options);
+        smoothPointer(state, target, focus, hit, frame.uiDt, options, suppressed);
+        result = pointerResult(state, geometry, options);
+        return result;
+      },
+      reset() { Object.assign(state, { x: 960, y: 540, focus: 0, greet: 0, hovered: false, hoverSec: 0 }); frameId = undefined; },
+    };
+  };
+
+  V.subtitleCompanion = function ({ slot = 'lead', create, update, enabled = () => true }) {
+    let element = null;
+    const previous = V.subtitles.onUpdate || V.subtitles.update;
+    V.subtitle({
+      [slot]: (h, runtime) => (element = create(h, runtime)),
+      onUpdate(cue, info, dom) {
+        if (previous) previous(cue, info, dom);
+        const frame = info.frame || V.getFrameState();
+        if (element && enabled(frame)) update(element, cue, { ...info, frame }, dom);
+      },
+    });
+    return { get element() { return element; } };
+  };
+
+  V.subtitleReservation = function (options = {}) {
+    const stage = Object.assign({ left: 960, paddingLeft: 34 }, options.stage);
+    const docked = Object.assign({ left: 146, paddingLeft: 56, maxWidth: 1660 }, options.docked);
+    return {
+      resolve(blend, overrides = {}, frame) {
+        const k = clamp(blend);
+        const target = Object.assign({}, docked, overrides);
+        if (options.resolve) return options.resolve(k, target, frame);
+        if (k <= 0.001) return { pos: 'center' };
+        return { pos: 'left', left: lerp(stage.left, target.left, k), maxWidth: target.maxWidth,
+          padding: `12px 34px 12px ${lerp(stage.paddingLeft, target.paddingLeft, k).toFixed(1)}px`,
+          transform: k >= 0.999 ? '' : `translateX(${(-50 * (1 - k)).toFixed(2)}%)` };
+      },
+      apply(blend, overrides, frame = V.getFrameState()) {
+        const layout = this.resolve(blend, overrides, frame);
+        V.setSubLayout(layout);
+        const element = options.element?.() || (typeof document === 'undefined' ? null : document.getElementById('subs'));
+        if (element && layout.transform) element.style.setProperty('--sub-transform', layout.transform);
+        else if (element) element.style.removeProperty('--sub-transform');
+        return layout;
+      },
+    };
+  };
+})(globalThis.V = globalThis.V || {});
+
+/* 与渲染技术无关的角色状态、连续动作和可等待的渲染器。 */
+(function (V) {
+  const { clamp, lerp, prog, ease, win, keyframes } = V.u;
+  const number = (value, fallback) => Number.isFinite(value) ? value : fallback;
+  const pulse = raw => raw > 0 && raw < 1 ? Math.sin(raw * Math.PI) : 0;
+
+  function scalarTrack(t, stops, duration = 0.3) {
+    if (!Array.isArray(stops) || !stops.length) return 0;
+    const keys = stops.filter(Array.isArray).map(stop => ({ at: number(stop[0], 0), value: number(stop[1], 0), dur: Math.max(0.04, number(stop[2], duration)) }));
+    return keyframes(t, keys, { dur: duration }).value;
+  }
+
+  function evalTrack(t, value, fallback = 0, duration = 0.32) {
+    return Array.isArray(value) ? scalarTrack(t, value, duration) : number(value, fallback);
+  }
+
+  function normalizePoses(poses, endAt, allowStart, duration) {
+    const list = (poses || []).filter(Array.isArray).filter(stop => !Number.isFinite(endAt) || stop[0] < endAt - 0.02);
+    if (!list.length) list.push([0, 'idle']);
+    if (!allowStart && list[0][0] > 0.001) list.unshift([0, 'idle']);
+    if (Number.isFinite(endAt) && list.at(-1)[1] !== 'idle') list.push([endAt, 'idle', duration]);
+    return list;
+  }
+
+  function beaconAt(t, value, endAt) {
+    if (t >= endAt) return false;
+    if (Array.isArray(value)) return value.some(range => t >= range[0] && t < range[1]);
+    return Boolean(value);
+  }
+
+  function hop(t, inAt, outAt, target, duration, dock, safe) {
+    duration = Math.max(0.1, number(duration, 0.56));
+    const rawIn = inAt == null ? 1 : prog(t, inAt, inAt + duration);
+    const rawOut = outAt == null ? 0 : prog(t, outAt, outAt + Math.max(0.1, number(target.durOut, duration)));
+    const k = ease.io(rawIn) * (1 - ease.io(rawOut));
+    const x = clamp(number(target.x, dock.x), safe.minX, safe.maxX);
+    const y = clamp(number(target.y, dock.y), safe.minY, safe.maxY);
+    const s = clamp(number(target.s, dock.s), safe.minS, safe.maxS);
+    return { k, x: lerp(dock.x, x, k), y: lerp(dock.y, y, k) + Math.sin(k * Math.PI) * number(target.arc, -36),
+      s: lerp(dock.s, s, k), walk: Math.max(pulse(rawIn), pulse(rawOut)) * 0.9,
+      dockBlend: 1 - k, lookBlend: k, subMode: k > 0.5 ? 'center' : 'dock', ringAlpha: clamp(1 - k * 1.75) };
+  }
+
+  function hasLookAfter(stops, after, before = Infinity) {
+    return Array.isArray(stops) && stops.some(stop => stop[0] > after && stop[0] < before);
+  }
+
+  function resolveStage(t, stage, defaults) {
+    if (!Array.isArray(stage)) return { ...defaults, ...stage, walk: 0 };
+    const first = stage[0]?.[1] || {};
+    const initial = { ...defaults, ...first };
+    const keys = stage.slice(1).map(([at, state]) => ({ ...state, at, dur: Math.max(0.12, number(state.dur, 0.5)) }));
+    const value = keyframes(t, keys, { init: initial });
+    const walk = Math.max(0, ...keys.map(key => pulse(prog(t, key.at, key.at + key.dur)) * 0.85));
+    return { ...value, walk };
+  }
+
+  function tourSegment(t, points) {
+    if (t <= points[0][0] || points.length === 1) return { index: 0, fraction: 0 };
+    if (t >= points.at(-1)[0]) return { index: Math.max(0, points.length - 2), fraction: 1 };
+    for (let i = 0; i < points.length - 1; i++) {
+      if (t >= points[i][0] && t <= points[i + 1][0]) return { index: i, fraction: ease.io(prog(t, points[i][0], points[i + 1][0])) };
+    }
+    return { index: 0, fraction: 0 };
+  }
+
+  function programOpening(c, t, spec, duration) {
+    const start = Object.assign({ x: 960, y: c.openingY, s: 2.2 }, spec.start);
+    const shift = spec.shift || {};
+    const shiftDuration = Math.max(0.12, number(shift.dur, 0.65));
+    const rawShift = spec.shift ? prog(t, number(shift.at, 0), number(shift.at, 0) + shiftDuration) : 0;
+    const shifted = keyframes(t, [{ ...shift, at: number(shift.at, 0), dur: shiftDuration }], { init: start });
+    const dockDuration = Math.max(0.2, number(spec.dockDur, 0.78));
+    const latest = Math.max(0.2, duration - dockDuration - 0.12);
+    const at = Math.min(number(spec.dockAt, latest), latest);
+    const rawDock = prog(t, at, at + dockDuration), kDock = ease.io(rawDock);
+    const settle = Math.max(at + 0.2, duration - 0.5);
+    const lateLook = spec.postDockLook || hasLookAfter(spec.lookX, at + 0.05);
+    return { state: { ...spec, _managed: true,
+      x: lerp(shifted.x, c.dock.x, kDock), y: lerp(shifted.y, c.dock.y, kDock) + Math.sin(kDock * Math.PI) * number(spec.arc, c.openingArc),
+      s: lerp(shifted.s, c.dock.s, kDock), walk: Math.max(pulse(rawShift), pulse(rawDock)) * 0.9,
+      topAlpha: evalTrack(t, spec.topAlpha, V.pptMode ? ease.io(rawShift) : kDock),
+      dockBlend: kDock, ringAlpha: prog(kDock, 0.45, 0.96), subMode: kDock > 0.5 ? 'dock' : 'center',
+      poses: normalizePoses(spec.poses || [[0, 'wave'], [at + 0.16, 'idle']], settle, true, c.poseDuration),
+      lookBlend: lateLook ? 1 - ease.io(prog(t, settle, duration - 0.06)) : 1 - kDock,
+      tilt: spec.tilt === undefined ? undefined : evalTrack(t, spec.tilt) * (1 - kDock), beacon: beaconAt(t, spec.beacon, settle) },
+      result: { kShift: ease.io(rawShift), kDock } };
+  }
+
+  function programDocked(c, t, spec, duration) {
+    const settle = Math.max(0.5, duration - 0.5);
+    const fade = 1 - ease.io(prog(t, settle, duration - 0.06));
+    const hasLook = spec.lookX !== undefined || spec.lookY !== undefined;
+    return { state: { ...spec, ...c.dock, _managed: true, dockBlend: 1, ringAlpha: 1, subMode: 'dock',
+      topAlpha: evalTrack(t, spec.topAlpha, 1),
+      poses: normalizePoses(spec.poses, settle, false, c.poseDuration),
+      lookBlend: hasLook ? ease.io(win(t, 0.24, duration - 0.5, 0.36)) : 0,
+      tilt: spec.tilt === undefined ? undefined : evalTrack(t, spec.tilt) * fade,
+      dark: evalTrack(t, spec.dark) * (spec.darkHoldEnd ? 1 : fade), beacon: beaconAt(t, spec.beacon, settle) } };
+  }
+
+  function cameoTiming(t, spec, duration) {
+    const enter = Math.max(0.16, number(spec.dur, 0.54)), leave = Math.max(0.16, number(spec.durOut, enter));
+    const at = Math.max(0.02, number(spec.inAt, 0.06));
+    const latest = Math.max(at + enter + 0.08, duration - leave - 0.08);
+    const out = spec.outAt == null ? latest : Math.min(number(spec.outAt, latest), latest);
+    return { enter, leave, at, out, fade: 1 - ease.io(prog(t, out, out + leave)) };
+  }
+
+  function cameoLook(t, spec, duration, timing, h, keep) {
+    if (keep) return 1;
+    const early = spec.dockLook || hasLookAfter(spec.lookX, 0.05, timing.at - 0.1);
+    return early ? Math.max(h.k, ease.io(win(t, 0.24, Math.min(timing.out, duration - 0.5), 0.36))) : h.k;
+  }
+
+  function programCameo(c, t, spec, duration) {
+    const stage = resolveStage(t, spec.stage, { ...c.cameoStage, arc: number(spec.arc, c.cameoStage.arc) });
+    const timing = cameoTiming(t, spec, duration);
+    const keep = Boolean(V.pptMode && spec.pptKeep), settle = keep ? duration + 99 : timing.out;
+    const h = keep ? { k: 1, subMode: 'center', dockBlend: 0, ringAlpha: 0, ...stage, walk: 0 }
+      : hop(t, timing.at, timing.out, { ...stage, durOut: timing.leave }, timing.enter, c.dock, c.safe);
+    return { state: { ...spec, ...stage, ...h, _managed: true, walk: Math.max(h.walk, stage.walk * h.k),
+      poses: normalizePoses(spec.poses, settle, false, c.poseDuration),
+      lookBlend: cameoLook(t, spec, duration, timing, h, keep),
+      tilt: spec.tilt === undefined ? undefined : evalTrack(t, spec.tilt) * h.k,
+      dark: spec.dark === 'hop' ? h.k : evalTrack(t, spec.dark) * (keep ? 1 : timing.fade),
+      beacon: beaconAt(t, spec.beacon === 'hop' ? h.k > 0.5 : spec.beacon, settle) }, result: h };
+  }
+
+  function tourPosition(t, spec, points, segment) {
+    const a = points[segment.index], b = points[Math.min(points.length - 1, segment.index + 1)];
+    const x = lerp(number(a[1], 960), number(b[1], 960), segment.fraction);
+    const y = lerp(number(a[2], 520), number(b[2], 520), segment.fraction);
+    const s = spec.s === undefined ? lerp(number(a[3], 1.05), number(b[3], 1.05), segment.fraction) : evalTrack(t, spec.s, 1.05);
+    const lookX = spec.lookX === undefined && points.length > 1 ? clamp((number(b[1], x) - number(a[1], x)) / 120, -0.9, 0.9) : spec.lookX;
+    return { x, y, s, lookX };
+  }
+
+  function programTour(c, t, spec, duration) {
+    const points = spec.waypoints?.length ? spec.waypoints : [[0.5, 960, 520, 1.1]];
+    const first = points[0], last = points.at(-1), segment = tourSegment(t, points);
+    const position = tourPosition(t, spec, points, segment);
+    const enter = Math.max(0.16, number(spec.dur, 0.5)), at = Math.max(0.04, number(spec.inAt, first[0] - 0.55));
+    const latest = Math.max(at + enter + 0.1, duration - enter - 0.08);
+    const out = spec.outAt == null ? latest : Math.min(number(spec.outAt, latest), latest);
+    const h = hop(t, at, out, { ...position, arc: number(spec.arc, -22) }, enter, c.dock, c.safe);
+    const walk = points.length > 1 ? ease.io(prog(t, first[0] - 0.22, first[0] + 0.14)) * (1 - ease.io(prog(t, last[0] - 0.18, last[0] + 0.18))) * 0.9 : 0;
+    return { state: { ...spec, ...h, _managed: true, topAlpha: evalTrack(t, spec.topAlpha, 1),
+      walk: Math.max(h.walk, walk * h.k), poses: normalizePoses(spec.poses || [[at + 0.08, 'guide']], out, false, c.poseDuration),
+      lookX: position.lookX, lookBlend: h.k, beacon: beaconAt(t, spec.beacon, out) },
+      result: { ...h, segIdx: segment.index, segFrac: segment.fraction } };
+  }
+
+  function programFinale(c, t, spec) {
+    const stage = { x: 960, y: 470, s: 1.92, arc: -42, ...spec.stage };
+    const at = number(spec.returnAt === undefined ? spec.inAt : spec.returnAt, 0.2);
+    const h = spec.fromDock === false ? { k: 1, ...stage, subMode: 'center', dockBlend: 0, ringAlpha: 0 }
+      : hop(t, at, null, stage, Math.max(0.2, number(spec.dur, 0.76)), c.dock, c.safe);
+    const poses = spec.fromDock === false ? [[0, 'present'], [1, 'wave']] : [[0, 'idle'], [at + 0.15, 'wave']];
+    const early = spec.lookX !== undefined || spec.lookY !== undefined;
+    return { state: { ...spec, ...h, s: spec.fromDock === false ? evalTrack(t, stage.s, 1.92) : h.s, _managed: true, persistStage: true,
+      topAlpha: evalTrack(t, spec.topAlpha, 1 - h.k),
+      poses: normalizePoses(spec.poses || poses, null, spec.fromDock === false, c.poseDuration),
+      lookBlend: early ? Math.max(h.k, ease.io(prog(t, 0.24, 0.64))) : h.k,
+      beacon: beaconAt(t, spec.beacon === 'hop' ? h.k > 0.5 : spec.beacon, Infinity) }, result: h };
+  }
+
+  function poseTrack(t, stops, duration, poseFromName, mix) {
+    if (!stops?.length) return poseFromName('idle');
+    let state = poseFromName(stops[0][1]);
+    for (const [at, name, span = duration] of stops.slice(1)) {
+      const k = ease.io(prog(t, at, at + Math.max(0.06, number(span, duration))));
+      if (k > 0) state = mix(state, poseFromName(name), k, lerp);
+    }
+    return state;
+  }
+
+  function defaultMix(from, to, k) {
+    const output = { ...from, ...to };
+    for (const field of Object.keys(output)) {
+      output[field] = typeof from[field] === 'number' && typeof to[field] === 'number' ? lerp(from[field], to[field], k) : (k < 0.5 ? from[field] : to[field]);
+    }
+    return output;
+  }
+
+  const PROGRAMS = { opening: programOpening, docked: programDocked, cameo: programCameo, tour: programTour, finale: programFinale };
+
+  function makeMotion(definition, submit) {
+    const c = { dock: { x: 138, y: 1035, s: 0.9 }, safe: { minX: 110, maxX: 1810, minY: 130, maxY: 1035, minS: 0.5, maxS: 2.6 },
+      openingY: 468, openingArc: -42, cameoStage: { x: 310, y: 536, s: 1.88, arc: -34 }, poseDuration: 0.44, ...definition.motion };
+    const api = { kf: scalarTrack, evalTrack,
+      hop: (t, enter, leave, target, duration = 0.56) => hop(t, enter, leave, target, duration, c.dock, c.safe),
+      poseTrack: (t, stops, duration = c.poseDuration) => poseTrack(t, stops, duration, definition.poseFromName || (pose => ({ pose })), definition.poseMix || defaultMix),
+    };
+    for (const [name, program] of Object.entries({ ...PROGRAMS, ...definition.programs })) api[name] = (scene, t, spec = {}) => {
+      const sceneIndex = typeof scene === 'object' ? V.scenes.indexOf(scene) : scene;
+      const duration = number(V.scenes[sceneIndex]?.duration, 20);
+      const output = program(c, Math.max(0, t), spec, duration);
+      submit(output.state, V.getFrameState(), { sceneIndex, lt: t });
+      return output.result;
+    };
+    return api;
+  }
+
+  function actorHost(definition, layerParent) {
+    const existing = definition.element?.();
+    if (existing) return { element: existing, owned: false };
+    if (typeof document === 'undefined') return { element: null, owned: false };
+    const element = V.u.h('div', { class: 'video-actor', 'data-actor-id': definition.id });
+    const parent = definition.parent?.() || layerParent || document.getElementById('stage');
+    if (parent) parent.appendChild(element);
+    return { element, owned: true };
+  }
+
+  V.actor = function (definition) {
+    if (!definition?.id || !definition.renderer) throw new TypeError('actor requires id and renderer');
+    const renderer = definition.renderer;
+    let mounted = null, ready = null, current = null, source = null, disposed = false, disposal = null;
+    let layer = null, layerParent = null, ownedLayer = false;
+    const context = (request = current, extra = {}) => ({ ...request, element: mounted?.element, data: mounted?.data,
+      capabilities: renderer.capabilities || {}, ...extra });
+
+    function apply(request, extra) {
+      const updated = renderer.update?.(request.state, context(request, extra));
+      if (updated && typeof updated.then === 'function') throw new TypeError('actor renderer.update must be synchronous; use prepare');
+      request.applied = true;
+    }
+
+    function mount(frame) {
+      if (mounted || disposed) return ready;
+      mounted = actorHost(definition, layerParent);
+      mounted.pending = true;
+      source = V.managedSource({ id: `actor:${definition.id}`, element: () => mounted?.element,
+        active: (_frame, request) => request.state.visible !== false,
+        timeoutMs: definition.timeoutMs, readyTimeoutMs: definition.readyTimeoutMs,
+        async initialize({ signal, mode }) {
+          const data = await renderer.mount?.(mounted.element, { frame, signal, mode, capabilities: renderer.capabilities || {} });
+          if (signal.aborted || disposed) throw new DOMException('Actor disposed', 'AbortError');
+          mounted.data = data; mounted.pending = false;
+          return data;
+        },
+        async prepare(request, preparedFrame, { signal, data }) {
+          if (signal.aborted || disposed || current !== request) throw new DOMException('Actor frame superseded', 'AbortError');
+          const extra = { frame: preparedFrame, signal, data };
+          if (!request.applied) apply(request, extra);
+          if (renderer.prepare) await renderer.prepare(request.state, context(request, extra));
+          if (signal.aborted || disposed) throw new DOMException('Actor frame superseded', 'AbortError');
+        },
+      });
+      ready = source.ready().then(() => mounted.element);
+      ready.catch(() => {});
+      return ready;
+    }
+
+    const reservation = definition.subtitle ? V.subtitleReservation(definition.subtitle) : null;
+    const api = {
+      capabilities: Object.freeze({ ...(renderer.capabilities || {}) }),
+      mount,
+      update(state, frame = V.getFrameState(), extra = {}) {
+        if (disposed) throw new Error(`Actor "${definition.id}" is disposed`);
+        mount(frame);
+        current = { state: Object.freeze({ ...definition.defaults, ...state }), frame, sceneIndex: frame?.sceneIndex, lt: frame?.lt, ...extra };
+        source.setState(current);
+        if (reservation && definition.autoSubtitle !== false) reservation.apply(number(state.dockBlend, 0), definition.reserve?.(state, frame), frame);
+        if (!mounted.pending) apply(current);
+        return current.state;
+      },
+      stage(state, frame) { return api.update({ dockBlend: 0, subMode: 'center', ...state }, frame); },
+      transition(from, to, fraction, frame) { return api.update((definition.mix || defaultMix)(from, to, clamp(fraction)), frame); },
+      reserveSubtitle: (fraction, overrides, frame) => reservation?.apply(fraction, overrides, frame),
+      dispose() {
+        if (disposal) return disposal;
+        disposed = true;
+        const layerIndex = V.layers.indexOf(layer);
+        if (layerIndex >= 0) V.layers.splice(layerIndex, 1);
+        const sourceDisposal = source?.dispose();
+        disposal = (async () => {
+          try { await sourceDisposal; await ready; } catch {}
+          try { await renderer.dispose?.(context()); }
+          finally {
+            if (mounted?.owned) mounted.element?.remove();
+            if (ownedLayer) layerParent?.remove();
+          }
+        })();
+        return disposal;
+      },
+    };
+    Object.assign(api, makeMotion(definition, api.update));
+    if (definition.layer) {
+      const existing = typeof document === 'undefined' ? null : document.getElementById(`layer-${definition.id}`);
+      layer = V.layer({ ...definition.layer, id: definition.id,
+        build(element) { layerParent = element; ownedLayer = element !== existing; api.mount(V.getFrameState()); return mounted.element; },
+        update: (state, info) => api.update(state, info.frame) });
+    }
+    return api;
+  };
+})(globalThis.V = globalThis.V || {});
+
 /* core/13-player.js · 舞台挂载、紧凑全图标控制栏、PotPlayer 热区速隐、实时进度浮窗、OSD 轻提示与 V.boot 启动器 */
 (function (V) {
   if (typeof location === 'undefined') return;
@@ -3627,7 +4450,7 @@
   let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0;
   let inBar = false, lastPtrX = -9999, lastPtrY = -9999;
   const ptr = (V.pointer = V.pointer || {
-    x: 960, y: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, inside: false, down: false,
+    x: 960, y: 540, rawX: 960, rawY: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, active: false, inside: false, down: false, overUI: false,
   });
   let wipeState = { name: '', handler: null, dom: null };
   const sandboxState = { active: false, entering: false, autoExitOnLast: true, returnTime: null, el: null, txtEl: null, backEl: null };
@@ -3949,6 +4772,7 @@
     sc.ctx.playing = playing && !scrubbing && !localeLoading;
     sc.ctx.ended = ended;
     sc.ctx.pointer = ptr;
+    sc.ctx.frame = V.getFrameState();
   }
 
   function runSceneUpdate(sc, lt, idle) {
@@ -3962,7 +4786,20 @@
     }
   }
 
-  function render(t, nextIdle) {
+  function publishFrame(sc, clock, idle, precise) {
+    ended = !playing && now >= V.duration - 0.01;
+    V._frameRuntime.begin(sc, V.scenes.indexOf(sc), now, clock, idle, {
+      playing: playing && !scrubbing && !localeLoading, ended, isRecord: RECORD, precise,
+    });
+  }
+
+  function completeFrameUI() {
+    if (RECORD) return;
+    updateUI();
+    V._frameRuntime.preview(V.getFrameState());
+  }
+
+  function render(t, nextIdle, precise = true) {
     if (!V.scenes.length || !Number.isFinite(t)) return;
     const idle = RECORD ? 0 : (nextIdle === undefined ? idleSec : nextIdle);
     idleSec = idle;
@@ -3974,6 +4811,7 @@
     V._clock = clock;
     if (RECORD || V.pptMode) V._checkpointsRuntime.syncRecordCheckpoints(now);
     const sc = sceneAt(now);
+    publishFrame(sc, clock, idle, precise);
     syncSceneCtxAndEndState(sc, idle);
     const lt = now - sc.start;
     const idx = V.scenes.indexOf(sc);
@@ -3991,11 +4829,12 @@
     if (!RECORD && !V.pptMode) V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: false, playing, scrubbing, pause, play });
     const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false, voiceOn: true, volume: 1 };
     V.emit('onRender', {
+      frame: V.getFrameState(),
       now, clock, alive: clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
       playing, scrubbing, sandbox: sandboxState.active, pointer: ptr,
       hasAudio: aState.hasAudio, isRecord: RECORD, muted: aState.muted, voiceOn: aState.voiceOn !== false, volume: aState.volume,
     });
-    if (!RECORD) updateUI();
+    completeFrameUI();
   }
 
   function showUiHold() {
@@ -4155,7 +4994,7 @@
       audioStallSec = 0;
       if (checkSceneLoop(mTime)) return;
       if (mTime >= V.duration - 0.01) finishPlayback();
-      else render(mTime, 0);
+      else render(mTime, 0, false);
       return;
     }
     audioStallSec += rawDt;
@@ -4166,7 +5005,7 @@
     lastTs = ts;
     if (shouldTickAmbientPause(current)) {
       ambientOffset += rawDt;
-      render(now, 0);
+      render(now, 0, false);
     }
   }
 
@@ -4176,19 +5015,20 @@
     if (checkSceneLoop(now + dt)) return;
     if (audioRt) audioRt.syncWithWallClock(now);
     if (now + dt >= V.duration - 0.002) finishPlayback();
-    else render(now + dt, 0);
+    else render(now + dt, 0, false);
   }
 
   function stepAmbientIdle(rawDt) {
     if (!shouldTickAmbientPause(current)) return;
     ambientOffset += rawDt;
     idleSec += rawDt;
-    render(now, idleSec);
+    render(now, idleSec, false);
   }
 
   function frame(ts) {
     const rawDt = lastFrameTs > 0 ? clamp((ts - lastFrameTs) / 1000, 0, 0.1) : 0;
     lastFrameTs = ts;
+    if (V._frameRuntime.isHeld()) { lastTs = ts; requestAnimationFrame(frame); return; }
     stepPointerSmoothing(rawDt);
     if (localeLoading) {
       lastTs = ts;
@@ -4196,7 +5036,7 @@
       stepAmbientIdle(rawDt);
     } else if (scrubbing) {
       lastTs = ts;
-      if (current && current.live) render(now, 0);
+      if (current && current.live) render(now, 0, false);
     } else if (playing) {
       if (audioRt && audioRt.canUseMasterClock()) advanceAudioClock(ts, rawDt);
       else advanceWallClock(ts);
@@ -4668,6 +5508,9 @@
   function applyStagePointerCoords(e) {
     if (RECORD || !stage || !Number.isFinite(e.clientX)) return;
     const r = stage.getBoundingClientRect();
+    ptr.active = true;
+    ptr.rawX = (e.clientX - r.left) / r.width * (V.stageWidth || 1920);
+    ptr.rawY = (e.clientY - r.top) / r.height * (V.stageHeight || 1080);
     if (!hitRect(r, e.clientX, e.clientY)) {
       resetPointerLeave();
       return;
@@ -4682,17 +5525,14 @@
   }
 
   function updatePointerFromEvent(bar, e) {
-    if (isEventOverBar(bar, e.target)) {
-      resetPointerLeave();
-      return;
-    }
     applyStagePointerCoords(e);
+    ptr.overUI = Boolean(isPointerOverBar(bar, e) || e.target?.closest?.('[data-video-ui],#search-modal,#help-modal'));
+    if (ptr.overUI) resetPointerLeave();
   }
 
   function wakeFromPointer(bar, uiCfg, e, force) {
     const overBar = isPointerOverBar(bar, e);
-    if (overBar) resetPointerLeave();
-    else applyStagePointerCoords(e);
+    updatePointerFromEvent(bar, e);
     if (!force && Math.abs(e.clientX - lastPtrX) < 1 && Math.abs(e.clientY - lastPtrY) < 1) return;
     lastPtrX = e.clientX;
     lastPtrY = e.clientY;
@@ -4731,6 +5571,8 @@
   function bindIdleWake(bar, uiCfg) {
     bindBlindBarGuard(bar, uiCfg);
     const clearOnLeave = () => {
+      ptr.active = false;
+      ptr.overUI = false;
       inBar = false;
       lastPtrX = -9999;
       lastPtrY = -9999;
@@ -5297,6 +6139,45 @@
     };
   }
 
+  function playerState() {
+    return Object.freeze({ now, playing: playing && !scrubbing && !localeLoading,
+      ended, sceneIndex: V.scenes.indexOf(current), mode: V.environment.mode,
+      sandbox: sandboxState.active, rate: playbackRate,
+      page: pptRt ? pptRt.getPageNo() : 0, totalPages: pptRt ? pptRt.getTotalPages() : 0 });
+  }
+
+  function goToScene(index, options = {}) {
+    const sceneIndex = typeof index === 'string' ? V.scenes.findIndex(sc => sc.id === index) : index;
+    const scene = V.scenes[sceneIndex];
+    if (!Number.isInteger(sceneIndex) || !scene) throw new RangeError(`Unknown scene: ${index}`);
+    const offset = options.offset === undefined ? 0.05 : Number(options.offset);
+    if (!Number.isFinite(offset)) throw new TypeError('Scene offset must be finite');
+    const target = scene.start + clamp(offset, 0, Math.max(0, scene.duration - 0.001));
+    if (options.sandbox && !V.pptMode && !RECORD) tryEgg(target, options.hint || scene.title);
+    else if (RECORD) render(target, 0);
+    else seek(target, true);
+    return playerState();
+  }
+
+  function exposePlayer() {
+    V.player = Object.freeze({
+      play: () => { if (!V.pptMode) play(); return playerState(); },
+      pause: () => { pause(); return playerState(); },
+      replay: () => { if (pptRt) pptRt.goToPage(0); else replay(); return playerState(); },
+      getState: playerState,
+      seek: t => { if (RECORD) render(t, 0); else seek(t, true); return playerState(); },
+      goToScene, tryAt: tryEgg, exitSandbox,
+      goToPage(page, options) {
+        if (!pptRt) throw new Error('PPT mode is not active');
+        if (!Number.isInteger(page) || page < 1 || page > pptRt.getTotalPages()) throw new RangeError('Unknown PPT page');
+        pptRt.goToPage(page - 1, options);
+        return playerState();
+      },
+      nextPage: () => pptRt && pptRt.stepBy(1),
+      prevPage: () => pptRt && pptRt.stepBy(-1),
+    });
+  }
+
   function syncInitialLocaleState() {
     if (V.captureVoice && V.voice) V.captureVoice(V.voice);
     if (V.syncDocLangAttrs) V.syncDocLangAttrs();
@@ -5357,7 +6238,16 @@
     initInitialAudioAndSubs(cfg, uiCfg, savedPrefs);
 
     V.seekTo = t => render(t, 0);
-    V.seekToAsync = async t => { render(t, 0); await waitStageAssets(); };
+    V.seekToAsync = async t => {
+      render(t, 0);
+      const snapshot = V.getFrameState();
+      const release = V._frameRuntime.hold(snapshot);
+      try {
+        await Promise.all([waitStageAssets(), V._frameRuntime.prepare(snapshot)]);
+        if (snapshot !== V.getFrameState()) throw new DOMException('Frame superseded', 'AbortError');
+        return snapshot;
+      } finally { release(); }
+    };
     V.setSubs = setSubs;
     V.setLang = setLang;
     V.setVolume = v => audioRt.setVolume(v);
@@ -5381,6 +6271,7 @@
       isDev: DEV,
       isRecord: RECORD,
     };
+    exposePlayer();
 
     if (RECORD) document.body.classList.add('record');
     else if (V.pptMode && pptRt) buildPptUI(uiCfg);

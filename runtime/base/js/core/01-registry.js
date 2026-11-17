@@ -14,7 +14,7 @@
     ['config', () => ({})],
     ['c', () => ({})],
     ['checkpointState', () => ({})],
-    ['pointer', () => ({ x: 960, y: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, inside: false, down: false })],
+    ['pointer', () => ({ x: 960, y: 540, rawX: 960, rawY: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, active: false, inside: false, down: false, overUI: false })],
     ['_videoClips', () => new Set()],
   ];
   for (const [k, make] of DEFAULTS) {
@@ -29,6 +29,13 @@
     return raw === '1' || raw === 'true' || (sp.get('mode') || '').toLowerCase() === 'ppt';
   }
   if (V.pptMode === undefined) V.pptMode = detectInitialPptMode();
+  const startupQuery = typeof location === 'undefined' ? null : new URLSearchParams(location.search);
+  const startupRecord = Boolean(startupQuery && (startupQuery.has('record') || startupQuery.has('capture')));
+  V.environment = Object.freeze({
+    isRecord: startupRecord,
+    get pptMode() { return Boolean(V.pptMode); },
+    get mode() { return startupRecord ? 'record' : (V.pptMode ? 'ppt' : 'interactive'); },
+  });
 
   function upsertById(list, item) {
     const key = item.id || item.name;

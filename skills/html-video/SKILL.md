@@ -94,4 +94,13 @@ V.scene({
 
 - **单帧单焦点**：同屏并列独立模块 `<= 3` 个，严禁九宫格卡片墙与大段朗读稿上屏；讲到当前项时用 `V.u.spotlight(els, idx)` 聚光，非当前项降权。
 - **远视字阶下限**：`1920×1080` 画布正文字号 `>= 22px`，最小标签/角标 `>= 18px`（仿真第三方软件界面可设 `data-allow-small-font="1"` 豁免）。
-- **交付前必跑巡检**：执行 `npx html-video verify` 与 `npx html-video audit --screenshots .runtime/audit`，若生成告警截图需逐张目视核查后再交付。
+- **按改动范围验证**：执行相关视频的 `verify` 与 `audit`；组件接入或局部调整先抽查受影响分镜，使用 `sampleFrames` 与 `captureMany` 生成截图并目视核查。仅在全片内容审校或用户明确要求时，扩大到全量台词截图；接口用法见 [内容与巡检工具](references/content-and-audit.md)。
+
+## 7. 外部画面与自定义巡检
+
+角色与独立组件读取公共帧快照；iframe/外部 Canvas 必须登记画面准备流程。接口与示例见 [帧状态和巡检接入](references/frame-interfaces.md)。业务巡检复用公开服务与会话接口，不修改播放器内部时钟或模式。
+
+- 业务播放按钮使用 `V.player`；`V.seekTo/seekToAsync` 保留工具画面定位语义。
+- 外部画面优先使用 [受管画面与 iframe 协议](references/external-sources.md)，由平台管理一次初始化、逐帧准备和显隐。
+- 角色、指针响应、手动交互值与字幕伴随使用 [公共组件](references/components.md)。角色编排与渲染适配器分离，SVG、Canvas 和 3D 模型均可接入；异步绘制必须参与画面等待。
+- 内容读取与采样截图使用 [内容与巡检工具](references/content-and-audit.md)。多课程组织和共享资源继续由业务工程负责。

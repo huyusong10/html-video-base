@@ -139,6 +139,7 @@
       at: (i, kw, opts) => resolveAnchor(sc, si, i, kw, opts),
       t: (key, fb, vars) => (V.t ? V.t(key, fb, vars, si) : (fb === undefined ? key : fb)),
       sfx: (type, vol) => (V.sfx ? V.sfx(type, vol) : false),
+      frame: V._frameRuntime ? V._frameRuntime.forScene(sc, si) : null,
       dur: sc.duration,
       clock: 0,
       alive: 0,
@@ -503,6 +504,7 @@
     V.scenes.forEach((sc, si) => syncSceneLocaleMeta(sc, si));
     const baked = vv.bakedLayout;
     const useBaked = isBakedValid(baked);
+    V.layoutInfo = Object.freeze({ source: useBaked ? 'baked' : 'estimated' });
 
     let t = 0;
     V.scenes.forEach((sc, si) => {

@@ -121,6 +121,7 @@
     if (typeof fn !== 'function') return;
     const lineCue = activeCueIdx >= 0 ? sc.cues[activeCueIdx] : null;
     const info = {
+      frame: V.getFrameState(),
       t: now, clock, alive: clock, playing: Boolean(V._isPlaying), pointer: V.pointer,
       lt, scene: sc, sceneIndex: idx, lineCue, speaking: Boolean(cue), energy: V.getSceneEnergy(sc, idx, lt),
     };

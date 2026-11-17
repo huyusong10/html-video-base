@@ -214,7 +214,7 @@ Choose the test level by the behavior your change affects:
 | `npm test` | Basic checks after small changes | Engine assembly, complexity, arguments and paths, timeline and subtitles, cache identity, and init/preview/bundle smoke checks |
 | `npm run test:full` | Core behavior changes, larger refactors, and before release | All quick checks, plus Chromium interactions and frame reuse, audio processing, real video export, and failure recovery |
 
-Documentation, wording, and local style changes normally use `npm test`. Run `npm run test:full` when changing the timeline, player interactions, caching, rendering, mixing, or file replacement behavior, even for a one-line change.
+Choose checks by impact: review content and links for documentation; for code, start with quick checks and targeted regressions for the affected API or representative scene. Use the full suite for cross-module changes and releases. Whole-video screenshots and frame-by-frame audits are explicit choices.
 
 Quick tests require Node.js and a basic Python environment. Full tests also require the toolchain's Python audio dependencies, FFmpeg, and Chromium. Each run uses a separate temporary directory and removes it on completion.
 
@@ -225,3 +225,7 @@ node tools/test-render-cache-identity.mjs .runtime/cache-check-1
 ```
 
 All JS/MJS and Python functions enforce cyclomatic complexity `< 15` (`<= 14`). Both test levels include this check, which can also be run with `npm run lint:cc`.
+
+See [frame snapshots, external surfaces and audit sessions](skills/html-video/references/frame-interfaces.md) for the runtime and Node.js extension APIs.
+
+The platform also provides [managed external surfaces](skills/html-video/references/external-sources.md), [interaction and renderer-independent actors](skills/html-video/references/components.md), and [content inspection and audit sampling](skills/html-video/references/content-and-audit.md). Actor adapters can use SVG, Canvas or a 3D engine without coupling orchestration to a skeleton or model format. Courses and shared assets remain project responsibilities.

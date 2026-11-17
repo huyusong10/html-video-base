@@ -257,7 +257,7 @@ function loadSceneCacheSources(videoDir, scenes) {
 function computeSharedVideoDigest(videoDir, W, H, fps, lang, sourceInfo, outputPath) {
   const h = crypto.createHash('sha256');
   // 渲染规则改变后，旧缓存片段也需要重新生成。
-  h.update(JSON.stringify({ v: '3.7', W, H, fps, lang }));
+  h.update(JSON.stringify({ v: '3.8', W, H, fps, lang }));
   for (const rel of ['css/base.css', 'js/engine.js', 'js/gl.js']) {
     const fp = resolveBaseFile(rel, VIDEOS_DIR);
     if (fs.existsSync(fp)) hashFileEntry(h, 'base/' + rel, fp);
@@ -503,6 +503,7 @@ export function installFrameReuseProbe() {
     styleState = parts;
     return true;
   };
+  const hasExternalPixels = stage => Boolean(stage.querySelector('iframe,canvas:not(#gl),svg animate,svg animateTransform,svg animateMotion,svg set') || (window.V._frameRuntime && window.V._frameRuntime.hasActive()));
   const canDedupeStage = stage => {
     if (!stage) return false;
     // 原生顶层元素的层叠顺序无法从舞台 HTML 读取，打开期间完整截帧。
@@ -512,7 +513,7 @@ export function installFrameReuseProbe() {
     if (V.gl && V.gl.ready && glEl && !glEl.classList.contains('is-off')) return false;
     if (V._videoClips && V._videoClips.size > 0) return false;
     // Canvas 像素和 SVG 原生动画的当前状态不会反映在 HTML 中。
-    if (stage.querySelector('canvas:not(#gl),svg animate,svg animateTransform,svg animateMotion,svg set')) return false;
+    if (hasExternalPixels(stage)) return false;
     // 自定义元素还可能持有声明式封闭影子根，其内部状态无法通过 innerHTML 检查。
     if ([stage, ...stage.querySelectorAll('*')].some(el => shadowHosts.has(el) || el.shadowRoot || el.localName.includes('-'))) return false;
     // use 可绘制舞台外的 SVG 定义，这些内容不在舞台签名中。

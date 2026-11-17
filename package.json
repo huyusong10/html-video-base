@@ -37,7 +37,10 @@
     "./readme": "./README.md",
     "./readme.en": "./README.en.md",
     "./runtime/engine": "./runtime/base/js/engine.js",
-    "./runtime/css": "./runtime/base/css/base.css"
+    "./runtime/css": "./runtime/base/css/base.css",
+    "./server": "./tools/server.mjs",
+    "./audit": "./tools/audit.mjs",
+    "./content": "./tools/content.mjs"
   },
   "files": [
     "bin",

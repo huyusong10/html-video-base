@@ -35,6 +35,7 @@
     if (typeof raw === 'function') {
       const ctx = sc.ctx || (sc.ctx = V.makeCtx(sc, si));
       ctx.dur = sc.duration;
+      ctx.frame = V._frameRuntime.forScene(sc, si);
       if (frameCtx) {
         const { clock, alive, idle, playing, ended, pointer } = frameCtx;
         Object.assign(ctx, { clock, alive, idle, playing, ended, pointer, sceneClock: clock - sc.start });
@@ -73,6 +74,7 @@
       if (!layer || !layer._mounted || typeof layer.update !== 'function') continue;
       const f = computeLayerFrame(layer, sc, idx, lt);
       layer.update(f.state, {
+        frame: V.getFrameState(),
         t: now,
         lt,
         clock,

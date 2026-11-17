@@ -20,7 +20,7 @@
   let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0;
   let inBar = false, lastPtrX = -9999, lastPtrY = -9999;
   const ptr = (V.pointer = V.pointer || {
-    x: 960, y: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, inside: false, down: false,
+    x: 960, y: 540, rawX: 960, rawY: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, active: false, inside: false, down: false, overUI: false,
   });
   let wipeState = { name: '', handler: null, dom: null };
   const sandboxState = { active: false, entering: false, autoExitOnLast: true, returnTime: null, el: null, txtEl: null, backEl: null };
@@ -342,6 +342,7 @@
     sc.ctx.playing = playing && !scrubbing && !localeLoading;
     sc.ctx.ended = ended;
     sc.ctx.pointer = ptr;
+    sc.ctx.frame = V.getFrameState();
   }
 
   function runSceneUpdate(sc, lt, idle) {
@@ -355,7 +356,20 @@
     }
   }
 
-  function render(t, nextIdle) {
+  function publishFrame(sc, clock, idle, precise) {
+    ended = !playing && now >= V.duration - 0.01;
+    V._frameRuntime.begin(sc, V.scenes.indexOf(sc), now, clock, idle, {
+      playing: playing && !scrubbing && !localeLoading, ended, isRecord: RECORD, precise,
+    });
+  }
+
+  function completeFrameUI() {
+    if (RECORD) return;
+    updateUI();
+    V._frameRuntime.preview(V.getFrameState());
+  }
+
+  function render(t, nextIdle, precise = true) {
     if (!V.scenes.length || !Number.isFinite(t)) return;
     const idle = RECORD ? 0 : (nextIdle === undefined ? idleSec : nextIdle);
     idleSec = idle;
@@ -367,6 +381,7 @@
     V._clock = clock;
     if (RECORD || V.pptMode) V._checkpointsRuntime.syncRecordCheckpoints(now);
     const sc = sceneAt(now);
+    publishFrame(sc, clock, idle, precise);
     syncSceneCtxAndEndState(sc, idle);
     const lt = now - sc.start;
     const idx = V.scenes.indexOf(sc);
@@ -384,11 +399,12 @@
     if (!RECORD && !V.pptMode) V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: false, playing, scrubbing, pause, play });
     const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false, voiceOn: true, volume: 1 };
     V.emit('onRender', {
+      frame: V.getFrameState(),
       now, clock, alive: clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
       playing, scrubbing, sandbox: sandboxState.active, pointer: ptr,
       hasAudio: aState.hasAudio, isRecord: RECORD, muted: aState.muted, voiceOn: aState.voiceOn !== false, volume: aState.volume,
     });
-    if (!RECORD) updateUI();
+    completeFrameUI();
   }
 
   function showUiHold() {
@@ -548,7 +564,7 @@
       audioStallSec = 0;
       if (checkSceneLoop(mTime)) return;
       if (mTime >= V.duration - 0.01) finishPlayback();
-      else render(mTime, 0);
+      else render(mTime, 0, false);
       return;
     }
     audioStallSec += rawDt;
@@ -559,7 +575,7 @@
     lastTs = ts;
     if (shouldTickAmbientPause(current)) {
       ambientOffset += rawDt;
-      render(now, 0);
+      render(now, 0, false);
     }
   }
 
@@ -569,19 +585,20 @@
     if (checkSceneLoop(now + dt)) return;
     if (audioRt) audioRt.syncWithWallClock(now);
     if (now + dt >= V.duration - 0.002) finishPlayback();
-    else render(now + dt, 0);
+    else render(now + dt, 0, false);
   }
 
   function stepAmbientIdle(rawDt) {
     if (!shouldTickAmbientPause(current)) return;
     ambientOffset += rawDt;
     idleSec += rawDt;
-    render(now, idleSec);
+    render(now, idleSec, false);
   }
 
   function frame(ts) {
     const rawDt = lastFrameTs > 0 ? clamp((ts - lastFrameTs) / 1000, 0, 0.1) : 0;
     lastFrameTs = ts;
+    if (V._frameRuntime.isHeld()) { lastTs = ts; requestAnimationFrame(frame); return; }
     stepPointerSmoothing(rawDt);
     if (localeLoading) {
       lastTs = ts;
@@ -589,7 +606,7 @@
       stepAmbientIdle(rawDt);
     } else if (scrubbing) {
       lastTs = ts;
-      if (current && current.live) render(now, 0);
+      if (current && current.live) render(now, 0, false);
     } else if (playing) {
       if (audioRt && audioRt.canUseMasterClock()) advanceAudioClock(ts, rawDt);
       else advanceWallClock(ts);
@@ -1061,6 +1078,9 @@
   function applyStagePointerCoords(e) {
     if (RECORD || !stage || !Number.isFinite(e.clientX)) return;
     const r = stage.getBoundingClientRect();
+    ptr.active = true;
+    ptr.rawX = (e.clientX - r.left) / r.width * (V.stageWidth || 1920);
+    ptr.rawY = (e.clientY - r.top) / r.height * (V.stageHeight || 1080);
     if (!hitRect(r, e.clientX, e.clientY)) {
       resetPointerLeave();
       return;
@@ -1075,17 +1095,14 @@
   }
 
   function updatePointerFromEvent(bar, e) {
-    if (isEventOverBar(bar, e.target)) {
-      resetPointerLeave();
-      return;
-    }
     applyStagePointerCoords(e);
+    ptr.overUI = Boolean(isPointerOverBar(bar, e) || e.target?.closest?.('[data-video-ui],#search-modal,#help-modal'));
+    if (ptr.overUI) resetPointerLeave();
   }
 
   function wakeFromPointer(bar, uiCfg, e, force) {
     const overBar = isPointerOverBar(bar, e);
-    if (overBar) resetPointerLeave();
-    else applyStagePointerCoords(e);
+    updatePointerFromEvent(bar, e);
     if (!force && Math.abs(e.clientX - lastPtrX) < 1 && Math.abs(e.clientY - lastPtrY) < 1) return;
     lastPtrX = e.clientX;
     lastPtrY = e.clientY;
@@ -1124,6 +1141,8 @@
   function bindIdleWake(bar, uiCfg) {
     bindBlindBarGuard(bar, uiCfg);
     const clearOnLeave = () => {
+      ptr.active = false;
+      ptr.overUI = false;
       inBar = false;
       lastPtrX = -9999;
       lastPtrY = -9999;
@@ -1690,6 +1709,45 @@
     };
   }
 
+  function playerState() {
+    return Object.freeze({ now, playing: playing && !scrubbing && !localeLoading,
+      ended, sceneIndex: V.scenes.indexOf(current), mode: V.environment.mode,
+      sandbox: sandboxState.active, rate: playbackRate,
+      page: pptRt ? pptRt.getPageNo() : 0, totalPages: pptRt ? pptRt.getTotalPages() : 0 });
+  }
+
+  function goToScene(index, options = {}) {
+    const sceneIndex = typeof index === 'string' ? V.scenes.findIndex(sc => sc.id === index) : index;
+    const scene = V.scenes[sceneIndex];
+    if (!Number.isInteger(sceneIndex) || !scene) throw new RangeError(`Unknown scene: ${index}`);
+    const offset = options.offset === undefined ? 0.05 : Number(options.offset);
+    if (!Number.isFinite(offset)) throw new TypeError('Scene offset must be finite');
+    const target = scene.start + clamp(offset, 0, Math.max(0, scene.duration - 0.001));
+    if (options.sandbox && !V.pptMode && !RECORD) tryEgg(target, options.hint || scene.title);
+    else if (RECORD) render(target, 0);
+    else seek(target, true);
+    return playerState();
+  }
+
+  function exposePlayer() {
+    V.player = Object.freeze({
+      play: () => { if (!V.pptMode) play(); return playerState(); },
+      pause: () => { pause(); return playerState(); },
+      replay: () => { if (pptRt) pptRt.goToPage(0); else replay(); return playerState(); },
+      getState: playerState,
+      seek: t => { if (RECORD) render(t, 0); else seek(t, true); return playerState(); },
+      goToScene, tryAt: tryEgg, exitSandbox,
+      goToPage(page, options) {
+        if (!pptRt) throw new Error('PPT mode is not active');
+        if (!Number.isInteger(page) || page < 1 || page > pptRt.getTotalPages()) throw new RangeError('Unknown PPT page');
+        pptRt.goToPage(page - 1, options);
+        return playerState();
+      },
+      nextPage: () => pptRt && pptRt.stepBy(1),
+      prevPage: () => pptRt && pptRt.stepBy(-1),
+    });
+  }
+
   function syncInitialLocaleState() {
     if (V.captureVoice && V.voice) V.captureVoice(V.voice);
     if (V.syncDocLangAttrs) V.syncDocLangAttrs();
@@ -1750,7 +1808,16 @@
     initInitialAudioAndSubs(cfg, uiCfg, savedPrefs);
 
     V.seekTo = t => render(t, 0);
-    V.seekToAsync = async t => { render(t, 0); await waitStageAssets(); };
+    V.seekToAsync = async t => {
+      render(t, 0);
+      const snapshot = V.getFrameState();
+      const release = V._frameRuntime.hold(snapshot);
+      try {
+        await Promise.all([waitStageAssets(), V._frameRuntime.prepare(snapshot)]);
+        if (snapshot !== V.getFrameState()) throw new DOMException('Frame superseded', 'AbortError');
+        return snapshot;
+      } finally { release(); }
+    };
     V.setSubs = setSubs;
     V.setLang = setLang;
     V.setVolume = v => audioRt.setVolume(v);
@@ -1774,6 +1841,7 @@
       isDev: DEV,
       isRecord: RECORD,
     };
+    exposePlayer();
 
     if (RECORD) document.body.classList.add('record');
     else if (V.pptMode && pptRt) buildPptUI(uiCfg);
