@@ -576,6 +576,22 @@ function writeEncodedFrame(input, buffer, index) {
   });
 }
 
+async function writeSegmentFrames(page, input, fps, startSec, seg, reuseFrames, onFrame) {
+  await page.evaluate(() => { window.__prevStageSig = null; });
+  let prevBuf = null;
+  for (let f = seg.f0; f < seg.f1; f++) {
+    const sec = startSec + f / fps;
+    const same = reuseFrames
+      ? await page.evaluate(s => window.__seekAndDedupe(s), sec)
+      : (await page.evaluate(s => window.V.seekToAsync(s), sec), false);
+    const reused = Boolean(same && prevBuf);
+    const buf = reused ? prevBuf : await page.screenshot({ type: 'jpeg', quality: 92 });
+    prevBuf = buf;
+    await writeEncodedFrame(input, buf, seg.idx);
+    onFrame(reused);
+  }
+}
+
 async function renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, reuseFrames, onFrame) {
   const tmpOut = `${seg.partPath}.${process.pid}.tmp.mp4`;
   const ffArgs = [
@@ -588,21 +604,9 @@ async function renderSegmentToMp4(page, ffmpegBin, fps, startSec, seg, reuseFram
   try { ff = spawn(ffmpegBin, ffArgs, { stdio: ['pipe', 'inherit', 'inherit'] }); }
   catch (error) { throw new Error(`Cannot start ffmpeg seg ${seg.idx}: ${ffmpegBin}`, { cause: error }); }
   const finished = observeEncoderExit(ff);
-  const step = promise => duringEncoding(promise, finished, seg.idx);
   try {
-    await step(page.evaluate(() => { window.__prevStageSig = null; }));
-    let prevBuf = null;
-    for (let f = seg.f0; f < seg.f1; f++) {
-      const sec = startSec + f / fps;
-      const same = reuseFrames
-        ? await step(page.evaluate(s => window.__seekAndDedupe(s), sec))
-        : (await step(page.evaluate(s => window.V.seekToAsync(s), sec)), false);
-      const reused = Boolean(same && prevBuf);
-      const buf = reused ? prevBuf : await step(page.screenshot({ type: 'jpeg', quality: 92 }));
-      prevBuf = buf;
-      await step(writeEncodedFrame(ff.stdin, buf, seg.idx));
-      onFrame(reused);
-    }
+    // 每段只监听一次编码器退出，避免逐帧创建的竞争 Promise 保留已写出的截图。
+    await duringEncoding(writeSegmentFrames(page, ff.stdin, fps, startSec, seg, reuseFrames, onFrame), finished, seg.idx);
     ff.stdin.end();
     const result = await finished;
     if (result.error || result.code !== 0) throw encoderExitError(result, seg.idx);

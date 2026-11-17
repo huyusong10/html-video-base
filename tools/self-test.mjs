@@ -2256,19 +2256,30 @@ V.scene({duration:2,lines:[],build(root){
   }else{
     this.probe=V.u.h(this.mode==='html'?'img':'div',{class:'probe'+(this.mode==='pseudo'?' as-pseudo':'')});root.append(this.probe);
   }
-  const hidden=V.u.h('div',{style:{display:'none'}});
-  hidden.append(V.u.h('div',{style:{backgroundImage:'url("http://127.0.0.1:${assets.address().port}/'+this.mode+'/unused.svg")'}}));
-  root.append(hidden);
+  if(['stylesheet','adopted'].includes(this.mode)){
+    if(this.mode==='adopted'){
+      this.sheet=new CSSStyleSheet();document.adoptedStyleSheets=[...document.adoptedStyleSheets,this.sheet];
+    }else{
+      const style=document.createElement('style');document.head.append(style);this.sheet=style.sheet;
+    }
+    this.sheet.insertRule('.probe{background-image:none}');
+  }
+  if(!this.sheet){
+    const hidden=V.u.h('div',{style:{display:'none'}});
+    hidden.append(V.u.h('div',{style:{backgroundImage:'url("http://127.0.0.1:${assets.address().port}/'+this.mode+'/unused.svg")'}}));
+    root.append(hidden);
+  }
 },update(t){
   const prefix='http://127.0.0.1:${assets.address().port}/'+this.mode+'/';
   const src=t>=0.5?'later(green).svg':'initial(red).svg';
   if(this.mode==='svg'){this.probe.setAttribute('href',prefix+src);return;}
   if(this.mode==='html'){this.probe.src=prefix+src;return;}
+  if(this.sheet){this.sheet.cssRules[0].style.backgroundImage='url("'+prefix+src+'"),url("'+prefix+'layer.svg")';return;}
   this.probe.style.setProperty('--probe-image','url("'+prefix+src+'"), url("'+prefix+'layer.svg")');
 }});`);
   const page = await browser.newPage({ viewport: { width: 320, height: 180 } });
   try {
-    for (const mode of ['element', 'pseudo', 'html', 'svg']) {
+    for (const mode of ['element', 'pseudo', 'html', 'svg', 'stylesheet', 'adopted']) {
       await page.goto(`http://127.0.0.1:${port}/${id}/?record=1&image=${mode}`, { waitUntil: 'networkidle' });
       await page.waitForFunction(() => window.V?.seekToAsync);
       await page.evaluate(() => V.seekToAsync(V.scenes[1].start + 0.4));

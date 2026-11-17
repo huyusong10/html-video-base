@@ -4956,7 +4956,40 @@
     return cssImageDecodes.get(src);
   }
 
+  function cssMayUseImages(text) {
+    // 无类型的 attr(name) 只生成文本；保留带类型或回退值的声明继续检查。
+    const imageText = text.replace(/attr\(\s*[-\w]+\s*\)/gi, '');
+    return /(?:url|image-set|attr)\s*\(/i.test(imageText) || text.includes('\\') || text.includes('/*');
+  }
+
+  function stylesheetMayUseImages(sheet) {
+    try {
+      return Array.from(sheet.cssRules).some(rule => rule.type !== 5 && cssMayUseImages(rule.cssText));
+    } catch { return true; }
+  }
+
+  function stageMayUseCssImages() {
+    const roots = stage.shadowRoot ? [document, stage.shadowRoot] : [document];
+    for (let el = stage; el; el = el.parentElement) {
+      if (cssMayUseImages(el.style.cssText)) return true;
+    }
+    while (roots.length) {
+      const root = roots.pop();
+      const sheets = [...root.styleSheets, ...(root.adoptedStyleSheets || [])];
+      if (sheets.some(stylesheetMayUseImages)) return true;
+      const elements = root === document ? stage.querySelectorAll('*') : root.querySelectorAll('*');
+      for (const el of elements) {
+        if (cssMayUseImages(el.style.cssText)) return true;
+        if (el.shadowRoot) roots.push(el.shadowRoot);
+      }
+    }
+    return false;
+  }
+
   function waitCssImages() {
+    // 没有 CSS 图片来源时，避免逐帧读取每个元素及其伪元素的计算样式。
+    // 每次寻道重新检查声明，仍可发现动态内联样式、CSSOM 和影子根更新。
+    if (!stageMayUseCssImages()) return Promise.resolve();
     const sources = new Set();
     const pending = [stage];
     while (pending.length) {
