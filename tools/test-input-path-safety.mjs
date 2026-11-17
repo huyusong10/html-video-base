@@ -7,8 +7,6 @@ import { PKG_ROOT, resolveFfmpeg, resolvePython, resolveLangMediaPaths, localize
 const base = path.resolve(process.argv[2]);
 fs.mkdirSync(base, { recursive: true });
 const cli = path.join(PKG_ROOT, 'bin/html-video.mjs');
-const python = resolvePython(undefined, true);
-const ffmpeg = resolveFfmpeg();
 const cases = [
   { name: 'build-lang', mode: 'build', id: 'demo', lang: '../../../keep' },
   { name: 'mix-lang', mode: 'mix', id: 'demo', lang: '../../../keep' },
@@ -29,6 +27,12 @@ for (const invalid of ['../../keep', '..\\..\\keep', '.', '..', '... ', '\0en'])
   assert.throws(() => loadVideoSandbox(base, 'demo', { lang: invalid }), /Invalid language code/);
   assert.throws(() => loadVideoSandbox(base, invalid), /Invalid video id/);
 }
+if (process.argv.includes('--quick')) {
+  console.log('Input path component validation PASSED.');
+  process.exit(0);
+}
+const python = resolvePython(undefined, true);
+const ffmpeg = resolveFfmpeg();
 for (const spec of cases) {
   const project = path.join(base, spec.name, 'nested/project');
   const videoDir = path.resolve(project, 'videos', spec.id);

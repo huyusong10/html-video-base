@@ -53,7 +53,8 @@
   "scripts": {
     "assemble": "node tools/assemble-engine.mjs",
     "lint:cc": "node tools/check-complexity.mjs",
-    "test": "node tools/assemble-engine.mjs --check && node tools/check-complexity.mjs && node tools/self-test.mjs"
+    "test": "node tools/assemble-engine.mjs --check && node tools/check-complexity.mjs && node tools/self-test.mjs --quick",
+    "test:full": "node tools/assemble-engine.mjs --check && node tools/check-complexity.mjs && node tools/self-test.mjs"
   },
   "dependencies": {
     "acorn": "^8.19.0",

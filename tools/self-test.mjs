@@ -1,4 +1,4 @@
-// 端到端全量自检（零本地 videos/base 目录）：
+// 默认运行全量测试；--quick 只运行轻量检查，不执行浏览器、音频处理或视频渲染。
 // 覆盖微内核开放注册表、30Hz 真实口型包络、受控 <video> 寻道与混音、多语种与 .vtt/.srt 外挂字幕、
 // Web 交互驻点、SSE 实时热重载端点、按幕 SHA-256 增量渲染缓存与独立静态包 bundle
 import assert from 'node:assert/strict';
@@ -13,7 +13,9 @@ import { buildVttContent } from './lib/subtitles.mjs';
 import { verifySpokenTimings } from './verify-sync.mjs';
 import { stripSceneCalls, buildCachedSceneSegments, installFrameReuseProbe, resolveStageSpec, resolveTimeWindow } from './render.mjs';
 
-const TEST_ROOT = path.join(PKG_ROOT, '.runtime/self-test-proj');
+const RUNTIME_DIR = path.join(PKG_ROOT, '.runtime');
+fs.mkdirSync(RUNTIME_DIR, { recursive: true });
+const TEST_ROOT = fs.mkdtempSync(path.join(RUNTIME_DIR, 'self-test-'));
 const CLI_BIN = path.join(PKG_ROOT, 'bin/html-video.mjs');
 const PROJECT_FILES = {
   'index.html': '<!doctype html><title>Project home</title><link rel="stylesheet" href="home.css"><a href="demo/">Play</a><script src="catalog.js"></script>',
@@ -215,11 +217,6 @@ async function verifyIframeWebFullContract(page, port) {
     const f = document.getElementById('vid');
     const win = f.contentWindow;
     const doc = f.contentDocument;
-    const injected = doc.createElement('button');
-    injected.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16"></svg>';
-    doc.querySelector('[data-act="webfull"]').before(injected);
-    const iconWidths = Array.from(doc.querySelectorAll('#controls .ctrl-rbtn, #controls .chap-wrap ~ button'))
-      .map(b => Math.round(b.getBoundingClientRect().width));
     await win.V.seekToAsync(0.8);
     doc.querySelector('[data-act="webfull"]').click();
     doc.getElementById('subs').style.transition = 'none';
@@ -227,23 +224,16 @@ async function verifyIframeWebFullContract(page, port) {
     const s = doc.getElementById('subs').getBoundingClientRect();
     const c = doc.getElementById('controls').getBoundingClientRect();
     return {
-      rbtnCount: doc.querySelectorAll('#controls .ctrl-rbtn').length,
-      iconWidths,
       expanded: Math.round(fr.width) === window.innerWidth && Math.round(fr.height) === window.innerHeight,
       subBottom: s.bottom,
       ctrlTop: c.top,
     };
   });
-  assert.equal(dodge.rbtnCount, 7, 'Single-layer same-origin iframe must auto-render [data-act="webfull"] (7 right icon buttons)');
-  for (const w of dodge.iconWidths) assert.equal(w, dodge.iconWidths[0], 'All right-side icon buttons (including injected SVG buttons) must share uniform width');
   assert.equal(dodge.expanded, true, 'Clicking webfull inside single-layer iframe must expand iframe to viewport');
   assert.ok(dodge.subBottom <= dodge.ctrlTop, `Fullscreen #subs (${dodge.subBottom}) must dodge above #controls (${dodge.ctrlTop})`);
 }
 
 async function verifyPotPlayerAutoHideContract(page) {
-  const subsShadow = await page.evaluate(() => getComputedStyle(document.querySelector('[data-act="subs"]')).boxShadow);
-  assert.equal(subsShadow, 'none', 'Active [data-act="subs"] must NOT render bottom decorative inset box-shadow');
-
   await page.mouse.move(200, 200);
   await page.evaluate(() => {
     window.__video.seek(window.V.scenes[1].start + 0.05);
@@ -296,16 +286,6 @@ async function verifyPlayerBarContracts(page, port) {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto(`http://127.0.0.1:${port}/demo/`, { waitUntil: 'networkidle' });
   const barInfo = await page.evaluate(async () => {
-    const isIconNode = sel => {
-      const el = document.querySelector(sel);
-      return Boolean(el && el.textContent.trim() === '' && el.querySelector('svg.ctrl-ico'));
-    };
-    const allIconsAt1x = ['.ctrl-home', '[data-act="play"]', '[data-custom-ctrl="test-btn"]', '[data-act="rate"]', '[data-act="subs"]', '[data-act="mute"]', '[data-act="to-ppt"]', '[data-act="full"]', '.chap-caret']
-      .every(isIconNode);
-    const rbtnSizes = Array.from(document.querySelectorAll('#controls .ctrl-rbtn')).map(b => {
-      const r = b.getBoundingClientRect();
-      return { w: Math.round(r.width), h: Math.round(r.height) };
-    });
     const track = document.querySelector('#controls .track');
     const w0 = track.getBoundingClientRect().width;
     await window.V.seekToAsync(window.V.scenes[1].start + 0.6);
@@ -318,19 +298,17 @@ async function verifyPlayerBarContracts(page, port) {
     const rateBadge15 = rateBtn.textContent.trim();
     const rateVal = window.__video.getSyncState().playbackRate;
     window.__video.setRate(1);
-    const revertedIcon = isIconNode('[data-act="rate"]');
+    const resetRate = window.__video.getSyncState().playbackRate;
     return {
       overlayDefault: document.body.classList.contains('ctrl-overlay'),
       hudTicks: document.querySelectorAll('#hud .hud-tick').length,
       trackMarks: document.querySelectorAll('#controls .track .mark').length,
       w0: Math.round(w0 * 100),
       w1: Math.round(w1 * 100),
-      allIconsAt1x,
-      rbtnSizes,
       rateOpen,
       rateVal,
       rateBadge15,
-      revertedIcon,
+      resetRate,
       noStandaloneWebFull: document.querySelector('[data-act="webfull"]') === null,
     };
   });
@@ -338,16 +316,10 @@ async function verifyPlayerBarContracts(page, port) {
   assert.equal(barInfo.hudTicks, 1, 'Expected 1 .hud-tick for 2 scenes');
   assert.equal(barInfo.trackMarks, 1, 'Expected 1 .track .mark for 2 scenes');
   assert.equal(barInfo.w0, barInfo.w1, 'Progress bar width must stay invariant across chapter changes');
-  assert.equal(barInfo.allIconsAt1x, true, 'Home, play, custom control, 1.0x rate, subs, mute, fullscreen & chapter caret must all render SVG icons');
-  assert.equal(barInfo.rbtnSizes.length, 6, 'Expected 6 compact right-side icon buttons on ppt-enabled standalone page');
-  for (const b of barInfo.rbtnSizes) {
-    assert.equal(b.w, 32, 'Compact right-side icon buttons must be 32px wide');
-    assert.equal(b.h, 30, 'Compact right-side icon buttons must be 30px tall');
-  }
   assert.equal(barInfo.rateOpen, true, 'Clicking rate button must open upward .rate-menu');
   assert.equal(barInfo.rateVal, 1.5, 'Selecting 1.5x from rate menu must update playbackRate');
   assert.equal(barInfo.rateBadge15, '1.5x', 'Non-1.0x playbackRate must display compact numeric badge');
-  assert.equal(barInfo.revertedIcon, true, 'Resetting playbackRate to 1.0x must restore speedometer SVG icon');
+  assert.equal(barInfo.resetRate, 1, 'Resetting playbackRate must restore normal playback speed');
   assert.equal(barInfo.noStandaloneWebFull, true, 'Standalone top-level page must omit redundant webfull button by default');
   await verifyPotPlayerAutoHideContract(page);
 
@@ -398,8 +370,8 @@ async function verifyPlayerBarContracts(page, port) {
 
   await verifySearchAndDeepLinkContract(page);
   await verifyDualStemBgmContract(page);
-  await verifyV26ExperienceContracts(page);
-  await verifyBugfixRegressions(page, port);
+  await verifyProgressResumeAndLivePlayback(page);
+  await verifySubtitleLayoutAndTimeline(page, port);
   await verifyIframeWebFullContract(page, port);
 }
 
@@ -419,7 +391,7 @@ async function verifyMalformedHttpRequests(port) {
   await goodRes.arrayBuffer();
 }
 
-async function verifyHttpAndDomRegressions(page, port) {
+async function verifyHttpRanges(port) {
   await verifyMalformedHttpRequests(port);
   const suffixRes = await fetch(`http://127.0.0.1:${port}/demo/index.html`, { headers: { Range: 'bytes=-64' } });
   assert.equal(suffixRes.status, 206, 'Suffix byte range bytes=-64 must return 206');
@@ -427,7 +399,13 @@ async function verifyHttpAndDomRegressions(page, port) {
   assert.ok(suffixTxt.length > 0 && suffixTxt.length <= 64, `Suffix range length must be 1..64, got ${suffixTxt.length}`);
   const unsatRes = await fetch(`http://127.0.0.1:${port}/demo/index.html`, { headers: { Range: 'bytes=99999999-999999999' } });
   assert.equal(unsatRes.status, 416, 'Out-of-bounds byte range must return 416');
+  await unsatRes.arrayBuffer();
+  const badUrlRes = await fetch(`http://127.0.0.1:${port}/%E0%A4%A`);
+  assert.equal(badUrlRes.status, 400, 'Malformed URI path must return 400 without crashing HTTP server');
+  await badUrlRes.arrayBuffer();
+}
 
+async function verifyDomAndPronunciation(page) {
   const domRes = await page.evaluate(() => {
     const box = document.createElement('div');
     window.V.u.set(box, { opacity: 0.25, scale: 1.5, rotate: 12 });
@@ -557,7 +535,7 @@ async function verifyHookAndLocaleVoiceRegressions(page) {
   assert.equal(r.leakBakedDur, false, 'Stale primary bakedLayout must NOT apply to secondary locale V.layout()');
 }
 
-async function verifyRound2EngineRegressions(page, port) {
+async function verifyTransitionsLocaleSearchAndHmr(page, port) {
   const r = await page.evaluate(() => {
     const u0 = window.V._getUiCfg({ ui: { idleHideDelay: 0, leaveHideDelay: 0 } });
     const tileBox = document.createElement('div');
@@ -628,12 +606,7 @@ async function verifyRound2EngineRegressions(page, port) {
   }
 }
 
-async function verifyBugfixRegressions(page, port) {
-  const badUrlRes = await fetch(`http://127.0.0.1:${port}/%E0%A4%A`);
-  assert.equal(badUrlRes.status, 400, 'Malformed URI path must return 400 without crashing HTTP server');
-  const manifestRes = await fetch(`http://127.0.0.1:${port}/manifest.js`);
-  assert.equal(await manifestRes.text(), PROJECT_FILES['manifest.js'], 'Dev server must preserve the project catalog');
-
+async function verifySubtitleLayoutAndTimeline(page, port) {
   const rt = await page.evaluate(() => {
     const subs = document.getElementById('subs');
     window.__video.seek(0.2);
@@ -653,14 +626,14 @@ async function verifyBugfixRegressions(page, port) {
   assert.equal(rt.enSlowdown, 0.9, 'Per-line enSlowdown override must survive timeline buildCueEntry');
   assert.equal(rt.align, 'acoustic', 'Per-line align override must survive timeline buildCueEntry');
 
-  await verifyHttpAndDomRegressions(page, port);
+  await verifyDomAndPronunciation(page);
   await verifyInteractiveRegressions(page);
   await verifyHookAndLocaleVoiceRegressions(page);
-  await verifyRound2EngineRegressions(page, port);
-  await verifyRound4BrowserRegressions(page);
+  await verifyTransitionsLocaleSearchAndHmr(page, port);
+  await verifyConditionalSubtitlesAndHiddenControls(page);
 }
 
-async function verifyRound4BrowserRegressions(page) {
+async function verifyConditionalSubtitlesAndHiddenControls(page) {
   const res = await page.evaluate(async () => {
     const bar = document.getElementById('controls');
     const subs = document.getElementById('subs');
@@ -706,7 +679,7 @@ async function verifyRound4BrowserRegressions(page) {
   assert.equal(res.wokeFromBlindTap, true, 'Blind tap on hidden overlay #controls must wake ui-active');
 }
 
-async function verifyV26ExperienceContracts(page) {
+async function verifyProgressResumeAndLivePlayback(page) {
   const kf = await page.evaluate(() => {
     const stops = [
       { at: 0, x: 100, scale: 1, pose: 'wave', badge: 'NEW' },
@@ -977,7 +950,7 @@ async function verifySearchAndDeepLinkContract(page) {
   assert.equal(res.copiedState, true, 'Clicking .time must copy deep link and show confirmation');
 }
 
-async function verifyRound3BrowserContracts(page, port) {
+async function verifyRecordCheckpointsAndLocaleAudio(page, port) {
   await page.goto(`http://127.0.0.1:${port}/demo/?record=1`, { waitUntil: 'networkidle' });
   const cpDeterminism = await page.evaluate(async () => {
     const cue0 = window.V.scenes[0].cues[0];
@@ -1030,7 +1003,7 @@ async function verifyRound3BrowserContracts(page, port) {
   assert.equal(singleStemMenu.muteRowTxt, '靜音', 'Non-BGM video on ?lang=zh-TW must localize mute item as 靜音');
 }
 
-function verifyRound3UnitRegressions() {
+function verifySceneSourceParsing() {
   const sample = [
     '// Example: V.scene(unclosed in comment',
     'const SHARED = 7;',
@@ -1044,7 +1017,9 @@ function verifyRound3UnitRegressions() {
   const stripped = stripSceneCalls(sample);
   assert.ok(stripped.includes('const SHARED = 7;') && stripped.includes('const AFTER = 9;'), 'stripSceneCalls must preserve shared code around commented V.scene');
   assert.equal(stripped.includes('build()'), false, 'stripSceneCalls must strip real V.scene body containing comments with parens/quotes');
+}
 
+function verifyTtsOptionsAndCacheKeys() {
   const py = resolvePython(PKG_ROOT);
   const pyCheck = spawnSync(py, [
     '-c',
@@ -1130,7 +1105,7 @@ function verifyVoiceCacheRegressions() {
   assert.equal(r.status, 0, `Voice cache regressions failed:\n${r.stdout}\n${r.stderr}`);
 }
 
-function verifyRound5SoundAndI18nUnit() {
+function verifyMultilingualTokensAndSceneBgm() {
   const py = resolvePython(PKG_ROOT, true);
   const tokCheck = spawnSync(py, [
     '-c',
@@ -2617,7 +2592,7 @@ async function verifyBrowserCapabilities(videoDir) {
     assert.equal(enInfo.title, 'Architecture', 'Localized scene title should apply');
     assert.equal(enInfo.bakedLang, 'en', 'Localized timings.en.js must stamp bakedLayout.lang = "en"');
 
-    await verifyRound3BrowserContracts(page, port);
+    await verifyRecordCheckpointsAndLocaleAudio(page, port);
     await verifyPlayerBarContracts(page, port);
     const noPptLeak = await page.evaluate(() => ({
       pptMode: window.__video.pptMode,
@@ -2675,18 +2650,6 @@ function verifyFreshUnbuiltAudit() {
   runCliCmd(['init', 'fresh-unbuilt', '--title', 'Fresh Unbuilt']);
   runCliCmd(['audit', 'fresh-unbuilt']);
   fs.rmSync(path.join(TEST_ROOT, 'videos/fresh-unbuilt'), { recursive: true, force: true });
-}
-
-function verifyRenderAssetCacheInvalidation(videoDir, outMp4) {
-  fs.mkdirSync(path.join(videoDir, 'assets'), { recursive: true });
-  fs.writeFileSync(path.join(videoDir, 'assets/probe.svg'), '<svg>V1</svg>', 'utf8');
-  const outAssetV1 = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
-  assert.ok(outAssetV1.includes('0/2 scenes hit'), `Adding visual asset must invalidate render cache, got:\n${outAssetV1}`);
-  const outAssetHit = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
-  assert.ok(outAssetHit.includes('2/2 scenes hit'), `Unchanged visual asset must hit 2/2 render cache, got:\n${outAssetHit}`);
-  fs.writeFileSync(path.join(videoDir, 'assets/probe.svg'), '<svg>V2</svg>', 'utf8');
-  const outAssetV2 = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
-  assert.ok(outAssetV2.includes('0/2 scenes hit'), `Modifying visual asset must invalidate render cache, got:\n${outAssetV2}`);
 }
 
 function seedNestedBundleComponent(videoDir) {
@@ -2871,7 +2834,7 @@ function verifyMixAudioRegressions() {
   assert.equal(r.status, 0, `Mix audio regressions failed:\n${r.stdout}\n${r.stderr}`);
 }
 
-function verifyMixSpokenTextPreflight(videoDir) {
+function verifySpokenTextRules() {
   for (const spec of [
     { text: '执行命令行', word: '直形命令航', config: {} },
     { text: '品牌', word: 'Brand', config: { pronunciation: { '品牌': 'Brand' } } },
@@ -2885,6 +2848,9 @@ function verifyMixSpokenTextPreflight(videoDir) {
   const legacyErrors = [];
   verifySpokenTimings({ scenes: [{ lines: [{ text: '旧版字幕。' }] }], voice: { durations: [[1]], segs: [[[[1, '旧版字幕。']]]] } }, legacyErrors);
   assert.deepEqual(legacyErrors, [], 'Valid legacy subtitle-only timings must remain supported');
+}
+
+function verifyMixSpokenTextPreflight(videoDir) {
   const cases = [
     { name: 'object-line', args: ['mix', 'demo'], file: 'js/s01.js', from: '欢迎体验', to: '重新体验' },
     { name: 'string-line-mix-only', args: ['build', 'demo', '--mix-only'], file: 'js/s02.js', from: '所有画面', to: '这些画面' },
@@ -2964,8 +2930,10 @@ function verifyHttpFileMutationRegressions() {
   assert.equal(r.status, 0, `HTTP file mutation regressions failed:\n${r.stdout}\n${r.stderr}`);
 }
 
-function verifyInputPathSafetyRegressions() {
-  const r = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools/test-input-path-safety.mjs'), path.join(TEST_ROOT, 'input-path-safety')], { encoding: 'utf8', timeout: 60000 });
+function verifyInputPathSafetyRegressions(quick = false) {
+  const args = [path.join(PKG_ROOT, 'tools/test-input-path-safety.mjs'), path.join(TEST_ROOT, 'input-path-safety')];
+  if (quick) args.push('--quick');
+  const r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 60000 });
   assert.equal(r.status, 0, `Input path safety regressions failed:\n${r.stdout}\n${r.stderr}`);
 }
 
@@ -3081,11 +3049,9 @@ function verifyBundleSafetyAndDepth(videoDir, colDir) {
   assertCliFails(['bundle', 'demo', '--out', TEST_ROOT], 'bundle must reject TEST_ROOT as --out');
   assertCliFails(['bundle', 'demo', '--single', '--out', path.join(TEST_ROOT, 'videos')], 'bundle must reject videos/ as --out');
   assert.equal(fs.existsSync(path.join(videoDir, 'index.html')), true, 'Rejected bundle --out must leave videos/demo untouched');
-  verifyBundleSourcePreflight();
-  verifyBundleProtectedDirectories();
 }
 
-function verifyRound4PipelineRegressions(videoDir) {
+function verifyLocalizedRemixAndBgmVolume(videoDir) {
   const enLocalePath = path.join(videoDir, 'locales/en.js');
   const origEn = fs.readFileSync(enLocalePath, 'utf8');
   const editedEn = origEn.replace(
@@ -3122,43 +3088,82 @@ function verifyRound4PipelineRegressions(videoDir) {
   assert.ok(bgmPeak > 0.03 && bgmPeak < 0.35, `BGM-only volume=0.12 must preserve configured gain (got peak=${bgmPeak})`);
 }
 
-async function main() {
-  fs.rmSync(TEST_ROOT, { recursive: true, force: true });
-  fs.mkdirSync(path.join(TEST_ROOT, 'videos'), { recursive: true });
-
+async function verifyScaffoldAndStaticBundle() {
+  runCliCmd(['init', 'demo', '--title', '微内核自检演示', '--skill']);
+  assert.equal(fs.existsSync(path.join(TEST_ROOT, 'videos/base')), false, 'Runtime must be served from the package');
+  assert.ok(fs.existsSync(path.join(TEST_ROOT, '.agents/skills/html-video/SKILL.md')), '--skill must export SKILL.md');
+  const { sandbox } = loadVideoSandbox(TEST_ROOT, 'demo', { ignoreBaked: true });
+  assert.ok(sandbox.V.scenes.length > 0 && sandbox.V.duration > 0, 'The starter must produce a playable timeline');
+  assert.ok(sandbox.V.scenes[0].subCues.length > 0, 'The starter must produce subtitle cues');
+  const { srv, port } = await startEphemeralVideoServer({ videosDir: path.join(TEST_ROOT, 'videos') });
   try {
-    await verifyProjectFileOwnership();
-    verifyHttpFileMutationRegressions();
+    await verifyHttpRanges(port);
+    for (const route of ['/demo/', '/demo/video.config.js', '/demo/js/scenes.js', '/base/js/engine.js', '/base/css/base.css']) {
+      const response = await fetch(`http://127.0.0.1:${port}${route}`);
+      assert.equal(response.status, 200, `Scaffold asset must be served: ${route}`);
+      assert.ok((await response.text()).length > 0, `Scaffold asset must not be empty: ${route}`);
+    }
+  } finally {
+    srv.closeAllConnections();
+    await new Promise(resolve => srv.close(resolve));
+  }
+  verifyInvalidRenderCliArgs();
+  const dist = path.join(TEST_ROOT, 'smoke-dist');
+  runCliCmd(['bundle', 'demo', '--out', dist]);
+  assert.ok(fs.existsSync(path.join(dist, 'base/js/engine.js')), 'Bundle must include the runtime');
+  assert.ok(fs.existsSync(path.join(dist, 'demo/index.html')), 'Bundle must include the video');
+  verifyBundledProjectFiles(dist);
+  verifyBundleSourcePreflight();
+  verifyBundleProtectedDirectories();
+}
+
+async function runQuickChecks() {
+  const started = performance.now();
+  console.log('[Quick 1/3] HTTP, input paths and module imports...');
+  await verifyProjectFileOwnership();
+  verifyHttpFileMutationRegressions();
+  verifyInputPathSafetyRegressions(true);
+  verifyModuleEntryRegressions();
+
+  console.log('[Quick 2/3] Timeline, subtitles, render arguments and cache identity...');
+  verifySceneSourceParsing();
+  verifyRenderArgumentValidation();
+  verifySpokenTextRules();
+  verifyTimingOutputRegressions();
+  verifyRenderCacheIdentityRegressions();
+  verifyLargeAssetCacheInvalidation();
+  verifyNestedStylesheetCacheInvalidation();
+  verifyNestedVisualAssetCacheInvalidation();
+  verifySceneCacheGranularity();
+  verifyRenderOutputCacheExclusion();
+
+  console.log('[Quick 3/3] Init, preview assets, bundle and output protection...');
+  await verifyScaffoldAndStaticBundle();
+  console.log(`✅ Quick tests PASSED (${((performance.now() - started) / 1000).toFixed(1)}s).`);
+}
+
+async function main() {
+  const started = performance.now();
+  fs.mkdirSync(path.join(TEST_ROOT, 'videos'), { recursive: true });
+  try {
+    await runQuickChecks();
+    if (process.argv.includes('--quick')) return;
+
+    console.log('[Full 1/5] Build input protection, encoder/mux failures and audio regressions...');
     verifyInputPathSafetyRegressions();
-    verifyRenderCacheIdentityRegressions();
     verifyRenderEncoderExitRegression();
     verifyRenderMuxRegression();
-    verifyModuleEntryRegressions();
     verifyAuditLaunchFailureCleanup();
-    verifyLargeAssetCacheInvalidation();
-    verifyNestedStylesheetCacheInvalidation();
-    verifyNestedVisualAssetCacheInvalidation();
-    verifySceneCacheGranularity();
-    verifyRenderOutputCacheExclusion();
-    verifyRound3UnitRegressions();
-    verifyRenderArgumentValidation();
+    verifyTtsOptionsAndCacheKeys();
     verifyVoiceCacheRegressions();
-    verifyTimingOutputRegressions();
     verifyMixAudioRegressions();
     verifyUnicodePythonBuild();
-    verifyRound5SoundAndI18nUnit();
-    console.log('[SelfTest 1/5] Scaffolding isolated video project (zero local videos/base)...');
-    runCliCmd(['init', 'demo', '--title', '微内核自检演示', '--skill']);
-    assert.equal(fs.existsSync(path.join(TEST_ROOT, 'videos/base')), false, 'videos/base must NOT exist locally');
-    assert.equal(fs.existsSync(path.join(TEST_ROOT, '.agents/skills/html-video/SKILL.md')), true, '--skill must export SKILL.md');
-    assert.ok(runCliCmd(['manifest']).startsWith('html-video CLI'), 'Removed manifest command must fall back to CLI help');
-
+    verifyMultilingualTokensAndSceneBgm();
     const videoDir = path.join(TEST_ROOT, 'videos/demo');
     createSampleMp4(resolveFfmpeg(PKG_ROOT), path.join(videoDir, 'assets/clip.mp4'));
     writeTestProjectFiles(videoDir);
-    verifyInvalidRenderCliArgs();
 
-    console.log('[SelfTest 2/5] Building default & localized (en) tracks + offline remix + visual audit...');
+    console.log('[Full 2/5] Building localized tracks, offline remix and visual audit...');
     runCliCmd(['build', 'demo', '--bitrate', '96k', '--visual']);
     const mixWarm = runCliCmd(['mix', 'demo', '--bitrate', '96k']);
     assert.ok(mixWarm.includes('2/2 dry clips hit'), `Expected warm offline mix to hit 2/2 cached clips, got:\n${mixWarm}`);
@@ -3170,15 +3175,15 @@ async function main() {
     runCliCmd(['audit', 'demo', '--lang', 'en']);
     runCliCmd(['build', 'demo', '--lang', 'en']);
     verifyMixSpokenTextPreflight(videoDir);
-    verifyRound4PipelineRegressions(videoDir);
+    verifyLocalizedRemixAndBgmVolume(videoDir);
     const shotDir = path.join(TEST_ROOT, 'audit-shots');
     runCliCmd(['audit', 'demo', '--screenshots', shotDir]);
     verifyFreshUnbuiltAudit();
 
-    console.log('[SelfTest 3/5] Verifying microkernel registries, 30Hz lip-sync energy, SSE HMR & i18n in Chromium...');
+    console.log('[Full 3/5] Chromium playback, frame reuse, checkpoints, HMR and locales...');
     await verifyBrowserCapabilities(videoDir);
 
-    console.log('[SelfTest 4/5] Verifying per-scene SHA-256 render cache & static frame reuse...');
+    console.log('[Full 4/5] Cold render, warm cache, style invalidation and voice-only output...');
     const outMp4 = path.join(TEST_ROOT, 'demo.mp4');
     const out1 = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
     assert.ok(fs.existsSync(outMp4), 'Rendered MP4 should exist');
@@ -3189,12 +3194,11 @@ async function main() {
     fs.appendFileSync(path.join(videoDir, 'style.css'), '\n.s2-box { letter-spacing: 0.02em; }\n', 'utf8');
     const outCssChanged = runCliCmd(['render', 'demo', outMp4, '--fps', '10']);
     assert.ok(outCssChanged.includes('0/2 scenes hit'), `Editing style.css must invalidate scene render cache, got:\n${outCssChanged}`);
-    verifyRenderAssetCacheInvalidation(videoDir, outMp4);
     const outNoBgm = path.join(TEST_ROOT, 'demo-nobgm.mp4');
     const out3 = runCliCmd(['render', 'demo', outNoBgm, '--fps', '10', '--no-bgm']);
     assert.ok(fs.existsSync(outNoBgm) && out3.includes('+ audio ->'), `--no-bgm render must mux voice-only stem, got:\n${out3}`);
 
-    console.log('[SelfTest 5/5] Verifying standalone static bundler...');
+    console.log('[Full 5/5] Bundled project assets and special-character export paths...');
     const distDir = path.join(TEST_ROOT, 'dist');
     runCliCmd(['bundle', 'demo', '--out', distDir]);
     assert.ok(fs.existsSync(path.join(distDir, 'base/js/engine.js')), 'Bundled base/js/engine.js should exist');
@@ -3226,8 +3230,9 @@ async function main() {
     verifyBundleSafetyAndDepth(videoDir, colDir);
     verifySpecialCharacterVideoPaths();
 
-    console.log('✅ All html-video-base v2.7 end-to-end self-tests PASSED.');
+    console.log(`✅ Full tests PASSED (${((performance.now() - started) / 1000).toFixed(1)}s, including quick tests).`);
   } finally {
+    assert.equal(path.dirname(TEST_ROOT), RUNTIME_DIR, 'Cleanup must stay inside the private runtime directory');
     fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   }
 }

@@ -43,6 +43,20 @@ function imageScene(src) {
   return `V.scene({duration:1,lines:[],build(root){root.append(V.u.h('img',{src:${JSON.stringify(src)}}));},update(){}});`;
 }
 
+function verifyVisualAssetChanges() {
+  const { dir, key } = createFixture('asset-changes', imageScene('assets/probe.svg'));
+  const asset = path.join(dir, 'assets/probe.svg');
+  const missing = key();
+  fs.writeFileSync(asset, svg);
+  const added = key();
+  assert.notEqual(added, missing, 'Adding a visual asset must invalidate its scene cache');
+  assert.equal(key(), added, 'Unchanged visual assets must retain their cache identity');
+  fs.writeFileSync(asset, svg.replace('red', 'blue'));
+  assertChanged(key, added, 'Modifying a visual asset must invalidate its scene cache');
+  fs.unlinkSync(asset);
+  assert.equal(key(), missing, 'Removing a visual asset must restore the original cache identity');
+}
+
 function verifyAssetOwnership() {
   const { dir, key } = createFixture('asset-owner', imageScene('../assets/owner.svg'));
   fs.writeFileSync(path.join(shared, 'owner.svg'), svg);
@@ -198,6 +212,7 @@ function verifyPreviousLayerDefinition(closure, blendDur) {
 }
 
 verifySceneFieldBoundaries();
+verifyVisualAssetChanges();
 verifyAssetOwnership();
 verifyFileBoundaries(false);
 verifyFileBoundaries(true);

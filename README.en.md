@@ -205,9 +205,21 @@ All manuals and engineering specifications are bundled inside `node_modules/html
 
 ## Quality Gates (Repo Development)
 
-All JS/MJS and Python functions in this repository enforce cyclomatic complexity `< 15` (`<= 14`):
+Choose the test level by the behavior your change affects:
+
+| Command | When to run | Coverage |
+| :--- | :--- | :--- |
+| `npm test` | Basic checks after small changes | Engine assembly, complexity, arguments and paths, timeline and subtitles, cache identity, and init/preview/bundle smoke checks |
+| `npm run test:full` | Core behavior changes, larger refactors, and before release | All quick checks, plus Chromium interactions and frame reuse, audio processing, real video export, and failure recovery |
+
+Documentation, wording, and local style changes normally use `npm test`. Run `npm run test:full` when changing the timeline, player interactions, caching, rendering, mixing, or file replacement behavior, even for a one-line change.
+
+Quick tests require Node.js and a basic Python environment. Full tests also require the toolchain's Python audio dependencies, FFmpeg, and Chromium. Each run uses a separate temporary directory and removes it on completion.
+
+For a specific fix, run the relevant regression file in addition to quick checks. This example checks render cache identity only; the final argument must name a new temporary directory:
 
 ```bash
-npm run lint:cc
-npm test
+node tools/test-render-cache-identity.mjs .runtime/cache-check-1
 ```
+
+All JS/MJS and Python functions enforce cyclomatic complexity `< 15` (`<= 14`). Both test levels include this check, which can also be run with `npm run lint:cc`.
