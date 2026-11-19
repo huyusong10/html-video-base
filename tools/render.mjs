@@ -269,25 +269,76 @@ function hashEntryScripts(h, videoDir, sourceInfo) {
   }
 }
 
+function cssImportPaths(css) {
+  // Skip quoted strings and comments so text containing "@import" is not treated as a dependency.
+  const comment = /\/\*[\s\S]*?\*\//.source;
+  const escape = /\\(?:[0-9a-f]{1,6}(?:\r\n|[ \t\r\n\f])?|\r\n|[\s\S])/.source;
+  const quoted = String.raw`"(?:${escape}|[^"\\])*"|'(?:${escape}|[^'\\])*'`;
+  const unquoted = String.raw`(?:${escape}|[^)\s"'\\])+`;
+  const imports = new RegExp(
+    String.raw`${comment}|${quoted}|@import\b(?:\s|${comment})*(?:(${quoted})|url\(\s*(${quoted}|${unquoted})\s*\))`, 'gi');
+  const paths = [];
+  for (const [, direct, url] of css.matchAll(imports)) {
+    const value = (direct ?? url)?.replace(/^(["'])([\s\S]*)\1$/, '$2');
+    if (!value) continue;
+    paths.push(value.replace(/\\(?:([0-9a-f]{1,6})(?:\r\n|[ \t\r\n\f])?|(\r\n|[\s\S]))/gi, (_, hex, escaped) => {
+      if (!hex) return /^[\r\n\f]/.test(escaped) ? '' : escaped;
+      const code = parseInt(hex, 16);
+      return code && code <= 0x10ffff ? String.fromCodePoint(code) : '\ufffd';
+    }));
+  }
+  return paths;
+}
+
+function localStylesheet(href, referrer, videosDir) {
+  let url, pathname;
+  try {
+    url = new URL(href, referrer);
+    pathname = decodeURIComponent(url.pathname);
+  } catch { return null; }
+  if (url.origin !== referrer.origin || pathname.includes('\0')) return null;
+  const file = path.resolve(videosDir, '.' + pathname);
+  const relative = path.relative(videosDir, file);
+  if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) return null;
+  const basePrefix = 'base' + path.sep;
+  return { url, file: relative.startsWith(basePrefix) ? resolveBaseFile(relative.slice(basePrefix.length), videosDir) : file };
+}
+
+function hashStylesheet(h, href, referrer, videosDir, seen) {
+  const resolved = localStylesheet(href, referrer, videosDir);
+  if (!resolved || seen.has(resolved.url.pathname)) return;
+  const { url, file } = resolved;
+  seen.add(url.pathname);
+  const css = fs.statSync(file, { throwIfNoEntry: false })?.isFile() ? fs.readFileSync(file) : null;
+  h.update(JSON.stringify({ stylesheet: url.pathname, size: css?.length ?? null }));
+  if (!css) return;
+  h.update(css);
+  for (const imported of cssImportPaths(css.toString('utf8'))) hashStylesheet(h, imported, url, videosDir, seen);
+}
+
 function hashEntryStyles(h, videoDir) {
   const entry = path.join(videoDir, 'index.html');
   if (!fs.existsSync(entry)) return;
   const html = fs.readFileSync(entry, 'utf8');
-  for (const [tag] of html.matchAll(/<link\b[^>]*>/gi)) {
-    const rel = tag.match(/\brel=["']([^"']+)["']/i)?.[1] || '';
-    const href = tag.match(/\bhref=["']([^"']+)["']/i)?.[1];
-    if (!/\bstylesheet\b/i.test(rel) || !href || /^(?:[a-z]+:|\/\/)/i.test(href)) continue;
-    const src = decodeURIComponent(href.split(/[?#]/)[0]);
-    const file = src.startsWith('/') ? path.resolve(VIDEOS_DIR, '.' + src) : path.resolve(videoDir, src);
-    h.update(JSON.stringify({ entryStyle: src, exists: fs.existsSync(file) }));
-    if (fs.existsSync(file) && fs.statSync(file).isFile()) hashFileEntry(h, src, file);
+  const referrer = new URL('/' + encodeURIComponent(path.basename(videoDir)) + '/', 'http://video.local');
+  const videosDir = path.dirname(videoDir);
+  const seen = new Set();
+  const hashStyle = href => hashStylesheet(h, href, referrer, videosDir, seen);
+  for (const [tag, inline] of html.matchAll(/<!--[\s\S]*?-->|<style\b[^>]*>([\s\S]*?)<\/style\s*>|<link\b[^>]*>/gi)) {
+    if (inline !== undefined) {
+      for (const imported of cssImportPaths(inline)) hashStyle(imported);
+    } else if (/^<link/i.test(tag)) {
+      const rel = tag.match(/\brel\s*=\s*["']([^"']+)["']/i)?.[1] || '';
+      const href = tag.match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1];
+      if (/\bstylesheet\b/i.test(rel) && href) hashStyle(href);
+    }
   }
 }
 
 function computeSharedVideoDigest(videoDir, W, H, fps, lang, sourceInfo, outputPath) {
   const h = crypto.createHash('sha256');
   // 渲染规则改变后，旧缓存片段也需要重新生成。
-  h.update(JSON.stringify({ v: '4.0', W, H, fps, lang }));
+  h.update(JSON.stringify({ v: '4.1', W, H, fps, lang }));
   for (const rel of ['css/base.css', 'js/engine.js', 'js/gl.js', 'js/frame-client.js']) {
     const fp = resolveBaseFile(rel, VIDEOS_DIR);
     if (fs.existsSync(fp)) hashFileEntry(h, 'base/' + rel, fp);
@@ -535,6 +586,8 @@ export function installFrameReuseProbe() {
     styleState = parts;
     return true;
   };
+  const usesInlineClock = el => /\bvar\([^)]*--(?:tg|anim-t)(?![\w-])|\\/i.test(el.style?.cssText || '');
+  const hasUntrackedElementState = el => shadowHosts.has(el) || el.shadowRoot || el.localName.includes('-') || usesInlineClock(el);
   const hasExternalPixels = stage => Boolean(stage.querySelector('iframe,canvas:not(#gl),svg animate,svg animateTransform,svg animateMotion,svg set') || (window.V._frameRuntime && window.V._frameRuntime.hasActive()));
   const canDedupeStage = stage => {
     if (!stage) return false;
@@ -547,7 +600,7 @@ export function installFrameReuseProbe() {
     // Canvas 像素和 SVG 原生动画的当前状态不会反映在 HTML 中。
     if (hasExternalPixels(stage)) return false;
     // 自定义元素还可能持有声明式封闭影子根，其内部状态无法通过 innerHTML 检查。
-    if ([stage, ...stage.querySelectorAll('*')].some(el => shadowHosts.has(el) || el.shadowRoot || el.localName.includes('-'))) return false;
+    if ([document.documentElement, document.body, stage, ...stage.querySelectorAll('*')].some(hasUntrackedElementState)) return false;
     // use 可绘制舞台外的 SVG 定义，这些内容不在舞台签名中。
     if ([...stage.querySelectorAll('use')].some(el => {
       try {

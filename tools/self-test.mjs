@@ -3266,7 +3266,9 @@ async function main() {
     if (process.argv.includes('--quick')) return;
 
     console.log('[Full 1/5] Build input protection, encoder/mux failures and audio regressions...');
-    for (const name of ['test-frame-interfaces.mjs', 'test-managed-sources.mjs', 'test-player-api.mjs', 'test-player-reliability.mjs', 'test-audit-session.mjs', 'test-pptx.mjs']) {
+    const browserAndExportTests = ['test-frame-interfaces.mjs', 'test-managed-sources.mjs', 'test-realtime-sources.mjs', 'test-player-api.mjs',
+      'test-player-reliability.mjs', 'test-audit-session.mjs', 'test-pptx.mjs', 'test-render-style-pixels.mjs'];
+    for (const name of browserAndExportTests) {
       const check = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools', name)], { encoding: 'utf8', timeout: 180000 });
       assert.equal(check.status, 0, name + '\n' + check.stdout + check.stderr);
     }

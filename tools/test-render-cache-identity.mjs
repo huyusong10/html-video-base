@@ -232,7 +232,24 @@ function verifyEntryStyleDependency() {
   assertChanged(key, before, 'Changing a linked stylesheet outside the video directory must invalidate its cache');
 }
 
+function verifyImportedStyles() {
+  const { dir, key } = createFixture('imported-styles', 'V.scene({duration:1,lines:[],build(){},update(){}});');
+  fs.writeFileSync(path.join(dir, 'index.html'), '<style>@import url("style.css");</style>');
+  fs.writeFileSync(path.join(dir, 'style.css'), String.raw`@import /* gap */ url(../imported\20 theme.css?v=2) layer(theme) screen;`);
+  fs.writeFileSync(path.join(root, 'videos/imported theme.css'), '@import "/palette-deep.css"; @import "imported%20theme.css";');
+  const palette = path.join(root, 'videos/palette-deep.css');
+  const missing = key();
+  fs.writeFileSync(palette, '#stage{background:red}');
+  assertChanged(key, missing, 'Adding a transitive CSS import must invalidate the cache');
+  const red = key();
+  fs.writeFileSync(palette, '#stage{background:blue}');
+  assertChanged(key, red, 'Changing a transitive CSS import must invalidate the cache');
+  fs.unlinkSync(palette);
+  assert.equal(key(), missing, 'Removing a transitive CSS import must be reflected in the cache key');
+}
+
 verifyEntryStyleDependency();
+verifyImportedStyles();
 verifySceneFieldBoundaries();
 verifyVisualAssetChanges();
 verifyAssetOwnership();

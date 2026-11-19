@@ -105,10 +105,11 @@
         if (startup) return ready();
       },
       onPrepareError() { if (!disposed) phase = 'failed'; },
-      prepare(frame, context) {
+      captureState: () => state,
+      prepare(frame, context, submittedState) {
         if (context.signal.aborted) throw aborted();
         const preparationLifetime = lifetime;
-        return Promise.resolve().then(() => definition.prepare(state, frame, { ...context, data: initializedData })).then(result => {
+        return Promise.resolve().then(() => definition.prepare(submittedState, frame, { ...context, data: initializedData })).then(result => {
           if (!disposed && !context.signal.aborted && lifetime === preparationLifetime) phase = 'ready';
           return result;
         });

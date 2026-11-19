@@ -3848,6 +3848,7 @@
 (function (V) {
   let current = null, sequence = 0, lastTick = 0, controller = null, prepared = null;
   const sources = new Map();
+  const previews = new Map();
   const reportedErrors = new WeakSet();
   let heldId = 0;
 
@@ -3863,6 +3864,9 @@
   }
 
   function begin(scene, index, now, clock, idle, options) {
+    if (options.precise || options.isRecord || current?.sceneIndex !== index) {
+      for (const source of previews.keys()) cancelPreview(source);
+    }
     if (controller) controller.abort();
     controller = new AbortController();
     prepared = null;
@@ -3915,7 +3919,11 @@
     catch (cause) { console.error(new Error(`onFrameError callback failed: ${cause?.message ?? String(cause)}`, { cause })); }
   }
 
-  function prepareSource(source, frame, parentSignal) {
+  function captureRequest(source, frame) {
+    return { frame, state: source.captureState?.() };
+  }
+
+  function prepareSource(source, task, parentSignal) {
     const abort = new AbortController();
     const cancel = () => abort.abort();
     parentSignal.addEventListener('abort', cancel, { once: true });
@@ -3928,15 +3936,17 @@
     if (parentSignal.aborted) abort.abort();
     const work = Promise.resolve().then(() => source.ready ? source.ready() : undefined).then(() => {
       if (abort.signal.aborted) throw abortError();
+      task.started = true;
+      const { frame, state } = task.request;
       timer = setTimeout(() => {
         timeoutError = new Error(`Preparation timed out after ${source.timeoutMs}ms`);
         abort.abort();
       }, source.timeoutMs);
-      return source.prepare(frame, { signal: abort.signal });
+      return source.prepare(frame, { signal: abort.signal }, state);
     });
     return Promise.race([work, stopped]).catch(error => {
       if (!parentSignal.aborted && error?.name !== 'AbortError') source.onPrepareError?.();
-      throw sourceError(source, frame, error);
+      throw sourceError(source, task.request.frame, error);
     }).finally(() => {
       clearTimeout(timer);
       parentSignal.removeEventListener('abort', cancel);
@@ -3950,12 +3960,52 @@
     if (!prepared) {
       const signal = controller.signal;
       prepared = Promise.resolve().then(() => activeSources(frame)).then(list =>
-        Promise.all(list.map(source => prepareSource(source, frame, signal))));
+        Promise.all(list.map(source => prepareSource(source, { request: captureRequest(source, frame) }, signal))));
     }
     return prepared.then(() => {
       if (frame !== current || controller.signal.aborted) throw abortError();
       return frame;
     });
+  }
+
+  function cancelPreview(source) {
+    const task = previews.get(source);
+    if (!task) return;
+    previews.delete(source);
+    task.controller.abort();
+  }
+
+  function runPreview(source, request) {
+    const task = { request, next: null, started: false, controller: new AbortController() };
+    previews.set(source, task);
+    prepareSource(source, task, task.controller.signal).catch(error => report(error, task.request.frame)).finally(() => {
+      if (previews.get(source) !== task) return;
+      previews.delete(source);
+      if (task.next && source.status?.() !== 'failed') runPreview(source, task.next);
+    });
+  }
+
+  function queuePreview(source, frame) {
+    if (source.status?.() === 'failed') return;
+    const request = captureRequest(source, frame);
+    const task = previews.get(source);
+    if (!task) runPreview(source, request);
+    else if (task.started) task.next = request;
+    else task.request = request;
+  }
+
+  function preview(frame) {
+    if (frame !== current) return;
+    if (frame.precise) {
+      prepare(frame).catch(error => report(error, frame));
+      return;
+    }
+    try {
+      // One preparation per source can finish. Replace queued requests with the latest submitted frame.
+      const active = new Set(activeSources(frame));
+      for (const source of previews.keys()) if (!active.has(source)) cancelPreview(source);
+      for (const source of active) queuePreview(source, frame);
+    } catch (error) { report(error, frame); }
   }
 
   V.frameSource = function (definition) {
@@ -3970,6 +4020,7 @@
     return () => {
       if (sources.get(source.id) !== source) return;
       sources.delete(source.id);
+      cancelPreview(source);
       for (const pending of source.pending) pending.abort();
       if (source.dispose) return source.dispose();
     };
@@ -3998,9 +4049,7 @@
       return () => { if (heldId === frame.id) heldId = 0; };
     },
     hasActive: () => Boolean(current && activeSources(current).length),
-    preview(frame) {
-      prepare(frame).catch(error => report(error, frame));
-    },
+    preview,
   };
 })(globalThis.V = globalThis.V || {});
 
@@ -4111,10 +4160,11 @@
         if (startup) return ready();
       },
       onPrepareError() { if (!disposed) phase = 'failed'; },
-      prepare(frame, context) {
+      captureState: () => state,
+      prepare(frame, context, submittedState) {
         if (context.signal.aborted) throw aborted();
         const preparationLifetime = lifetime;
-        return Promise.resolve().then(() => definition.prepare(state, frame, { ...context, data: initializedData })).then(result => {
+        return Promise.resolve().then(() => definition.prepare(submittedState, frame, { ...context, data: initializedData })).then(result => {
           if (!disposed && !context.signal.aborted && lifetime === preparationLifetime) phase = 'ready';
           return result;
         });
