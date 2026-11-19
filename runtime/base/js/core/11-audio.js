@@ -98,6 +98,7 @@
     let audioBlocked = false, unlockArmed = false, lastUnlockTs = 0;
     let playPending = false, playPendingTs = 0, bgmPlayPending = false, targetSeekTime = null;
     let lastAudioSample = -1, lastAudioMoveTs = 0, lastRecoverTs = 0, lastBgmSeekTs = 0;
+    let audioFailed = false, masterSource = null;
 
     function isAllMuted() {
       if (muted || volume <= 0.001) return true;
@@ -326,7 +327,7 @@
     }
 
     function startPlayback() {
-      if (audio && audio.error) audio = null;
+      if (audioFailed) return;
       if (bgmAudio && bgmAudio.error) bgmAudio = null;
       audioBlocked = false;
       if (audio) {
@@ -359,7 +360,7 @@
     }
 
     function canUseMasterClock() {
-      return Boolean(audio && !audioBlocked);
+      return Boolean(audio && !audioBlocked && !audioFailed);
     }
 
     function tryApplyPendingSeek() {
@@ -432,11 +433,14 @@
         try { el.load(); } catch {}
         return;
       }
-      audio = null;
+      audioFailed = true;
+      el.pause();
       if (!isRecord) hooks.onSoundUI();
     }
 
     function createMasterAudio(src) {
+      masterSource = src;
+      audioFailed = false;
       bindVisibilitySyncOnce();
       const el = new Audio();
       el.preload = 'auto';
@@ -546,6 +550,8 @@
     }
 
     function reloadTracks(cfg) {
+      audioFailed = false;
+      masterSource = null;
       playPending = false;
       bgmPlayPending = false;
       targetSeekTime = null;
@@ -555,6 +561,15 @@
       bgmAudio = null;
       mountTracksFromCfg(cfg);
       hooks.onSoundUI();
+    }
+
+    function retry() {
+      if (!audioFailed || !masterSource) return;
+      disposeAudioEl(audio);
+      playPending = false;
+      targetSeekTime = hooks.getNow();
+      audio = createMasterAudio(masterSource);
+      syncTrackVolumes();
     }
 
     function consumeRecentUnlock() {
@@ -591,7 +606,7 @@
       syncSceneVolume: syncTrackVolumes, consumeRecentUnlock,
       isAllMuted, resolveSoundBtnSpec, canUseMasterClock,
       tickMasterClock, syncWithWallClock: keepBgmInSync,
-      hasBgm: () => Boolean(bgmAudio), getState,
+      hasBgm: () => Boolean(bgmAudio), hasError: () => audioFailed, retry, getState,
     };
   };
 })(globalThis.V = globalThis.V || {});

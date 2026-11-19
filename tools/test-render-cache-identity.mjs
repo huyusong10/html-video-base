@@ -111,6 +111,7 @@ function verifyCrossModuleSharedCode() {
 function verifySameModuleGranularity() {
   const scene = color => `V.scene({color:${JSON.stringify(color)},duration:1,lines:[],build(root){root.style.background=this.color;},update(){}});`;
   const { dir } = createFixture('same-module', scene('red') + scene('red'));
+  fs.writeFileSync(path.join(dir, 'index.html'), '<script src="video.config.js"></script><script src="js/scenes.js"></script>');
   const keys = () => {
     const { sandbox } = loadVideoSandbox(root, 'same-module');
     return buildCachedSceneSegments(sandbox.V, sandbox.V.config, 'same-module', dir, 8, 320, 180, 4, '').map(segment => segment.partPath);
@@ -121,6 +122,16 @@ function verifySameModuleGranularity() {
   assert.equal(changed[0], before[0], 'Changing a second inline definition must preserve the first scene cache');
   assert.notEqual(changed[1], before[1], 'Changing a second inline definition must invalidate its own cache');
   assert.deepEqual(keys(), changed, 'Unchanged authored definitions must retain both cache identities');
+}
+
+function verifyEntryScriptDependency() {
+  const { dir, key } = createFixture('entry-script', 'V.scene({duration:1,lines:[],build(root){root.textContent=window.caption;},update(){}});');
+  fs.writeFileSync(path.join(dir, 'index.html'), '<script src="../catalog.js"></script><script src="video.config.js"></script><script src="js/scenes.js"></script>');
+  const catalog = path.join(root, 'videos/catalog.js');
+  fs.writeFileSync(catalog, 'window.caption="First course order";');
+  const before = key();
+  fs.writeFileSync(catalog, 'window.caption="Updated course order";');
+  assertChanged(key, before, 'A referenced course script must invalidate rendered navigation');
 }
 
 function verifyFactoryArguments(inline) {
@@ -211,6 +222,17 @@ function verifyPreviousLayerDefinition(closure, blendDur) {
   assert.deepEqual(keys(), changed, 'Unchanged persistent-layer inputs must retain cache identity');
 }
 
+function verifyEntryStyleDependency() {
+  const { dir, key } = createFixture('entry-style', 'V.scene({duration:1,lines:[],build(){},update(){}});');
+  fs.writeFileSync(path.join(dir, 'index.html'), '<link href="../palette.css" rel="stylesheet">');
+  const css = path.join(root, 'videos/palette.css');
+  fs.writeFileSync(css, '#stage{background:red}');
+  const before = key();
+  fs.writeFileSync(css, '#stage{background:blue}');
+  assertChanged(key, before, 'Changing a linked stylesheet outside the video directory must invalidate its cache');
+}
+
+verifyEntryStyleDependency();
 verifySceneFieldBoundaries();
 verifyVisualAssetChanges();
 verifyAssetOwnership();
@@ -220,6 +242,7 @@ verifyAssetPaths();
 verifyAuthoredSceneData();
 verifyCrossModuleSharedCode();
 verifySameModuleGranularity();
+verifyEntryScriptDependency();
 verifyFactoryArguments(false);
 verifyFactoryArguments(true);
 verifySharedRegexSource();

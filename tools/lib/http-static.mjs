@@ -3,6 +3,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { VIDEOS_DIR, RUNTIME_BASE_DIR } from './paths.mjs';
+import { PPTX_MIME, readPageWithPptxDownload } from './pptx-assets.mjs';
+import { assetVersion, hashAsset, IMMUTABLE_ASSET_CACHE } from './versioned-assets.mjs';
 
 export const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -18,6 +20,7 @@ export const MIME = {
   '.m4a': 'audio/mp4',
   '.mp3': 'audio/mpeg',
   '.mp4': 'video/mp4',
+  '.pptx': PPTX_MIME,
   '.webm': 'video/webm',
   '.wav': 'audio/wav',
   '.svg': 'image/svg+xml',
@@ -76,6 +79,39 @@ function resolveVirtualFile(pathname, videosDir) {
   return null;
 }
 
+function sendNotModified(req, res, headers) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  const tag = headers.ETag.replace(/^W\//, '');
+  const candidates = (req.headers['if-none-match'] || '').match(/(?:W\/)?"[^"]*"|\*/g) || [];
+  if (!candidates.some(candidate => candidate === '*' || candidate.replace(/^W\//, '') === tag)) return false;
+  res.writeHead(304, headers).end();
+  return true;
+}
+
+function fileCacheHeaders(file, stat) {
+  const version = assetVersion(file);
+  if (version) return { ETag: `"${version}"`, 'Cache-Control': IMMUTABLE_ASSET_CACHE };
+  return { ETag: `W/"${stat.size}-${stat.mtimeMs}-${stat.ctimeMs}"`, 'Cache-Control': 'no-cache' };
+}
+
+function servePageWithPptxDownload(req, res, filePath) {
+  if (path.basename(filePath) !== 'index.html') return false;
+  let html;
+  try { html = readPageWithPptxDownload(path.dirname(filePath)); }
+  catch { return false; }
+  if (html === null) return false;
+
+  const cache = { ETag: `"${hashAsset(html)}"`, 'Cache-Control': 'no-cache' };
+  if (sendNotModified(req, res, cache)) return true;
+  res.writeHead(200, {
+    'Content-Type': MIME['.html'],
+    'Content-Length': Buffer.byteLength(html),
+    ...cache,
+  });
+  res.end(req.method === 'HEAD' ? undefined : html);
+  return true;
+}
+
 const MAX_OPEN_RANGE = 4 * 1024 * 1024;
 
 function parseByteRange(rangeHeader, size) {
@@ -94,7 +130,9 @@ function parseByteRange(rangeHeader, size) {
   return { start, end };
 }
 
-function serveRangeResponse(req, res, fp, size, contentType) {
+function serveRangeResponse(req, res, fp, size, headers) {
+  const validator = req.headers['if-range'];
+  if (validator && (headers.ETag.startsWith('W/') || validator !== headers.ETag)) return false;
   const parsed = parseByteRange(req.headers.range, size);
   if (!parsed) return false;
   if (parsed.unsat) {
@@ -102,16 +140,28 @@ function serveRangeResponse(req, res, fp, size, contentType) {
     return true;
   }
   const { start, end } = parsed;
-  const headers = {
-    'Content-Type': contentType,
+  const partial = {
+    ...headers,
     'Content-Range': `bytes ${start}-${end}/${size}`,
-    'Accept-Ranges': 'bytes',
     'Content-Length': end - start + 1,
-    'Cache-Control': 'no-cache',
   };
-  if (req.method === 'HEAD') res.writeHead(206, headers).end();
-  else pipeFileSafe(res, fp, { status: 206, headers, range: { start, end } });
+  if (req.method === 'HEAD') res.writeHead(206, partial).end();
+  else pipeFileSafe(res, fp, { status: 206, headers: partial, range: { start, end } });
   return true;
+}
+
+function serveStaticFile(req, res, file, stat) {
+  const cache = fileCacheHeaders(file, stat);
+  if (sendNotModified(req, res, cache)) return;
+  const headers = {
+    'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
+    'Content-Length': stat.size,
+    'Accept-Ranges': 'bytes',
+    ...cache,
+  };
+  if (req.headers.range && serveRangeResponse(req, res, file, stat.size, headers)) return;
+  if (req.method === 'HEAD' || stat.size === 0) res.writeHead(200, headers).end();
+  else pipeFileSafe(res, file, { headers, range: { start: 0, end: stat.size - 1 } });
 }
 
 function attachHmrWatchers(dirs, clients) {
@@ -170,18 +220,8 @@ export function createVideoHttpServer({ videosDir = VIDEOS_DIR, watch = false } 
     let stat;
     try { stat = fs.statSync(fp); } catch { res.writeHead(404).end('Not Found'); return; }
     if (stat.isDirectory()) { res.writeHead(302, { Location: u.pathname + '/' + u.search }).end(); return; }
-
-    const contentType = MIME[path.extname(fp).toLowerCase()] || 'application/octet-stream';
-    if (req.headers.range && serveRangeResponse(req, res, fp, stat.size, contentType)) return;
-
-    const headers = {
-      'Content-Type': contentType,
-      'Content-Length': stat.size,
-      'Accept-Ranges': 'bytes',
-      'Cache-Control': 'no-cache',
-    };
-    if (req.method === 'HEAD' || stat.size === 0) res.writeHead(200, headers).end();
-    else pipeFileSafe(res, fp, { headers, range: { start: 0, end: stat.size - 1 } });
+    if (servePageWithPptxDownload(req, res, fp)) return;
+    serveStaticFile(req, res, fp, stat);
   });
 
   const origClose = srv.close.bind(srv);

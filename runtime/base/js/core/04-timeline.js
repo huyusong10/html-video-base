@@ -3,8 +3,7 @@
   const { clamp } = V.u;
   const DEFAULT_CPS = 5.4, DEFAULT_GAP = 0.22, DEFAULT_LEAD = 0.35, DEFAULT_TAIL = 0.38;
 
-  function getPacing() {
-    const cfg = V.getCfg();
+  function getPacing(cfg) {
     return {
       CPS: cfg.cps === undefined ? DEFAULT_CPS : cfg.cps,
       GAP: cfg.gap === undefined ? DEFAULT_GAP : cfg.gap,
@@ -33,9 +32,7 @@
     return w;
   }
 
-  function normKey(s) {
-    return String(s || '').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
-  }
+  const normKey = V._speechKey;
 
   function findNth(haystack, needle, nth = 1) {
     if (!needle) return -1;
@@ -209,30 +206,6 @@
     return chunks.map(cleanChunkTail).filter(Boolean);
   }
 
-  const COMMON_SPOKEN_PAIRS = [
-    [/重编排/g, '崇编排'], [/重算/g, '崇算'], [/重放/g, '崇放'], [/重写/g, '崇写'], [/重构/g, '崇构'],
-    [/执行/g, '直形'], [/运行/g, '运形'], [/并行/g, '并形'], [/例行/g, '例形'], [/先行/g, '先形'],
-    [/进行/g, '进形'], [/自行/g, '自形'], [/推行/g, '推形'], [/实行/g, '实形'], [/放行/g, '放形'],
-    [/命令行/g, '命令航'], [/一行行/g, '一航航'],
-  ];
-
-  function buildSpokenKeyFn() {
-    const cfg = V.getCfg ? V.getCfg() : (V.config || {});
-    const pron = (cfg.tts && cfg.tts.pronunciation) || cfg.pronunciation;
-    const rules = [];
-    if (pron && typeof pron === 'object') {
-      for (const [pat, rep] of Object.entries(pron)) {
-        try { rules.push([new RegExp(pat, 'g'), String(rep)]); } catch {}
-      }
-    }
-    return raw => {
-      let s = String(raw || '');
-      for (const [re, rep] of rules) s = s.replace(re, rep);
-      for (const [re, rep] of COMMON_SPOKEN_PAIRS) s = s.replace(re, rep);
-      return normKey(s);
-    };
-  }
-
   function interpolateChunkGap(starts, weights, lIdx, rIdx, tLeft, tRight) {
     let wTotal = 0;
     for (let k = lIdx; k < rIdx; k++) wTotal += weights[k];
@@ -258,19 +231,18 @@
     }
   }
 
-  function mapWordsToChunks(chunks, words, cueStart, cueEnd) {
-    const toSpokenKey = buildSpokenKeyFn();
+  function mapWordsToChunks(chunks, words, cueStart, cueEnd, spokenText) {
     let flat = '';
     const charTime = [];
     for (const [t0, w] of words) {
-      const k = toSpokenKey(w);
+      const k = normKey(w);
       for (let i = 0; i < k.length; i++) charTime.push(t0);
       flat += k;
     }
     let searchFrom = 0;
     const starts = chunks.map((c, idx) => {
       if (idx === 0) return 0;
-      const key = toSpokenKey(c);
+      const key = normKey(spokenText(c));
       const pos = key ? flat.indexOf(key, searchFrom) : -1;
       if (pos >= 0) { searchFrom = pos + key.length; return charTime[pos]; }
       return null;
@@ -283,14 +255,14 @@
     });
   }
 
-  function splitSubCues(text, cueStart, cueEnd, words) {
+  function splitSubCues(text, cueStart, cueEnd, words, spokenText) {
     const raw = String(text || '').trim();
     if (!raw) return [];
     const chunks = chunkSentences(raw);
     if (chunks.length <= 1) {
       return [{ start: cueStart, end: cueEnd, text: chunks[0] || raw }];
     }
-    if (words && words.length) return mapWordsToChunks(chunks, words, cueStart, cueEnd);
+    if (words && words.length) return mapWordsToChunks(chunks, words, cueStart, cueEnd, spokenText);
     const total = chunks.reduce((a, c) => a + weight(c), 0) || 1;
     const span = cueEnd - cueStart;
     let cur = cueStart;
@@ -315,7 +287,9 @@
     if (!rawOv && !scLoc.anchors) return lineObj;
     const patch = typeof rawOv === 'string' ? { text: rawOv } : (rawOv || {});
     const mergedAnchors = Object.assign({}, lineObj.anchors || {}, scLoc.anchors || {}, patch.anchors || {});
-    return Object.assign({}, lineObj, patch, { anchors: mergedAnchors });
+    const merged = Object.assign({}, lineObj, patch, { anchors: mergedAnchors });
+    if (merged.text !== lineObj.text && !Object.hasOwn(patch, 'speechText')) delete merged.speechText;
+    return merged;
   }
 
   function buildCueEntry(lineObj, cueStart, cueEnd) {
@@ -394,12 +368,12 @@
     return isExactSubsTextMatch(exactSubs, lineObj.text);
   }
 
-  function appendLineSubCues(sc, lineObj, cueStart, cueEnd, exactSubs, lineWords) {
+  function appendLineSubCues(sc, lineObj, cueStart, cueEnd, exactSubs, lineWords, spokenText) {
     const speaker = lineObj.speaker || null;
     if (shouldUseExactSubs(exactSubs, lineObj, lineWords)) {
       sc.subCues.push(...exactSubs.map(([s0, s1, txt]) => ({ start: cueStart + s0, end: cueStart + s1, text: txt, speaker })));
     } else {
-      sc.subCues.push(...splitSubCues(lineObj.text, cueStart, cueEnd, lineWords).map(s => ({ ...s, speaker })));
+      sc.subCues.push(...splitSubCues(lineObj.text, cueStart, cueEnd, lineWords, spokenText).map(s => ({ ...s, speaker })));
     }
   }
 
@@ -422,9 +396,7 @@
     return out;
   }
 
-  function buildLocalizedLines(sc, scLoc) {
-    const cfg = V.getCfg();
-    const speakers = cfg.tts && cfg.tts.speakers;
+  function buildLocalizedLines(sc, scLoc, speakers) {
     const locArr = Array.isArray(scLoc) ? scLoc : (scLoc && Array.isArray(scLoc.lines) ? scLoc.lines : null);
     const count = locArr ? locArr.length : sc._origLines.length;
     const out = [];
@@ -436,7 +408,7 @@
     sc.lines = out;
   }
 
-  function syncSceneLocaleMeta(sc, si) {
+  function syncSceneLocaleMeta(sc, si, speakers) {
     if (sc._explicitDuration === undefined && typeof sc.duration === 'number' && (!sc.lines || !sc.lines.length)) {
       sc._explicitDuration = sc.duration;
     }
@@ -447,7 +419,7 @@
     sc.title = (scLoc && scLoc.title) || sc._origTitle;
     sc._resolvedCheckpoints = null;
     sc._resolvedSfx = null;
-    buildLocalizedLines(sc, scLoc);
+    buildLocalizedLines(sc, scLoc, speakers);
   }
 
   function layoutScene(sc, si, t, bSc, voiceInfo, pacing) {
@@ -458,10 +430,12 @@
 
     sc.lines.forEach((lineObj, li) => {
       const [cueStart, cueEnd] = resolveCueTiming(bSc, voiceInfo.durs, si, li, lineObj, lt, pacing.CPS);
-      sc.cues.push(buildCueEntry(lineObj, cueStart, cueEnd));
+      const cue = buildCueEntry(lineObj, cueStart, cueEnd);
+      cue.spoken = V._speech.line(lineObj, `S${si}L${li}`);
+      sc.cues.push(cue);
       const exactSubs = voiceInfo.subs[si] && voiceInfo.subs[si][li];
       const lineWords = voiceInfo.words[si] && voiceInfo.words[si][li];
-      appendLineSubCues(sc, lineObj, cueStart, cueEnd, exactSubs, lineWords);
+      appendLineSubCues(sc, lineObj, cueStart, cueEnd, exactSubs, lineWords, V._speech.speak);
       lt = cueEnd + pacing.GAP + (lineObj.pause || 0);
     });
 
@@ -507,13 +481,15 @@
   }
 
   V.layout = function () {
-    const pacing = getPacing();
+    const cfg = V.getCfg();
+    const pacing = getPacing(cfg);
+    V._speech = V._createSpeech(cfg);
     const vv = (V.getActiveVoice ? V.getActiveVoice() : V.voice) || {};
     const voiceInfo = { durs: vv.durations || [], subs: resolveVoiceSubCues(vv), words: vv.words || [] };
-    V.scenes.forEach((sc, si) => syncSceneLocaleMeta(sc, si));
+    V.scenes.forEach((sc, si) => syncSceneLocaleMeta(sc, si, cfg.tts?.speakers));
     const baked = vv.bakedLayout;
     const useBaked = isBakedValid(baked);
-    V.layoutInfo = Object.freeze({ source: useBaked ? 'baked' : 'estimated' });
+    V.layoutInfo = Object.freeze({ source: useBaked ? 'baked' : 'estimated', gap: pacing.GAP });
 
     let t = 0;
     V.scenes.forEach((sc, si) => {

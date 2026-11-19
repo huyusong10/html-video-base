@@ -6,32 +6,11 @@ import { spawnSync } from 'node:child_process';
 import { ROOT, listVideoIds, loadVideoSandbox, resolveFfmpeg, probeSceneAnchors, getSandboxCfg, isBgmDisabledCfg, extractRawBgmSrc, normalizeCliArgs, isMainModule } from './lib/paths.mjs';
 import { writeSubtitleFiles } from './lib/subtitles.mjs';
 import { writeUtf8FileAtomic } from './lib/file-output.mjs';
+import { writePauseReport } from './lib/pause-report.mjs';
+import { spokenInputStatus } from './lib/speech-input.mjs';
 import { auditVideos } from './audit-visual.mjs';
 
-const COMMON_HOMO_MAP = [
-  [/重编排/g, '崇编排'], [/重算/g, '崇算'], [/重放/g, '崇放'], [/重写/g, '崇写'], [/重构/g, '崇构'],
-  [/执行/g, '直形'], [/运行/g, '运形'], [/并行/g, '并形'], [/例行/g, '例形'], [/先行/g, '先形'],
-  [/进行/g, '进形'], [/自行/g, '自形'], [/推行/g, '推形'], [/实行/g, '实形'], [/放行/g, '放形'],
-  [/命令行/g, '命令航'], [/一行行/g, '一航航'],
-];
-
 const round3 = n => Math.round(Number(n) * 1000) / 1000;
-const stripPunct = s => String(s || '').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
-
-function buildSpokenNormalizer(pronunciation, enableCommon = true) {
-  const customRules = [];
-  if (pronunciation && typeof pronunciation === 'object') {
-    for (const [pat, rep] of Object.entries(pronunciation)) {
-      try { customRules.push([new RegExp(pat, 'g'), String(rep)]); } catch {}
-    }
-  }
-  return s => {
-    let out = String(s || '');
-    for (const [re, rep] of customRules) out = out.replace(re, rep);
-    if (enableCommon) for (const [re, rep] of COMMON_HOMO_MAP) out = out.replace(re, rep);
-    return stripPunct(out);
-  };
-}
 
 function normalizeLegacyLineSegs(lineSegs) {
   if (!Array.isArray(lineSegs)) return [];
@@ -101,22 +80,23 @@ export function stampBakedLayout(videoId, lang = '') {
   console.log(`[${videoId}] Stamped bakedLayout & subtitles -> ${path.relative(ROOT, timingsPath)} (duration=${bakedLayout.duration}s)`);
 }
 
-function checkSingleLineTextAndWords(si, li, lnText, dur, lSubs, lWords, normSpoken, errors) {
+function checkSingleLineTextAndWords(si, li, cue, dur, lSubs, lWords, speech, errors) {
   if (!lSubs.length && !lWords.length) {
     errors.push(`S${si}L${li}: Missing both subCues and words in timings.js`);
   }
   if (lSubs.length) {
     const subText = lSubs.map(x => x[2]).join('');
-    if (stripPunct(lnText) !== stripPunct(subText)) {
-      errors.push(`S${si}L${li}: Subtitle text mismatch:\n    scene: ${lnText}\n    sub  : ${subText}`);
+    if (speech.key(cue.text) !== speech.key(subText)) {
+      errors.push(`S${si}L${li}: Subtitle text mismatch:\n    scene: ${cue.text}\n    sub  : ${subText}`);
     }
     const subEnd = lSubs[lSubs.length - 1][1];
     if (Math.abs(subEnd - dur) > 0.15) errors.push(`S${si}L${li}: Last subCue end (${subEnd}s) != voice duration (${dur}s)`);
   }
   if (lWords.length) {
     const wordText = lWords.map(x => x[1]).join('');
-    if (normSpoken(lnText) !== normSpoken(wordText)) {
-      errors.push(`S${si}L${li}: Word-boundary text mismatch:\n    expected: ${normSpoken(lnText)}\n    actual  : ${normSpoken(wordText)}`);
+    const expected = speech.key(cue.spoken), actual = speech.key(wordText);
+    if (actual !== expected && speech.key(speech.speak(wordText)) !== expected) {
+      errors.push(`S${si}L${li}: Word-boundary text mismatch:\n    expected: ${expected}\n    actual  : ${actual}`);
     }
     const lastWordStart = lWords[lWords.length - 1][0];
     if (lastWordStart > dur || dur - lastWordStart > 1.8) {
@@ -125,7 +105,7 @@ function checkSingleLineTextAndWords(si, li, lnText, dur, lSubs, lWords, normSpo
   }
 }
 
-function verifyScenesAndTimings(V, voice, normSpoken, errors) {
+function verifyScenesAndTimings(V, voice, errors) {
   const durs = voice.durations || [], subs = resolveVoiceSubCuesGrid(voice), words = voice.words || [];
   if (V.scenes.length !== durs.length) {
     errors.push(`Scene count mismatch: scenes=${V.scenes.length}, timings.durations=${durs.length}`);
@@ -133,15 +113,15 @@ function verifyScenesAndTimings(V, voice, normSpoken, errors) {
   let totalLines = 0;
   for (let si = 0; si < V.scenes.length; si++) {
     const sc = V.scenes[si], sDurs = durs[si] || [];
-    if (sc.lines.length !== sDurs.length) {
-      errors.push(`Scene ${si} (${sc.title}) line count mismatch: scene=${sc.lines.length}, timings=${sDurs.length}`);
+    if (sc.cues.length !== sDurs.length) {
+      errors.push(`Scene ${si} (${sc.title}) line count mismatch: scene=${sc.cues.length}, timings=${sDurs.length}`);
       continue;
     }
-    for (let li = 0; li < sc.lines.length; li++) {
+    for (let li = 0; li < sc.cues.length; li++) {
       totalLines++;
       const lSubs = (subs[si] && subs[si][li]) || [];
       const lWords = (words[si] && words[si][li]) || [];
-      checkSingleLineTextAndWords(si, li, sc.lines[li].text, sDurs[li], lSubs, lWords, normSpoken, errors);
+      checkSingleLineTextAndWords(si, li, sc.cues[li], sDurs[li], lSubs, lWords, V._speech, errors);
     }
   }
   return totalLines;
@@ -267,20 +247,15 @@ function isVoiceFreeVerified(videoId, videoDir, V, cfg, bgmRel, totalSceneLines,
   return false;
 }
 
-function shouldEnableZhCommonFix(ttsCfg, lang) {
-  if (ttsCfg.polyphoneFix === false) return false;
-  return !lang || /^zh\b/i.test(String(lang));
-}
-
-export function verifySpokenTimings(V, errors, lang = '') {
-  const cfg = getSandboxCfg(V);
-  const ttsCfg = cfg.tts && typeof cfg.tts === 'object' ? cfg.tts : {};
-  return verifyScenesAndTimings(
-    V,
-    V.voice || {},
-    buildSpokenNormalizer(ttsCfg.pronunciation || cfg.pronunciation, shouldEnableZhCommonFix(ttsCfg, lang)),
-    errors
-  );
+export function verifySpokenTimings(V, errors) {
+  const voice = V.voice || {};
+  const status = spokenInputStatus(V, voice);
+  const hasUnrecordedOverride = status === 'unrecorded' && V.scenes.some(scene =>
+    scene.lines.some((line, index) => line.speechText !== undefined && V._speech.speak(line.text) !== scene.cues[index].spoken));
+  if (status === 'changed' || hasUnrecordedOverride) {
+    errors.push('Spoken input differs from the recorded audio or has not been recorded. Run the build command; an offline mix cannot update speech.');
+  }
+  return verifyScenesAndTimings(V, voice, errors);
 }
 
 export function verifyVideo(videoId, ffmpegBin, lang = '') {
@@ -289,6 +264,10 @@ export function verifyVideo(videoId, ffmpegBin, lang = '') {
   const { sandbox: runtimeSb } = loadVideoSandbox(ROOT, videoId, { ignoreBaked: false, requireTimings: false, lang });
   const V = dynamicSb.V;
   const cfg = getSandboxCfg(V);
+  if (runtimeSb.V.config.pauseReport === true) {
+    const report = writePauseReport(ROOT, videoId, lang, runtimeSb.V);
+    console.log(`[${videoId}] Pause report -> ${path.relative(ROOT, report)}`);
+  }
 
   for (const ae of probeSceneAnchors(dynamicSb)) errors.push(`Broken anchor: ${ae}`);
 
@@ -299,7 +278,7 @@ export function verifyVideo(videoId, ffmpegBin, lang = '') {
     return errors;
   }
 
-  const totalLines = verifySpokenTimings(V, errors, lang);
+  const totalLines = verifySpokenTimings(V, errors);
   verifyBakedLayoutMatch(V, V.voice, videoId, errors);
   if (Math.abs(runtimeSb.V.duration - V.duration) > 0.01) {
     errors.push(`Runtime V.duration (${runtimeSb.V.duration}) != dynamic V.duration (${V.duration})`);

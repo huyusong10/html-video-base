@@ -14,11 +14,12 @@
   V._isRecord = RECORD;
 
   let stage = null, current = null, now = 0, prevRenderNow = 0, playing = false;
-  let lastTs = 0, lastFrameTs = 0, ambientOffset = 0, idleSec = 0, audioStallSec = 0, ended = false, scrubbing = false;
+  let lastTs = 0, lastFrameTs = 0, ambientOffset = 0, idleSec = 0, ended = false, scrubbing = false;
+  let buffering = false, bufferingError = '', waitingAssets = false;
   let showSubs = !params.has('nosubs'), playbackRate = 1, loopScene = false;
   let lastSeekTarget = -1, lastSeekAt = 0, activeCueIdx = -1;
   let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0;
-  let inBar = false, lastPtrX = -9999, lastPtrY = -9999;
+  let pointerInPlayer = false, lastPtrX = -9999, lastPtrY = -9999;
   const ptr = (V.pointer = V.pointer || {
     x: 960, y: 540, rawX: 960, rawY: 540, nx: 0, ny: 0, sx: 0, sy: 0, presence: 0, active: false, inside: false, down: false, overUI: false,
   });
@@ -54,7 +55,6 @@
       renderAt: t => { ambientOffset = 0; render(t, 0); },
       uiText,
       makeCtrlIcon,
-      swapBtnIcon,
       switchMode: navigateModeSwitch,
       renderCustomControls,
       setOpenMenu,
@@ -93,6 +93,36 @@
     return V.uiStr ? V.uiStr(key, vars) : key;
   }
 
+  function addPptxDownload(bar, cfg, uiCfg) {
+    const presentations = document.querySelectorAll('link[rel="alternate"][type="application/vnd.openxmlformats-officedocument.presentationml.presentation"][href]');
+    const byMode = new Map(Array.from(presentations, item => [item.dataset.pptxMode || 'image', item.href]));
+    const modes = ['image', 'editable'].filter(mode => byMode.has(mode));
+    if (!modes.length) return;
+    const icon = () => makeCtrlIcon(uiCfg.icons.download);
+    const label = uiText('downloadPptx');
+    const fileAttrs = mode => ({
+      href: byMode.get(mode),
+      download: `${cfg.id || 'presentation'}${mode === 'editable' ? '-editable' : ''}.pptx`,
+    });
+    const optionLabel = mode => uiText(mode === 'image' ? 'downloadPptxImage' : 'downloadPptxEditable');
+    const fullButton = bar.querySelector('[data-act="full"]');
+    if (modes.length === 1) {
+      const title = modes[0] === 'image' ? label : `${label} · ${optionLabel(modes[0])}`;
+      bar.insertBefore(h('a', { ...fileAttrs(modes[0]), class: 'ctrl-rbtn ctrl-icon-btn ctrl-pptx-download',
+        title, 'aria-label': title }, icon()), fullButton);
+      return;
+    }
+    const trigger = h('button', { type: 'button', class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'pptx-menu',
+      title: label, 'aria-label': label, 'aria-expanded': 'false' }, icon());
+    trigger.onclick = () => setOpenMenu(bar, bar.dataset.menu === 'pptx' ? '' : 'pptx');
+    const links = modes.map(mode => {
+      const link = h('a', { ...fileAttrs(mode), class: 'pptx-download-option', 'data-pptx-mode': mode }, optionLabel(mode));
+      link.onclick = () => setOpenMenu(bar, '');
+      return link;
+    });
+    bar.insertBefore(h('div', { class: 'pptx-wrap' }, trigger, h('div', { class: 'pptx-menu' }, links)), fullButton);
+  }
+
   function buildControlsBar(cfg, uiCfg) {
     const homeTitle = cfg.homeLabel || uiText('home');
     const homeLink = !cfg.homeUrl
@@ -112,20 +142,23 @@
       ? h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'webfull', title: webLabel, 'aria-label': webLabel }, makeCtrlIcon(uiCfg.icons.webEnter))
       : null;
     const playLabel = uiText('play');
-    const subsLabel = uiText('subsHide');
+    const subsLabel = uiText('subtitles');
     const fullLabel = uiText('fullEnter');
     return h('div', { id: 'controls', 'data-interactive': '1' },
       homeLink,
       h('button', { class: 'ctrl-icon-btn', 'data-act': 'play', 'data-state': 'paused', 'aria-pressed': 'false', title: playLabel, 'aria-label': playLabel }, makeCtrlIcon(uiCfg.icons.play)),
       ...renderCustomControls('left', uiCfg),
       h('span', { class: 'time' }, '0:00'),
-      h('div', { class: 'track' }, h('div', { class: 'fill' }), h('i', { class: 'thumb' }), h('div', { class: 'track-tip' })),
+      h('div', { class: 'track', role: 'slider', tabindex: '0', 'aria-label': uiText('progressLabel'), 'aria-valuemin': '0' }, h('div', { class: 'fill' }), h('i', { class: 'thumb' }), h('div', { class: 'track-tip' })),
       h('div', { class: 'chap-wrap' },
         h('button', { class: 'chap-trigger', 'data-act': 'chap', title: uiText('chapTrigger') }, h('span', { class: 'chap-cur-txt' }), h('i', { class: 'chap-caret' }, makeCtrlIcon(uiCfg.icons.chapCaret))),
         h('div', { class: 'chap-menu' }, h('div', { class: 'chap-menu-hd' }, uiText('chapHeader')), h('div', { class: 'chap-list' }))),
       ...renderCustomControls('right', uiCfg),
       rateWrap,
-      h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'subs', title: subsLabel, 'aria-label': subsLabel }, makeCtrlIcon(uiCfg.icons.subsOn)),
+      h('div', { class: 'subs-wrap' },
+        h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'subs', type: 'button', title: subsLabel, 'aria-label': subsLabel,
+          'aria-controls': 'subtitle-settings', 'aria-expanded': 'false' }, makeCtrlIcon(uiCfg.icons.subsOn)),
+        h('div', { id: 'subtitle-settings', class: 'subs-menu', role: 'group', inert: true })),
       h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'mute', title: uiText('soundOnTip', { pct: 100 }), 'aria-label': uiText('soundLabel') }, makeCtrlIcon(uiCfg.icons.volumeOn)),
       h('div', { class: 'sound-menu' }),
       pptBtn,
@@ -152,6 +185,15 @@
     const sbBack = h('button', { class: 'v-sandbox-back egg-back-btn', 'data-interactive': '1', type: 'button' }, uiText('sandboxBack'));
     const sbBar = h('div', { class: 'v-sandbox-bar egg-banner', 'data-interactive': '1' }, sbTxt, sbBack);
     const osdEl = h('div', { id: 'osd', 'aria-live': 'polite' });
+    ui.bufferingText = h('span');
+    ui.retry = h('button', { type: 'button', hidden: true, 'data-interactive': '1' }, uiText('retryPlayback'));
+    ui.retry.onclick = retryPlaybackAssets;
+    ui.buffering = h('div', { id: 'buffering-status', role: 'status', 'aria-live': 'polite', 'data-interactive': '1' }, ui.bufferingText, ui.retry);
+    if (V._loading) {
+      ui.loadingSpinner = h('span', { class: 'video-loading-spinner', 'aria-hidden': 'true', hidden: true });
+      ui.buffering.classList.add('video-loading-panel');
+      ui.buffering.prepend(ui.loadingSpinner);
+    }
     sandboxState.el = sbBar;
     sandboxState.txtEl = sbTxt;
     sandboxState.backEl = sbBack;
@@ -171,6 +213,7 @@
         h('div', { id: 'wipe' }),
         h('div', { id: 'safe-guide' }, h('div', { class: 'safe-action' }), h('div', { class: 'safe-sub' }, 'SUBTITLE SAFE ZONE'))),
       osdEl,
+      ui.buffering,
       h('div', { id: 'start-hint' }, cfg.startHint || uiText('startHint')));
 
     const bar = V.pptMode ? ensurePptRuntime().buildControlsBar(cfg, uiCfg) : buildControlsBar(cfg, uiCfg);
@@ -359,7 +402,7 @@
   function publishFrame(sc, clock, idle, precise) {
     ended = !playing && now >= V.duration - 0.01;
     V._frameRuntime.begin(sc, V.scenes.indexOf(sc), now, clock, idle, {
-      playing: playing && !scrubbing && !localeLoading, ended, isRecord: RECORD, precise,
+      playing: playing && !scrubbing && !localeLoading, ended, buffering, subsEnabled: showSubs, isRecord: RECORD, precise,
     });
   }
 
@@ -402,42 +445,31 @@
     stage.style.setProperty('--tg', ((clock % 6) / 6) * 150);
     stage.style.setProperty('--anim-t', (-clock).toFixed(3) + 's');
     document.body.classList.toggle('started', now > 0.05);
+    const videoCue = V.pptMode ? null : V._subtitlesRuntime.prepareVideoCue(sc, lt);
     runSceneUpdate(sc, lt, idle);
     syncSceneVideoClips(lt);
-    activeCueIdx = V._subtitlesRuntime.updateSubs(sc, idx, lt, now, clock, showSubs);
+    activeCueIdx = V._subtitlesRuntime.updateSubs(sc, idx, lt, now, clock, showSubs, videoCue);
     V._layersRuntime.updateLayers(sc, idx, lt, now, activeCueIdx >= 0);
     if (!RECORD && !V.pptMode) V._checkpointsRuntime.checkSceneCheckpoints(sc, idx, prevT, now, { isRecord: false, playing, scrubbing, pause, play });
     const aState = audioRt ? audioRt.getState(now) : { hasAudio: false, muted: false, voiceOn: true, volume: 1 };
     V.emit('onRender', {
       frame: V.getFrameState(),
       now, clock, alive: clock, idle, ended, prevT, lt, scene: sc, sceneIndex: idx, activeCueIdx,
-      playing, scrubbing, sandbox: sandboxState.active, pointer: ptr,
+      playing, scrubbing, buffering, sandbox: sandboxState.active, pointer: ptr,
       hasAudio: aState.hasAudio, isRecord: RECORD, muted: aState.muted, voiceOn: aState.voiceOn !== false, volume: aState.volume,
     });
     completeFrameUI();
   }
 
-  function showUiHold() {
-    inBar = true;
-    clearTimeout(idleTimer);
-    document.body.classList.add('ui-active');
-  }
-
   function scheduleUiHide(ms) {
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
-      if (!inBar) document.body.classList.remove('ui-active');
-    }, ms);
+    idleTimer = setTimeout(() => document.body.classList.remove('ui-active'), ms);
   }
 
   function flashUi(ms = 1500) {
+    if (document.hidden || !document.hasFocus()) return;
     document.body.classList.add('ui-active');
-    if (!inBar) scheduleUiHide(ms);
-  }
-
-  function releaseBarHold() {
-    inBar = false;
-    scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
+    scheduleUiHide(ms);
   }
 
   function flashOsd(text, ms = 680) {
@@ -562,34 +594,62 @@
     return uiCfg.livePause !== false && sc.livePause !== false;
   }
 
+  function setBuffering(value, error = '') {
+    if (buffering === value && bufferingError === error) return;
+    buffering = value;
+    bufferingError = error;
+    document.body.classList.toggle('is-buffering', value);
+    if (ui.bufferingText) {
+      ui.bufferingText.textContent = error
+        ? (ui.loadingSpinner ? uiText('loadingFailed') : error)
+        : (value ? uiText(ui.loadingSpinner ? 'loading' : 'buffering') : '');
+    }
+    if (ui.loadingSpinner) ui.loadingSpinner.hidden = !value || Boolean(error);
+    if (ui.retry) ui.retry.hidden = !error;
+  }
+
+  function retryPlaybackAssets() {
+    audioRt?.retry();
+    V._frameRuntime.retryActive().catch(() => {});
+    setBuffering(true);
+    render(now);
+  }
+
+  function syncAssetAvailability() {
+    const source = V._frameRuntime.readiness();
+    const error = audioRt.hasError() ? uiText('narrationFailed') : (source.failed ? uiText('visualFailed') : '');
+    const next = source.waiting || Boolean(error), previous = waitingAssets;
+    waitingAssets = next;
+    if (next || previous) setBuffering(next, error);
+    if (next && !previous) audioRt.pausePlayback();
+    if (!next && previous && playing && !scrubbing) {
+      audioRt.seekTracks(now);
+      audioRt.startPlayback();
+      lastTs = performance.now();
+    }
+  }
+
+  function renderBufferingFrame(rawDt) {
+    if (!shouldTickAmbientPause(current)) return;
+    ambientOffset += rawDt;
+    render(now, 0, false);
+  }
+
   function advanceAudioClock(ts, rawDt) {
     const mTime = audioRt.tickMasterClock();
+    lastTs = ts;
+    setBuffering(mTime == null && audioRt.canUseMasterClock());
     if (mTime != null) {
-      lastTs = ts;
-      if (audioStallSec > 0.35 && Math.abs(mTime - now) > 0.35) {
-        audioStallSec = 0;
-        audioRt.seekTracks(now);
-        return;
-      }
-      audioStallSec = 0;
       if (checkSceneLoop(mTime)) return;
       if (mTime >= V.duration - 0.01) finishPlayback();
       else render(mTime, 0, false);
       return;
     }
-    audioStallSec += rawDt;
-    if (audioStallSec > 0.35) {
-      advanceWallClock(ts);
-      return;
-    }
-    lastTs = ts;
-    if (shouldTickAmbientPause(current)) {
-      ambientOffset += rawDt;
-      render(now, 0, false);
-    }
+    renderBufferingFrame(rawDt);
   }
 
   function advanceWallClock(ts) {
+    setBuffering(false);
     const dt = Math.min(0.1, (ts - lastTs) / 1000) * playbackRate;
     lastTs = ts;
     if (checkSceneLoop(now + dt)) return;
@@ -610,15 +670,17 @@
     lastFrameTs = ts;
     if (V._frameRuntime.isHeld()) { lastTs = ts; requestAnimationFrame(frame); return; }
     stepPointerSmoothing(rawDt);
+    syncAssetAvailability();
     if (localeLoading) {
       lastTs = ts;
     } else if (V.pptMode && pptRt) {
       stepAmbientIdle(rawDt);
     } else if (scrubbing) {
       lastTs = ts;
-      if (current && current.live) render(now, 0, false);
+      renderBufferingFrame(rawDt);
     } else if (playing) {
-      if (audioRt && audioRt.canUseMasterClock()) advanceAudioClock(ts, rawDt);
+      if (waitingAssets) { lastTs = ts; renderBufferingFrame(rawDt); }
+      else if (audioRt && audioRt.canUseMasterClock()) advanceAudioClock(ts, rawDt);
       else advanceWallClock(ts);
     } else {
       stepAmbientIdle(rawDt);
@@ -642,20 +704,32 @@
     if (ae && bar.contains(ae) && ae.tagName === 'INPUT') ae.blur();
   }
 
-  function setOpenMenu(bar, which) {
+  function restoreMenuFocus(bar, menu) {
+    const trigger = {
+      chap: '.chap-trigger', rate: '.rate-trigger', sound: '[data-act=mute]',
+      subs: '[data-act=subs]', pptx: '[data-act=pptx-menu]',
+    }[menu];
+    if (trigger) bar.querySelector(trigger)?.focus();
+  }
+
+  function setOpenMenu(bar, which, restoreFocus = false) {
     if (!bar) return;
     const prev = bar.dataset.menu || '';
     const mode = which || '';
+    if (restoreFocus) restoreMenuFocus(bar, prev);
     if (mode === 'sound') positionSoundMenu(bar);
     bar.dataset.menu = mode;
     bar.classList.toggle('menu-open', Boolean(mode));
     bar.classList.toggle('chap-open', mode === 'chap');
     bar.classList.toggle('rate-open', mode === 'rate');
     bar.classList.toggle('sound-open', mode === 'sound');
+    bar.querySelector('[data-act="pptx-menu"]')?.setAttribute('aria-expanded', String(mode === 'pptx'));
+    ui.subs?.setAttribute('aria-expanded', String(mode === 'subs'));
+    if (ui.subsMenu) ui.subsMenu.inert = mode !== 'subs';
     document.body.classList.toggle('menu-open', Boolean(mode));
     if (prev && !mode) {
       blurMenuInput(bar);
-      if (!inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
+      scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
     }
   }
 
@@ -673,20 +747,22 @@
     V._checkpointsRuntime.closeCheckpointOverlay();
     setOpenMenu(document.getElementById('controls'), '');
     playing = true;
-    audioStallSec = 0;
+    setBuffering(false);
     lastTs = performance.now();
-    if (audioRt) audioRt.startPlayback();
+    syncAssetAvailability();
+    if (audioRt && !waitingAssets && !scrubbing) audioRt.startPlayback();
     document.body.classList.add('playing');
     syncPlaybackFrame();
     V.emit('onPlay', { now, playing: true });
     if (!RECORD) {
-      if (!inBar) scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
+      scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
       updateUI();
     }
   }
 
   function pause() {
     playing = false;
+    setBuffering(false);
     idleSec = 0;
     ended = now >= V.duration - 0.01;
     document.body.classList.remove('playing');
@@ -695,7 +771,10 @@
     for (const clip of V._videoClips) if (clip.pause) clip.pause();
     syncPlaybackFrame();
     V.emit('onPause', { now, ended, playing: false });
-    if (!RECORD) updateUI();
+    if (!RECORD) {
+      if (pointerInPlayer) flashUi(getUiCfg(V.getCfg()).idleHideDelay);
+      updateUI();
+    }
   }
 
   function syncRateMenuSelection() {
@@ -810,10 +889,11 @@
     const list = bar.querySelector('.chap-list'), trig = bar.querySelector('.chap-trigger');
     ui.chapLabel = bar.querySelector('.chap-cur-txt');
     if (!list || !trig) return;
+    ui.lastChapter = -1;
     list.innerHTML = '';
     ui.chapItems = V.scenes.map((sc, i) => {
-      const item = h('div', { class: 'chap-item' }, h('em', null, String(i + 1).padStart(2, '0')), h('span', { class: 'chap-it-title' }, sc.title), h('small', null, fmtTime(sc.start)));
-      item.onclick = e => { e.stopPropagation(); setOpenMenu(bar, ''); seek(sc.start + 0.02); };
+      const item = h('button', { type: 'button', class: 'chap-item' }, h('em', null, String(i + 1).padStart(2, '0')), h('span', { class: 'chap-it-title' }, sc.title), h('small', null, fmtTime(sc.start)));
+      item.onclick = e => { e.stopPropagation(); setOpenMenu(bar, ''); seek(sc.start + 0.02); if (!e.detail) trig.focus(); };
       list.appendChild(item);
       return item;
     });
@@ -828,8 +908,8 @@
     if (!menu || !trig) return;
     menu.innerHTML = '';
     ui.rateItems = uiCfg.rates.map(r => {
-      const el = h('div', { class: 'rate-item' }, h('span', null, fmtRate(r)), h('i', null, '✓'));
-      el.onclick = e => { e.stopPropagation(); setRate(r); setOpenMenu(bar, ''); };
+      const el = h('button', { type: 'button', class: 'rate-item' }, h('span', null, fmtRate(r)), h('i', null, '✓'));
+      el.onclick = e => { e.stopPropagation(); setRate(r); setOpenMenu(bar, ''); if (!e.detail) trig.focus(); };
       menu.appendChild(el);
       return { el, rate: r };
     });
@@ -886,11 +966,13 @@
   function bindMenuAutoClose(bar) {
     const chapWrap = bar.querySelector('.chap-wrap');
     const rateWrap = bar.querySelector('.rate-wrap');
+    const pptxWrap = bar.querySelector('.pptx-wrap');
+    const subsWrap = bar.querySelector('.subs-wrap');
     addEventListener('pointerdown', e => {
       const inChap = chapWrap && chapWrap.contains(e.target);
       const inRate = rateWrap && rateWrap.contains(e.target);
       const inSound = (ui.mute && ui.mute.contains(e.target)) || (ui.soundMenu && ui.soundMenu.contains(e.target));
-      if (!inChap && !inRate && !inSound) setOpenMenu(bar, '');
+      if (!inChap && !inRate && !inSound && !pptxWrap?.contains(e.target) && !subsWrap?.contains(e.target)) setOpenMenu(bar, '');
     });
   }
 
@@ -902,6 +984,7 @@
       const startX = e.clientX;
       let dragged = false, uncommittedT = null, lastAudioSeekTs = performance.now();
       scrubbing = true;
+      audioRt?.pausePlayback();
       document.body.classList.add('scrubbing');
       if (el.setPointerCapture) el.setPointerCapture(e.pointerId);
       const toTime = cx => {
@@ -917,16 +1000,24 @@
         else { uncommittedT = t; render(t); }
       };
       const up = () => {
+        if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
         scrubbing = false;
         document.body.classList.remove('scrubbing');
-        if (uncommittedT != null) seek(uncommittedT, true);
+        seek(uncommittedT == null ? now : uncommittedT, true);
+        syncAssetAvailability();
+        if (playing && !waitingAssets) audioRt?.startPlayback();
         removeEventListener('pointermove', mv);
         removeEventListener('pointerup', up);
         removeEventListener('pointercancel', up);
+        removeEventListener('blur', up);
+        document.removeEventListener('visibilitychange', endHiddenDrag);
       };
+      const endHiddenDrag = () => { if (document.hidden) up(); };
       addEventListener('pointermove', mv);
       addEventListener('pointerup', up);
       addEventListener('pointercancel', up);
+      addEventListener('blur', up);
+      document.addEventListener('visibilitychange', endHiddenDrag);
     });
   }
 
@@ -957,7 +1048,7 @@
     document.body.classList.toggle('web-full', webFull);
     setBtnIcon(ui.webfull, webFull ? 'webExit' : 'webEnter', webFull ? icons.webExit : icons.webEnter, uiText(webFull ? 'webExit' : 'webEnter'), webFull);
     setBtnIcon(ui.full, osOn ? 'fullExit' : 'fullEnter', osOn ? icons.fullExit : icons.fullEnter, uiText(osOn ? 'fullExit' : 'fullEnter'), osOn);
-    releaseBarHold();
+    scheduleUiHide(getUiCfg(V.getCfg()).idleHideDelay);
     fit();
   }
 
@@ -1003,8 +1094,10 @@
   }
 
   function handleEscapeKey(bar, e) {
-    if (bar && bar.classList.contains('menu-open')) { setOpenMenu(bar, ''); e.preventDefault(); }
-    else if (sandboxState.active) { exitSandbox(true); e.preventDefault(); }
+    if (bar?.classList.contains('menu-open')) {
+      setOpenMenu(bar, '', true);
+      e.preventDefault();
+    } else if (sandboxState.active) { exitSandbox(true); e.preventDefault(); }
     else if (!isOsFull() && webFull) { setWebFull(false); e.preventDefault(); }
   }
 
@@ -1113,74 +1206,130 @@
     if (ptr.overUI) resetPointerLeave();
   }
 
+  function showPointerUi(uiCfg) {
+    pointerInPlayer = true;
+    document.body.classList.remove('ui-keyboard');
+    flashUi(uiCfg.idleHideDelay);
+  }
+
   function wakeFromPointer(bar, uiCfg, e, force) {
-    const overBar = isPointerOverBar(bar, e);
     updatePointerFromEvent(bar, e);
+    if (e.clientX < 0 || e.clientX >= innerWidth || e.clientY < 0 || e.clientY >= innerHeight) return;
     if (!force && Math.abs(e.clientX - lastPtrX) < 1 && Math.abs(e.clientY - lastPtrY) < 1) return;
     lastPtrX = e.clientX;
     lastPtrY = e.clientY;
-    if (overBar) showUiHold();
-    else { inBar = false; flashUi(uiCfg.idleHideDelay); }
+    showPointerUi(uiCfg);
   }
 
   function isBarOverlayHidden(bar) {
-    const b = document.body.classList;
-    if (!(b.contains('ctrl-overlay') || b.contains('web-full') || b.contains('os-full'))) return false;
-    if (!b.contains('playing') && !b.contains('ppt-mode')) return false;
-    if (b.contains('ui-active') || b.contains('scrubbing') || b.contains('menu-open')) return false;
-    return !(bar && bar.matches && bar.matches(':has(.chap-search:focus)'));
+    const body = document.body;
+    if (!body.matches('.ctrl-overlay, .web-full, .os-full, [data-video-host-fullscreen]')) return false;
+    if (body.matches('.ui-active, .scrubbing, .menu-open')) return false;
+    return !(body.classList.contains('ui-keyboard') && bar?.matches(':has(:focus-visible)'));
   }
 
   function bindBlindBarGuard(bar, uiCfg) {
     if (!bar) return;
-    let blindPointerType = '';
+    let blindClick = false;
     bar.addEventListener('pointerdown', e => {
-      if (!isBarOverlayHidden(bar)) { blindPointerType = ''; return; }
-      blindPointerType = e.pointerType || 'mouse';
+      blindClick = isBarOverlayHidden(bar);
+      if (!blindClick) return;
       e.stopPropagation();
       e.preventDefault();
-      flashUi(blindPointerType === 'touch' ? 2200 : uiCfg.idleHideDelay);
+      flashUi(uiCfg.idleHideDelay);
     }, true);
     bar.addEventListener('click', e => {
-      if (!blindPointerType) return;
-      const pt = blindPointerType;
-      blindPointerType = '';
+      if (!blindClick || !e.detail) return;
+      blindClick = false;
       e.stopPropagation();
       e.preventDefault();
-      if (pt !== 'touch' && playing && !V.pptMode) pause();
+      if (playing && !V.pptMode) pause();
     }, true);
   }
 
+  function clearPlayerPointer(bar, delay) {
+    pointerInPlayer = false;
+    ptr.active = false;
+    ptr.overUI = false;
+    lastPtrX = -9999;
+    lastPtrY = -9999;
+    resetPointerLeave();
+    setOpenMenu(bar, '');
+    document.body.classList.remove('ui-keyboard');
+    if (delay > 0) scheduleUiHide(delay);
+    else {
+      clearTimeout(idleTimer);
+      document.body.classList.remove('ui-active');
+    }
+  }
+
+  function bindIframeWake(viewport, uiCfg) {
+    const connected = new WeakSet();
+    const connect = frame => {
+      const doc = frame.contentDocument;
+      if (!doc || connected.has(doc)) return;
+      connected.add(doc);
+      let x, y;
+      doc.addEventListener('pointermove', e => {
+        if (e.clientX === x && e.clientY === y) return;
+        x = e.clientX;
+        y = e.clientY;
+        showPointerUi(uiCfg);
+      }, { capture: true, passive: true });
+      doc.addEventListener('pointerdown', () => showPointerUi(uiCfg), { capture: true, passive: true });
+    };
+    document.addEventListener('load', e => {
+      if (e.target.tagName === 'IFRAME' && viewport.contains(e.target)) connect(e.target);
+    }, true);
+    viewport.querySelectorAll('iframe').forEach(connect);
+  }
+
   function bindIdleWake(bar, uiCfg) {
+    const viewport = document.getElementById('viewport');
     bindBlindBarGuard(bar, uiCfg);
-    const clearOnLeave = () => {
-      ptr.active = false;
-      ptr.overUI = false;
-      inBar = false;
-      lastPtrX = -9999;
-      lastPtrY = -9999;
-      resetPointerLeave();
-      scheduleUiHide(uiCfg.leaveHideDelay);
+    bindIframeWake(viewport, uiCfg);
+    const wakeOnFocus = () => {
+      if (document.documentElement.matches(':hover')) showPointerUi(uiCfg);
+    };
+    const wakeOnKeyboard = e => {
+      if (!bar?.contains(e.target) || !e.target.matches(':focus-visible')) return;
+      document.body.classList.add('ui-keyboard');
+      flashUi(uiCfg.idleHideDelay);
+    };
+    const clearOnLeave = e => {
+      if (e.pointerType !== 'touch') clearPlayerPointer(bar, uiCfg.leaveHideDelay);
     };
     const clearDown = () => { ptr.down = false; };
-    document.addEventListener('pointerenter', e => wakeFromPointer(bar, uiCfg, e, true));
+    document.addEventListener('pointerenter', e => {
+      if (e.target === document || (e.target.tagName === 'IFRAME' && viewport.contains(e.target))) wakeFromPointer(bar, uiCfg, e, true);
+    }, true);
     addEventListener('pointermove', e => wakeFromPointer(bar, uiCfg, e, false));
-    if (bar) bar.addEventListener('pointerleave', () => { inBar = false; scheduleUiHide(uiCfg.idleHideDelay); });
+    document.addEventListener('pointerleave', clearOnLeave);
     document.addEventListener('mouseleave', clearOnLeave);
-    addEventListener('blur', clearOnLeave);
+    addEventListener('blur', () => {
+      if (document.hasFocus() && document.activeElement?.tagName === 'IFRAME') return;
+      clearPlayerPointer(bar, 0);
+    });
+    addEventListener('focus', wakeOnFocus);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) clearPlayerPointer(bar, 0);
+      else wakeOnFocus();
+    });
     addEventListener('pointerdown', e => {
       updatePointerFromEvent(bar, e);
+      showPointerUi(uiCfg);
       if (ptr.inside) ptr.down = true;
-      if (e.pointerType === 'touch') flashUi(bar && bar.contains(e.target) ? 2200 : uiCfg.idleHideDelay);
     });
     addEventListener('pointerup', clearDown);
     addEventListener('pointercancel', clearDown);
-    addEventListener('focusin', e => {
-      if (bar && bar.contains(e.target)) flashUi(uiCfg.idleHideDelay);
+    bar?.addEventListener('focusin', wakeOnKeyboard);
+    bar?.addEventListener('keydown', e => {
+      if (e.defaultPrevented || e.key === 'Enter' || e.code === 'Space' ||
+          e.target === ui.volRange || isEditableTarget(e.target)) wakeOnKeyboard(e);
     });
-    flashUi(uiCfg.idleHideDelay);
+    wakeOnFocus();
     if (!V.pptMode) {
-      document.getElementById('viewport').addEventListener('click', e => {
+      viewport.addEventListener('click', e => {
         if (e.target.closest('[data-interactive]')) return;
         if (!playing && isInteractiveHold()) return;
         playing ? pause() : play();
@@ -1190,10 +1339,12 @@
 
   function syncPlayBtnUI() {
     if (!ui.play) return;
-    const icons = getUiCfg(V.getCfg()).icons;
     const state = playing ? 'playing' : (ended ? 'ended' : 'paused');
     const key = playing ? 'pause' : (ended ? 'replay' : 'play');
     const label = uiText(key);
+    const icons = getUiCfg(V.getCfg()).icons;
+    if (ui.play.dataset.state === state && ui.play.getAttribute('aria-label') === label && ui.play._playIcon === icons[key]) return;
+    ui.play._playIcon = icons[key];
     ui.play.dataset.state = state;
     ui.play.setAttribute('aria-pressed', String(playing));
     swapBtnIcon(ui.play, key, icons[key], label);
@@ -1202,23 +1353,49 @@
   function syncSubsBtnUI() {
     if (!ui.subs) return;
     const icons = getUiCfg(V.getCfg()).icons;
-    if (V.pptMode && pptRt && pptRt.swapSubsIcon) {
-      pptRt.swapSubsIcon(ui.subs, showSubs, icons);
-      return;
-    }
     const key = showSubs ? 'subsOn' : 'subsOff';
     ui.subs.classList.toggle('is-off', !showSubs);
-    swapBtnIcon(ui.subs, key, icons[key], uiText(showSubs ? 'subsHide' : 'subsShow'));
+    ui.subsToggle.checked = showSubs;
+    swapBtnIcon(ui.subs, key, icons[key], uiText('subtitles'));
   }
 
-  function buildPptUI(uiCfg) {
+  function subtitleItem(input, label) {
+    return h('label', { class: 'sound-item' }, input, h('span', null, uiText(label)), h('i', { 'aria-hidden': 'true' }, '✓'));
+  }
+
+  function subtitleOptions(key, label, options) {
+    const chosen = V._subtitlesRuntime.getAppearance()[key];
+    const fields = options.map(([value, text]) => {
+      const input = h('input', { type: 'radio', name: `subtitle-${key}`, value, checked: value === chosen });
+      input.onchange = () => {
+        V._subtitlesRuntime.setAppearance({ [key]: value });
+        const { size, align } = V._subtitlesRuntime.getAppearance();
+        V._prefsRuntime.writeSaved(getUiCfg(V.getCfg()), { subSize: size, subAlign: align });
+        render(now);
+      };
+      return subtitleItem(input, text);
+    });
+    return h('fieldset', null, h('legend', null, uiText(label)), h('div', { class: 'subs-options' }, fields));
+  }
+
+  function buildSubsMenu() {
+    ui.subsToggle = h('input', { type: 'checkbox', checked: showSubs });
+    ui.subsToggle.onchange = () => setSubs(ui.subsToggle.checked);
+    ui.subsMenu.setAttribute('aria-label', uiText('subtitleSettings'));
+    ui.subsMenu.replaceChildren(
+      subtitleItem(ui.subsToggle, 'subtitleShow'),
+      h('div', { class: 'sound-sep' }),
+      subtitleOptions('size', 'subtitleSize', [['small', 'subtitleSmall'], ['medium', 'subtitleMedium'], ['large', 'subtitleLarge']]),
+      h('div', { class: 'sound-sep' }),
+      subtitleOptions('align', 'subtitleAlign', [['left', 'subtitleLeft'], ['center', 'subtitleCenter']]));
+  }
+
+  function buildPptUI(cfg, uiCfg) {
     const bar = document.getElementById('controls');
-    ui.subs = bar.querySelector('[data-act=subs]');
+    addPptxDownload(bar, cfg, uiCfg);
     ui.webfull = bar.querySelector('[data-act=webfull]');
     ui.full = bar.querySelector('[data-act=full]');
     pptRt.init(bar, uiCfg);
-    syncSubsBtnUI();
-    if (ui.subs) ui.subs.onclick = () => setSubs(!showSubs);
     if (ui.webfull) ui.webfull.onclick = () => setWebFull(!webFull);
     if (ui.full) ui.full.onclick = toggleOsFull;
     document.addEventListener('fullscreenchange', syncFullUI);
@@ -1229,6 +1406,16 @@
   function buildUI(uiCfg) {
     const bar = document.getElementById('controls');
     const track = bar.querySelector('.track');
+    ui.track = track;
+    track.setAttribute('aria-valuemax', String(V.duration));
+    track.onkeydown = e => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const direction = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key];
+      if (direction) seekDeltaShortcut(direction * (e.shiftKey ? 1 : 5));
+      else if (e.key === 'Home' || e.key === 'End') seek(e.key === 'Home' ? 0 : V.duration, true);
+      else return;
+      e.preventDefault();
+    };
     const hudEl = document.getElementById('hud');
     ui.play = bar.querySelector('[data-act=play]');
     ui.fill = bar.querySelector('.fill');
@@ -1236,6 +1423,7 @@
     ui.time = bar.querySelector('.time');
     ui.rate = bar.querySelector('[data-act=rate]');
     ui.subs = bar.querySelector('[data-act=subs]');
+    ui.subsMenu = bar.querySelector('.subs-menu');
     ui.mute = bar.querySelector('[data-act=mute]');
     ui.toPpt = bar.querySelector('[data-act=to-ppt]');
     ui.webfull = bar.querySelector('[data-act=webfull]');
@@ -1248,12 +1436,13 @@
     if (hudEl && !hudEl.classList.contains('is-off')) bindScrubber(hudEl);
     buildChapters(bar);
     buildRateMenu(bar, uiCfg);
+    buildSubsMenu();
+    ui.subs.onclick = () => setOpenMenu(bar, bar.dataset.menu === 'subs' ? '' : 'subs');
     buildSoundMenu(bar);
     bindMenuAutoClose(bar);
 
     syncRateBtnUI();
     syncSubsBtnUI();
-    ui.subs.onclick = () => setSubs(!showSubs);
     syncSoundMenuUI();
     bindVolumeWheel(ui.mute);
     ui.mute.onclick = e => {
@@ -1277,17 +1466,35 @@
     bindIdleWake(bar, uiCfg);
   }
 
+  function syncProgressUI() {
+    const pct = clamp(now / V.duration) * 100 + '%';
+    if (ui.lastProgress !== pct) {
+      ui.fill.style.width = pct;
+      if (ui.thumb) ui.thumb.style.left = pct;
+      ui.lastProgress = pct;
+    }
+    const seconds = Math.min(V.duration, Math.round(now));
+    if (ui.track && ui.lastTrackTime !== seconds) {
+      ui.track.setAttribute('aria-valuenow', String(seconds));
+      ui.track.setAttribute('aria-valuetext', fmtTime(now));
+      ui.lastTrackTime = seconds;
+    }
+  }
+
   function updateUI() {
     if (V.pptMode && pptRt) { pptRt.syncUI(); return; }
     if (!ui.fill) return;
-    const pct = clamp(now / V.duration) * 100 + '%';
-    ui.fill.style.width = pct;
-    if (ui.thumb) ui.thumb.style.left = pct;
-    if (!ui.time.dataset.copied) ui.time.textContent = fmtTime(now) + ' / ' + fmtTime(V.duration);
+    syncProgressUI();
+    const time = fmtTime(now) + ' / ' + fmtTime(V.duration);
+    if (!ui.time.dataset.copied && ui.time.textContent !== time) ui.time.textContent = time;
     const idx = V.scenes.indexOf(current);
-    if (ui.chapLabel && current) ui.chapLabel.textContent = `${String(idx + 1).padStart(2, '0')} · ${current.title}`;
+    const chapter = current ? `${String(idx + 1).padStart(2, '0')} · ${current.title}` : '';
+    if (ui.chapLabel && ui.chapLabel.textContent !== chapter) ui.chapLabel.textContent = chapter;
     syncPlayBtnUI();
-    if (ui.chapItems) ui.chapItems.forEach((it, i) => toggle(it, 'on', i === idx));
+    if (ui.chapItems && ui.lastChapter !== idx) {
+      ui.chapItems.forEach((it, i) => toggle(it, 'on', i === idx));
+      ui.lastChapter = idx;
+    }
     V.controls.forEach(c => { if (typeof c.sync === 'function') c.sync(c._el, V); });
   }
 
@@ -1515,6 +1722,7 @@
       showSubs = saved.subs;
       document.body.classList.toggle('nosubs', !showSubs);
     }
+    V._subtitlesRuntime.setAppearance({ size: saved.subSize, align: saved.subAlign });
     if (typeof saved.rate === 'number' && Number.isFinite(saved.rate)) {
       playbackRate = clamp(saved.rate, 0.25, 4);
       V._playbackRate = playbackRate;
@@ -1619,6 +1827,7 @@
     mountTrackMarks(bar.querySelector('.track'), uiCfg);
     buildChapters(bar);
     buildSoundMenu(bar);
+    buildSubsMenu();
     syncRateBtnUI();
     syncSubsBtnUI();
     syncFullUI();
@@ -1754,7 +1963,7 @@
   function playerState() {
     return Object.freeze({ now, playing: playing && !scrubbing && !localeLoading,
       ended, sceneIndex: V.scenes.indexOf(current), mode: V.environment.mode,
-      sandbox: sandboxState.active, rate: playbackRate,
+      sandbox: sandboxState.active, rate: playbackRate, buffering, error: bufferingError || null,
       page: pptRt ? pptRt.getPageNo() : 0, totalPages: pptRt ? pptRt.getTotalPages() : 0 });
   }
 
@@ -1779,6 +1988,7 @@
       getState: playerState,
       seek: t => { if (RECORD) render(t, 0); else seek(t, true); return playerState(); },
       goToScene, tryAt: tryEgg, exitSandbox,
+      getPptPages: () => pptRt?.getPages() || [],
       goToPage(page, options) {
         if (!pptRt) throw new Error('PPT mode is not active');
         if (!Number.isInteger(page) || page < 1 || page > pptRt.getTotalPages()) throw new RangeError('Unknown PPT page');
@@ -1802,6 +2012,7 @@
       return;
     }
     applySavedPrefs(savedPrefs);
+    document.body.classList.toggle('nosubs', !showSubs);
     audioRt.setRate(playbackRate);
     audioRt.initTracks(cfg, uiCfg, savedPrefs);
   }
@@ -1837,7 +2048,7 @@
     audioRt = V._createAudioRuntime({
       params,
       isRecord: RECORD,
-      isPlaying: () => playing && !localeLoading,
+      isPlaying: () => playing && !scrubbing && !localeLoading && !waitingAssets,
       getNow: () => now,
       getCurrentScene: () => current,
       markSeekApplied: target => { lastSeekTarget = target; lastSeekAt = performance.now(); },
@@ -1887,16 +2098,20 @@
     exposePlayer();
 
     if (RECORD) document.body.classList.add('record');
-    else if (V.pptMode && pptRt) buildPptUI(uiCfg);
+    else if (V.pptMode && pptRt) buildPptUI(cfg, uiCfg);
     else buildUI(uiCfg);
     V.emit('onStart', V._playerCtl);
 
     fit();
-    addEventListener('resize', () => { releaseBarHold(); fit(); });
+    addEventListener('resize', fit);
     lastFrameTs = performance.now();
     ambientOffset = 0;
     idleSec = 0;
     startInitialRender(uiCfg);
+    if (V._loading) {
+      syncAssetAvailability();
+      V._loading.finish();
+    }
     requestAnimationFrame(frame);
     if (!V.pptMode && params.has('autoplay')) play();
     exposeBridge(cfg);
@@ -1966,19 +2181,26 @@
   }
 
   V.boot = async function () {
-    await ensureDynamicBootAssets();
-    V.mountStage();
-    const glEl = document.getElementById('gl');
-    if (V.gl && glEl) {
-      glEl.classList.remove('is-off');
-      try {
-        await V.gl.init(glEl, V.getCfg());
-        if (V.gl.ready === undefined) V.gl.ready = true;
-      } catch {
-        V.gl.ready = false;
-        glEl.classList.add('is-off');
+    try {
+      await ensureDynamicBootAssets();
+      if (V._loading && !V.scenes.length) throw new Error('No scenes to play');
+      if (V._loading?.waitForPaint) await V._loading.waitForPaint();
+      V.mountStage();
+      const glEl = document.getElementById('gl');
+      if (V.gl && glEl) {
+        glEl.classList.remove('is-off');
+        try {
+          await V.gl.init(glEl, V.getCfg());
+          if (V.gl.ready === undefined) V.gl.ready = true;
+        } catch {
+          V.gl.ready = false;
+          glEl.classList.add('is-off');
+        }
       }
+      V.start();
+    } catch (error) {
+      V._loading?.fail();
+      throw error;
     }
-    V.start();
   };
 })(globalThis.V = globalThis.V || {});

@@ -254,11 +254,41 @@ function loadSceneCacheSources(videoDir, scenes) {
   return { modules, definitions };
 }
 
+function hashEntryScripts(h, videoDir, sourceInfo) {
+  const entry = path.join(videoDir, 'index.html');
+  if (!fs.existsSync(entry)) return;
+  const sceneFiles = new Set([...sourceInfo.modules.keys()].map(rel => path.resolve(videoDir, rel)));
+  const html = fs.readFileSync(entry, 'utf8');
+  for (const match of html.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi)) {
+    const src = match[1].split(/[?#]/)[0];
+    if (!src || /^(?:[a-z]+:|\/\/)/i.test(src)) continue;
+    const file = src.startsWith('/') ? path.resolve(VIDEOS_DIR, '.' + src) : path.resolve(videoDir, src);
+    if (sceneFiles.has(file)) continue;
+    h.update(JSON.stringify({ entryScript: src, exists: fs.existsSync(file) }));
+    if (fs.existsSync(file) && fs.statSync(file).isFile()) hashFileEntry(h, src, file);
+  }
+}
+
+function hashEntryStyles(h, videoDir) {
+  const entry = path.join(videoDir, 'index.html');
+  if (!fs.existsSync(entry)) return;
+  const html = fs.readFileSync(entry, 'utf8');
+  for (const [tag] of html.matchAll(/<link\b[^>]*>/gi)) {
+    const rel = tag.match(/\brel=["']([^"']+)["']/i)?.[1] || '';
+    const href = tag.match(/\bhref=["']([^"']+)["']/i)?.[1];
+    if (!/\bstylesheet\b/i.test(rel) || !href || /^(?:[a-z]+:|\/\/)/i.test(href)) continue;
+    const src = decodeURIComponent(href.split(/[?#]/)[0]);
+    const file = src.startsWith('/') ? path.resolve(VIDEOS_DIR, '.' + src) : path.resolve(videoDir, src);
+    h.update(JSON.stringify({ entryStyle: src, exists: fs.existsSync(file) }));
+    if (fs.existsSync(file) && fs.statSync(file).isFile()) hashFileEntry(h, src, file);
+  }
+}
+
 function computeSharedVideoDigest(videoDir, W, H, fps, lang, sourceInfo, outputPath) {
   const h = crypto.createHash('sha256');
   // 渲染规则改变后，旧缓存片段也需要重新生成。
-  h.update(JSON.stringify({ v: '3.8', W, H, fps, lang }));
-  for (const rel of ['css/base.css', 'js/engine.js', 'js/gl.js']) {
+  h.update(JSON.stringify({ v: '4.0', W, H, fps, lang }));
+  for (const rel of ['css/base.css', 'js/engine.js', 'js/gl.js', 'js/frame-client.js']) {
     const fp = resolveBaseFile(rel, VIDEOS_DIR);
     if (fs.existsSync(fp)) hashFileEntry(h, 'base/' + rel, fp);
   }
@@ -270,6 +300,8 @@ function computeSharedVideoDigest(videoDir, W, H, fps, lang, sourceInfo, outputP
   for (const rel of [...sourceInfo.modules.keys()].sort()) {
     h.update(JSON.stringify({ sharedSceneModule: rel, source: sourceInfo.modules.get(rel) }));
   }
+  hashEntryScripts(h, videoDir, sourceInfo);
+  hashEntryStyles(h, videoDir);
   hashFilesInDir(h, path.join(VIDEOS_DIR, 'themes'), n => n.endsWith('.css') || n.endsWith('.js'), true, 'themes');
   hashExtraVideoFiles(h, videoDir, new Set(sourceInfo.modules.keys()), '', outputPath);
   hashVisualAssetsDir(h, path.join(VIDEOS_DIR, 'assets'), outputPath, 'shared-assets');
@@ -796,7 +828,9 @@ function resolveTargetVideoId(pos) {
 export function resolveRenderConcurrency(totalFrames, opts, cpuCount = os.availableParallelism?.() || os.cpus().length) {
   const cpuBudget = Math.max(1, cpuCount - 1);
   const maxWorkers = Math.max(1, Math.floor(cpuBudget / 3));
-  const autoWorkers = totalFrames >= 120 ? Math.min(8, maxWorkers) : 1;
+  const frameBudget = Math.max(1, Math.ceil(totalFrames / ((opts.fps || 30) * 10)));
+  const autoCap = opts.maxAutoWorkers == null ? 8 : Math.max(1, Math.floor(positiveRenderNumber(opts.maxAutoWorkers, 'render.maxAutoWorkers')));
+  const autoWorkers = Math.min(8, maxWorkers, frameBudget, autoCap);
   const envWorkers = process.env.WORKERS ? Math.max(1, parseInt(process.env.WORKERS, 10) || 1) : null;
   return { workerCount: Math.min(totalFrames, maxWorkers, opts.workers || envWorkers || autoWorkers), cpuBudget };
 }
@@ -845,7 +879,7 @@ async function runRenderCli() {
   const renderDur = Math.max(1 / FPS, endSec - startSec);
   const totalFrames = Math.max(1, Math.ceil(renderDur * FPS));
   if (!Number.isSafeInteger(totalFrames)) throw new Error('Render frame count exceeds the supported integer range. Reduce the FPS or selected duration.');
-  const { workerCount, cpuBudget } = resolveRenderConcurrency(totalFrames, opts);
+  const { workerCount, cpuBudget } = resolveRenderConcurrency(totalFrames, { ...opts, fps: FPS, maxAutoWorkers: cfg.render?.maxAutoWorkers });
 
   const tmpDir = path.join(ROOT, '.runtime', `render-${VIDEO_ID}-${process.pid}`);
   const ffmpegBin = resolveFfmpeg(ROOT);

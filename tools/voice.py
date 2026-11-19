@@ -15,31 +15,12 @@ FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 PROJECT_ROOT = os.path.abspath(os.environ.get('VIDEO_PROJECT_ROOT') or os.getcwd())
 CACHE_DIR = os.path.join(PROJECT_ROOT, '.runtime', 'voice-cache')
 
-COMMON_FIX = [
-    (r'重编排', '崇编排'), (r'重算', '崇算'), (r'重放', '崇放'), (r'重写', '崇写'), (r'重构', '崇构'),
-    (r'执行', '直形'), (r'运行', '运形'), (r'并行', '并形'), (r'例行', '例形'), (r'先行', '先形'),
-    (r'进行', '进形'), (r'自行', '自形'), (r'推行', '推形'), (r'实行', '实形'), (r'放行', '放形'),
-    (r'命令行', '命令航'), (r'一行行', '一航航'), (r'“|”|‘|’|《|》', ''),
-]
 CJK_CHARS = r'\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af'
 TOKEN_RE = re.compile(rf'[{CJK_CHARS}]|(?:(?![{CJK_CHARS}])[^\W_])+', re.UNICODE)
 SINGLE_CJK_RE = re.compile(rf'^[{CJK_CHARS}]$')
 PAUSE_CHARS = set('，。；：！？——,.;:!?、')
 _WHISPER_MODELS = {}
 _WHISPER_LOCK = threading.Lock()
-
-
-def build_rules(pron_dict, enable_common=True):
-    rules = [(pat, str(rep)) for pat, rep in pron_dict.items()] if isinstance(pron_dict, dict) else []
-    if enable_common:
-        rules.extend(COMMON_FIX)
-    return rules
-
-
-def speakable(s, rules):
-    for a, b in rules:
-        s = re.sub(a, b, s)
-    return s
 
 
 def trim(y, thr=0.005, pad=0.05):
@@ -307,14 +288,15 @@ def make_cache_key(cfg: dict, spoken: str, en_ratio: float, video_dir=None) -> s
 
 def normalize_line_item(item, base_cfg: dict):
     if not isinstance(item, dict):
-        return str(item), base_cfg
+        return str(item), str(item), base_cfg
     line_cfg = dict(base_cfg)
     for k in ('provider', 'voice', 'speed', 'pitch', 'model', 'style', 'instructions', 'enSlowdown', 'align', 'whisperModel', 'volume', 'xmlLang', 'lang'):
         if item.get(k) is not None:
             line_cfg[k] = item[k]
     if item.get('provider'):
         line_cfg['provider'] = str(item['provider']).lower()
-    return str(item.get('text') or ''), line_cfg
+    text = str(item.get('text') or '')
+    return text, str(item.get('spoken', text)), line_cfg
 
 
 def _try_load_cached_voice(c_wav: str, c_meta: str, out_wav: str):
@@ -369,9 +351,8 @@ def _write_cache_entry_atomic(out_wav: str, c_wav: str, c_meta: str, payload: di
                 os.remove(p)
 
 
-async def synth_one(text, synth_fn, cfg, en_ratio, rules, out_wav, video_dir=None):
+async def synth_one(text, spoken, synth_fn, cfg, en_ratio, out_wav, video_dir=None):
     os.makedirs(CACHE_DIR, exist_ok=True)
-    spoken = speakable(text, rules)
     digest = make_cache_key(cfg, spoken, en_ratio, video_dir=video_dir)
     c_wav, c_meta = os.path.join(CACHE_DIR, f'{digest}.wav'), os.path.join(CACHE_DIR, f'{digest}.json')
     hit = _try_load_cached_voice(c_wav, c_meta, out_wav)
@@ -389,7 +370,7 @@ async def synth_one(text, synth_fn, cfg, en_ratio, rules, out_wav, video_dir=Non
     return dur, adj_words, env_30hz
 
 
-async def synth_all(scenes, out_dir, base_cfg, rules, video_dir=None):
+async def synth_all(scenes, out_dir, base_cfg, video_dir=None):
     os.makedirs(out_dir, exist_ok=True)
     sem = asyncio.Semaphore(max(1, int(base_cfg.get('concurrency') or 6)))
     durs = [[0.0] * len(lines) for lines in scenes]
@@ -404,11 +385,11 @@ async def synth_all(scenes, out_dir, base_cfg, rules, video_dir=None):
         return provider_cache[key]
 
     async def worker(si, li, raw_item):
-        text, line_cfg = normalize_line_item(raw_item, base_cfg)
+        text, spoken, line_cfg = normalize_line_item(raw_item, base_cfg)
         synth_fn = get_fn(line_cfg)
         async with sem:
             wav = f'{out_dir}/{si:02d}_{li:02d}.wav'
-            dur, wlist, env = await synth_one(text, synth_fn, line_cfg, compute_en_ratio(line_cfg), rules, wav, video_dir=video_dir)
+            dur, wlist, env = await synth_one(text, spoken, synth_fn, line_cfg, compute_en_ratio(line_cfg), wav, video_dir=video_dir)
             durs[si][li], all_words[si][li], all_envs[si][li] = dur, wlist, env
             vtag = f" [{line_cfg.get('voice')}]" if line_cfg.get('voice') != base_cfg.get('voice') else ''
             print(f'  S{si:02d}L{li:02d} ({dur:5.2f}s){vtag} {text[:36]}', flush=True)
@@ -450,14 +431,13 @@ def _finalize_tts_defaults(tts_cfg: dict) -> str:
     return provider
 
 
-def hydrate_cached_voices(scenes, out_dir, base_cfg, rules, video_dir=None):
+def hydrate_cached_voices(scenes, out_dir, base_cfg, video_dir=None):
     os.makedirs(out_dir, exist_ok=True)
     hits, total = 0, 0
     for si, lines in enumerate(scenes):
         for li, raw_item in enumerate(lines):
             total += 1
-            text, line_cfg = normalize_line_item(raw_item, base_cfg)
-            spoken = speakable(text, rules)
+            _, spoken, line_cfg = normalize_line_item(raw_item, base_cfg)
             digest = make_cache_key(line_cfg, spoken, compute_en_ratio(line_cfg), video_dir=video_dir)
             c_wav = os.path.join(CACHE_DIR, f'{digest}.wav')
             c_meta = os.path.join(CACHE_DIR, f'{digest}.json')
@@ -466,7 +446,7 @@ def hydrate_cached_voices(scenes, out_dir, base_cfg, rules, video_dir=None):
     print(f'  Cache-only voice lookup: {hits}/{total} dry clips hit ({total - hits} fallback to stem).')
 
 
-def _write_timings_js(timings_path, audio_src, bgm_src, voice_label, durs, all_words, all_envs, lang):
+def _write_timings_js(timings_path, audio_src, bgm_src, voice_label, durs, all_words, all_envs, lang, spoken_digest=None):
     directory = os.path.dirname(timings_path)
     os.makedirs(directory, exist_ok=True)
     temporary = os.path.join(directory, f'.html-video-{os.getpid()}-{uuid.uuid4().hex}.tmp.js')
@@ -475,6 +455,8 @@ def _write_timings_js(timings_path, audio_src, bgm_src, voice_label, durs, all_w
             f.write('/* 配音时长（秒）、逐词时间轴与 30Hz 语音包络，由构建管线生成。 */\n')
             f.write('window.V = window.V || {};\n')
             meta = {'src': audio_src, 'voice': voice_label, 'durations': durs, 'words': all_words, 'envelopes': all_envs}
+            if spoken_digest:
+                meta['spokenDigest'] = spoken_digest
             if lang:
                 meta['lang'] = lang
             if bgm_src:
@@ -487,7 +469,7 @@ def _write_timings_js(timings_path, audio_src, bgm_src, voice_label, durs, all_w
             os.remove(temporary)
 
 
-def _run_synthesis_stage(scenes, out_dir, tts_cfg, provider, rules, video_dir):
+def _run_synthesis_stage(scenes, out_dir, tts_cfg, provider, video_dir):
     if not tts_cfg.get('enabled', True) or sum(len(s) for s in scenes) == 0:
         os.makedirs(out_dir, exist_ok=True)
         print('  No spoken lines (or TTS disabled); skipping speech synthesis.')
@@ -495,7 +477,7 @@ def _run_synthesis_stage(scenes, out_dir, tts_cfg, provider, rules, video_dir):
     prov_label = f"script:{os.path.basename(tts_cfg['script'])}" if tts_cfg.get('script') else provider
     voice_tag = tts_cfg.get('voice') or tts_cfg.get('model') or 'default'
     print(f"  TTS Provider: {prov_label} ({voice_tag}, speed={tts_cfg['speed']})")
-    durs, all_words, all_envs = asyncio.run(synth_all(scenes, out_dir, tts_cfg, rules, video_dir=video_dir))
+    durs, all_words, all_envs = asyncio.run(synth_all(scenes, out_dir, tts_cfg, video_dir=video_dir))
     return durs, all_words, all_envs, f"{prov_label} / {voice_tag}"
 
 
@@ -504,19 +486,17 @@ def main():
     with open(lines_path, encoding='utf-8') as f:
         raw_payload = json.load(f)
     lang = raw_payload.get('lang') or '' if isinstance(raw_payload, dict) else ''
+    spoken_digest = raw_payload.get('spokenDigest') if isinstance(raw_payload, dict) else None
     scenes, tts_cfg, audio_src, bgm_src, video_dir = _parse_cli_tts_config(raw_payload, sys.argv)
     if lang and 'lang' not in tts_cfg:
         tts_cfg['lang'] = lang
     provider = _finalize_tts_defaults(tts_cfg)
-    use_zh_common = bool(tts_cfg.get('polyphoneFix', True)) and (not lang or str(lang).lower().startswith('zh'))
-    rules = build_rules(tts_cfg.get('pronunciation', {}), enable_common=use_zh_common)
-
     if os.environ.get('VOICE_CACHE_ONLY') == '1':
-        hydrate_cached_voices(scenes, out_dir, tts_cfg, rules, video_dir=video_dir)
+        hydrate_cached_voices(scenes, out_dir, tts_cfg, video_dir=video_dir)
         return
 
-    durs, all_words, all_envs, voice_label = _run_synthesis_stage(scenes, out_dir, tts_cfg, provider, rules, video_dir)
-    _write_timings_js(timings_path, audio_src, bgm_src, voice_label, durs, all_words, all_envs, lang)
+    durs, all_words, all_envs, voice_label = _run_synthesis_stage(scenes, out_dir, tts_cfg, provider, video_dir)
+    _write_timings_js(timings_path, audio_src, bgm_src, voice_label, durs, all_words, all_envs, lang, spoken_digest)
     print('total voice', round(sum(map(sum, durs)), 1), 's')
 
 

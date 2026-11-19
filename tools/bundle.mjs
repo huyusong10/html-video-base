@@ -2,6 +2,8 @@
 // 用法：html-video bundle [video-id ... | --all] [--single] [--out dist]
 import fs from 'node:fs';
 import path from 'node:path';
+import { readPageWithPptxDownload } from './lib/pptx-assets.mjs';
+import { readVersionedAssets, versionBundleAssets, writeVersionedCacheHeaders } from './lib/versioned-assets.mjs';
 import {
   ROOT, PKG_ROOT, VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR,
   listVideoIds, normalizeCliArgs, isMainModule,
@@ -180,11 +182,23 @@ function rewriteBundledRefs(targetOut, collisions) {
   rewriteDirFiles(path.join(targetOut, 'themes'), ['.css'], themeCssColRules, true);
 }
 
+function addPptxDownloadMetadata(courseDir) {
+  const html = readPageWithPptxDownload(courseDir);
+  if (html !== null) fs.writeFileSync(path.join(courseDir, 'index.html'), html, 'utf8');
+}
+
+function rewriteSingleAsset(file, relativePath, collisions) {
+  if (!relativePath.startsWith('assets/')) return;
+  const depth = relativePath.split('/').length - 1;
+  rewriteEntryFile(path.basename(file), file, buildDepthRules(depth, collisions, true), buildDepthRules(depth, collisions, false));
+}
+
 export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
   const videosDir = path.join(projectRoot, 'videos');
   const srcVideo = resolveVideoSource(videoId, videosDir);
   const targetOut = outDir || path.join(projectRoot, 'dist', videoId);
   assertSafeBundleOutDir(targetOut, projectRoot);
+  const versioned = readVersionedAssets(srcVideo);
 
   fs.rmSync(targetOut, { recursive: true, force: true });
   fs.mkdirSync(targetOut, { recursive: true });
@@ -198,6 +212,9 @@ export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
   fs.cpSync(srcVideo, targetOut, { recursive: true, force: true });
 
   rewriteBundledRefs(targetOut, collisions);
+  addPptxDownloadMetadata(targetOut);
+  const paths = versionBundleAssets(targetOut, versioned, (file, rel) => rewriteSingleAsset(file, rel, collisions));
+  writeVersionedCacheHeaders(targetOut, paths);
   console.log(`✅ Bundled single video '${videoId}' -> ${targetOut}`);
   return targetOut;
 }
@@ -207,6 +224,7 @@ export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
   if (!targets.length) throw new Error('No videos found under videos/ to bundle.');
   assertSafeBundleOutDir(outDir, ROOT);
   const sources = targets.map(id => resolveVideoSource(id, VIDEOS_DIR));
+  const versioned = sources.map(readVersionedAssets);
 
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });
@@ -216,13 +234,18 @@ export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
   copyIfExists(path.join(VIDEOS_DIR, 'assets'), path.join(outDir, 'assets'));
   copyIfExists(path.join(VIDEOS_DIR, 'themes'), path.join(outDir, 'themes'));
 
+  const versionedPaths = [];
   for (let i = 0; i < targets.length; i++) {
-    fs.cpSync(sources[i], path.join(outDir, targets[i]), { recursive: true, force: true });
+    const courseDir = path.join(outDir, targets[i]);
+    fs.cpSync(sources[i], courseDir, { recursive: true, force: true });
+    addPptxDownloadMetadata(courseDir);
+    versionedPaths.push(...versionBundleAssets(courseDir, versioned[i]).map(rel => `${targets[i]}/${rel}`));
   }
 
   for (const entry of fs.readdirSync(VIDEOS_DIR, { withFileTypes: true })) {
     if (entry.isFile()) copyIfExists(path.join(VIDEOS_DIR, entry.name), path.join(outDir, entry.name));
   }
+  writeVersionedCacheHeaders(outDir, versionedPaths);
 
   console.log(`✅ Bundled ${targets.length} video(s) + standalone runtime -> ${outDir}`);
   return outDir;

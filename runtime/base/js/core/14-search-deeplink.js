@@ -69,7 +69,7 @@
           h('span', { class: 'chap-hit-sub' }, buildHighlightedSnippet(hit.text, query)));
     const ppt = V.pptMode && V._pptRuntime;
     const rowMeta = ppt ? uiText('pptChapPage', { p: ppt.findPageNoForTime(hit.time) }) : ctl.fmtTime(hit.time);
-    const row = h('div', { class: 'chap-item' + (idx === activeIdx ? ' on' : '') },
+    const row = h('button', { type: 'button', class: 'chap-item' + (idx === activeIdx ? ' on' : '') },
       h('em', null, code),
       body,
       h('small', null, rowMeta));

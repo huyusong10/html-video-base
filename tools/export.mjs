@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, listVideoIds, loadVideoSandbox, probeSceneAnchors, getSandboxCfg, normalizeCliArgs } from './lib/paths.mjs';
 import { writeSubtitleFiles } from './lib/subtitles.mjs';
+import { spokenInputDigest } from './lib/speech-input.mjs';
 
 function parseExportArgs(rawArgv) {
   const argv = normalizeCliArgs(rawArgv);
@@ -34,12 +35,11 @@ function applyTtsEnvOverrides(ttsCfg) {
 const LINE_TTS_KEYS = ['voice', 'speed', 'pitch', 'model', 'provider', 'style', 'instructions', 'enSlowdown', 'align', 'whisperModel', 'volume', 'xmlLang'];
 
 function serializeLineCue(c) {
-  const overrides = {};
-  let hasOverride = false;
+  const line = { text: c.text, spoken: c.spoken };
   for (const k of LINE_TTS_KEYS) {
-    if (c[k] != null) { overrides[k] = c[k]; hasOverride = true; }
+    if (c[k] != null) line[k] = c[k];
   }
-  return hasOverride ? { text: c.text, ...overrides } : c.text;
+  return line;
 }
 
 function resolveSceneSfx(V, sc, si) {
@@ -84,7 +84,6 @@ if (anchorErrors.length > 0) {
 }
 
 const ttsCfg = cfg.tts === false ? { enabled: false } : Object.assign({}, cfg.tts || {});
-if (cfg.pronunciation && !ttsCfg.pronunciation) ttsCfg.pronunciation = cfg.pronunciation;
 applyTtsEnvOverrides(ttsCfg);
 
 const linesPayload = {
@@ -93,6 +92,7 @@ const linesPayload = {
   videoDir,
   audioSrc: audioRel === null ? false : audioRel,
   bgmSrc: bgmRel === null ? false : bgmRel,
+  spokenDigest: spokenInputDigest(V),
   tts: ttsCfg,
   scenes: V.scenes.map(sc => sc.cues.map(serializeLineCue)),
 };

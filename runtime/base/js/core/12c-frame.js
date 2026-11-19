@@ -28,6 +28,9 @@
       : Object.assign({}, V.pointer);
     current = sceneFrame({ id: ++sequence, now, clock, alive: clock, idle, uiDt,
       playing: options.playing, ended: options.ended, isRecord: options.isRecord,
+      buffering: Boolean(options.buffering),
+      subsEnabled: options.subsEnabled !== false,
+      precise: Boolean(options.precise || options.isRecord),
       pptMode: Boolean(V.pptMode), pointer: Object.freeze(pointer) }, scene, index);
     return current;
   }
@@ -85,7 +88,10 @@
       }, source.timeoutMs);
       return source.prepare(frame, { signal: abort.signal });
     });
-    return Promise.race([work, stopped]).catch(error => { throw sourceError(source, frame, error); }).finally(() => {
+    return Promise.race([work, stopped]).catch(error => {
+      if (!parentSignal.aborted && error?.name !== 'AbortError') source.onPrepareError?.();
+      throw sourceError(source, frame, error);
+    }).finally(() => {
       clearTimeout(timer);
       parentSignal.removeEventListener('abort', cancel);
       abort.signal.removeEventListener('abort', onAbort);
@@ -125,6 +131,14 @@
 
   V.getFrameState = () => current;
   V._frameRuntime = { begin, forScene, prepare, report,
+    readiness() {
+      const list = current ? activeSources(current) : [];
+      return { waiting: list.some(source => source.status && source.status() !== 'ready'),
+        failed: list.some(source => source.status?.() === 'failed') };
+    },
+    retryActive() {
+      return Promise.all((current ? activeSources(current) : []).map(source => source.retry?.()));
+    },
     signal(frame) {
       if (!current || frame !== current) throw abortError();
       return controller.signal;

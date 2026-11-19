@@ -10,7 +10,11 @@ function verifyPlanning() {
   const original = process.env.WORKERS;
   delete process.env.WORKERS;
   try {
-    assert.deepEqual(resolveRenderConcurrency(600, {}, 32), { workerCount: 8, cpuBudget: 31 });
+    assert.deepEqual(resolveRenderConcurrency(600, {}, 32), { workerCount: 2, cpuBudget: 31 });
+    assert.equal(resolveRenderConcurrency(2400, {}, 32).workerCount, 8);
+    assert.equal(resolveRenderConcurrency(120, {}, 32).workerCount, 1);
+    assert.equal(resolveRenderConcurrency(2400, { maxAutoWorkers: 2 }, 32).workerCount, 2);
+    assert.equal(resolveRenderConcurrency(2400, { maxAutoWorkers: 2, workers: 4 }, 32).workerCount, 4);
     assert.equal(resolveRenderConcurrency(60, {}, 32).workerCount, 1);
     assert.equal(resolveRenderConcurrency(600, { workers: 100 }, 8).workerCount, 2);
     assert.equal(resolveRenderConcurrency(600, { workers: 8 }, 1).workerCount, 1);

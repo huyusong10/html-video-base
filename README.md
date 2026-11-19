@@ -158,6 +158,12 @@ V.scenes.push({
 跑通基础流程后，如果视频需要更丰富的视觉表现、交互体验或跨语言版本，可以按下面分类查阅：
 
 ### 1. 交互与双时钟呼吸感
+
+配音缓冲或当前受管画面尚未初始化完成时，叙事时间等待，页面显示准备提示；呼吸、眨眼和指针响应继续更新。配音或画面加载失败时显示重试入口。拖动进度条时暂停音轨，松手后从预览位置恢复。暂停动画保持开启，重复的样式、SVG 属性与控制栏文字只在值变化时写入。
+
+播放器面向桌面浏览器。键盘焦点停留在控制栏内时，控制栏保持显示。
+
+导出时，短片段会减少自动 worker 数，避免重复启动浏览器页面。三维资源较重的视频可设置 `render: { maxAutoWorkers: 2 }` 限制自动并发；命令行 `--workers N` 和环境变量 `WORKERS` 仍可指定并发。渲染缓存包含入口 HTML 引用的本地脚本和样式文件。
 - **暂停时动画不停**：默认开启 `ui.livePause: true`。暂停或播完停留时，叙事时间 `t` 冻结，但环境时钟 `x.alive` / `x.clock` 会继续推进，恢复播放时也不会跳帧。角色眨眼、呼吸、粒子漂浮读取 `x.alive` 即可；录制 MP4（`?record=1`）时会自动锁定 `alive === t`，保证导出幂等。
 - **鼠标跟随与可点击元素**：`x.pointer` 自动把鼠标坐标换算到舞台坐标系（消除缩放、黑边与全屏偏移），适合做视差或眼神追踪；需要响应点击的卡片或按钮用 `V.u.interactive(el, handlers)` 包一层，点击时既能触发 `V.sfx()` 微音效，又不会误触暂停播放。
 - **交互驻点与彩蛋试玩**：长视频可在幕配置 `scene.checkpoints` 做互动停顿或分支问答；结尾可通过 `V.tryEgg(sec, hint)`、`V.enterSandbox()` / `V.exitSandbox()` 跳转到任意幕试玩并返回。
@@ -172,7 +178,15 @@ V.scenes.push({
 ### 3. 多语言视频扩展
 分镜代码本身保持单语种编写，需要外语版本时，在 `video.config.js` 声明 `locales`，再新增 `locales/en.js` 用 `V.locale()` 做外挂翻译即可。支持 `npx html-video build demo --lang en` 独立合成外语配音字幕，并在网页端通过 `?lang=en` 或声音菜单实时切换。详细写法见 [多语言扩展指南](skills/html-video/references/i18n.md)。
 
-### 4. 主题与播放器外观定制
+### 4. 默认配置与播放器定制
+
+`V.getCfg()` 依次读取工程 `V.projectDefaults`、主题 `V.themeDefaults`、单片 `V.config` 和语言覆写。全都未填写时，框架使用自己的默认值。工程与主题脚本放在 `video.config.js` 前加载，浏览器和构建工具会读取同一份。未填写的字段继承上层；`ui`、`tts`、`bgm` 和 `sfx` 对象允许只改其中一个字段，数组整体替换。`bgm: false` 和 `tts: false` 可分别关闭配乐和配音。
+
+发音写在 `tts.pronunciation`，例如 `{ 'Win+L': 'Win 加 L', AI: 'A I' }`。词表按词覆盖，同一个词填 `false` 时保留原写法。框架按字面匹配，长词优先，每处只替换一次。`tts.polyphoneFix: false` 只关闭通用多音词。发音词表不修改字幕。原有顶层 `pronunciation` 字段仍可读取。
+
+一句话内需要换个断句时，可在该条台词写 `{ text: '发现异常后执行命令。', speechText: '发现异常后，执行命令。' }`。只允许调整中文句读标点，不能拆开数字、缩写或发音词条。框架先断句，再应用词表；字幕继续显示 `text`。两句之间的留白由 `gap + pause` 决定。只改句间间隔可用 `mix`；改了朗读输入则用 `build`，校验会检查是否仍在使用旧配音。已有配音没有输入记录时，不要求为未调整的旧片重建。
+
+在单片配置中设置 `pauseReport: true`，`build`、`mix` 和 `verify` 会在 `.runtime/reports/<视频 ID>/pauses.md` 输出报告（其他语言有独立文件）。句间按时间轴计算；句内按已有语音强度估算，缺数据标为「未测」。报告不影响混音、字幕或静态包。
 - **播放器行为**：通过 `V.config.ui` 或 `V.themeDefaults.ui` 调整控制栏隐显模式（默认 `overlay` 悬停自动显隐）、倍速档位 `rates`、图标风格 `iconPreset`（`'default' | 'pixel'`），以及音轨/断点偏好记忆（`persist` / `resume`）；也支持代码控制音轨：`V.setBgm()`、`V.setVoice()`、`V.setMuted()`、`V.clearSavedState()`。需要返回项目页面时，在 `V.config.homeUrl` 中填写地址；未配置时不显示返回按钮。
 - **CSS 变量槽位**：底层样式采用低权重选择器，业务 `style.css` 直接在 `:root` 覆盖变量即可换肤：
   - 视口与舞台：`--viewport-bg`、`--stage-shadow`、`--stage-bg-image`、`--font-sans`、`--font-smoothing`、`--gl-rendering`
@@ -191,6 +205,12 @@ V.scenes.push({
 
 ---
 
+普通播放时，点击字幕图标打开字幕设置，可以开关字幕、选择大中小字号，以及切换靠左或居中对齐。默认使用中号、靠左。小号沿用课程原有字号，播放器会按课程记住选择。
+
+### 按需启用加载界面
+
+在课程入口 `index.html` 的 `<body>` 开头加上 `<script src="../base/js/loading.js"></script>`。将外部样式表和播放器脚本放在它后面，浏览器等待这些文件时就能显示提示。播放器继续按原有方式调用 `V.boot()`。启用后，打开课程、播放缓冲和 PPT 等待画面时都会显示「正在加载…」。录制和截图模式会自动隐藏加载界面。
+
 ## CLI 命令速查
 
 | 命令 | 说明 |
@@ -204,8 +224,19 @@ V.scenes.push({
 | `html-video verify [id ...] [--stamp-baked] [--visual] [--strict]` | 校验词锚、字幕与音画同步 |
 | `html-video audit [id ...] [--strict] [--screenshots <dir>]` | 无头浏览器版面、图片与幂等性巡检 |
 | `html-video storyboard [id] [out.html] [--per-cue] [--pdf]` | 导出图文分镜审阅单 |
+| `html-video pptx <id> [out.pptx \| --publish] [--mode image\|editable] [--pages 1,3-5] [--lang en]` | 按 PPT 页序导出图片版或混合可编辑版，并写入演讲者备注 |
 | `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--no-bgm] [--no-cache]` | 按幕缓存增量导出高清 MP4 |
 | `html-video bundle [id ... \| --single \| --all] [--out dist]` | 打包免 `node_modules` 的纯静态站点 |
+
+课程启用 `ppt: true` 后可导出 PPTX。默认导出全部 PPT 页的图片版，`--pages` 按网页 PPT 模式的页码选页，`--mode editable` 导出混合可编辑版。两版使用相同的页序和演讲者备注。
+
+混合版转换课程显式标记的元素，其他画面保留为背景截图。
+
+- `data-pptx-native="text"` 导出单行文本。
+- `data-pptx-native="svg"` 将 SVG 中受支持的矩形、线条、圆和单行文本导为原生对象。渐变、复杂变换和标记了 `data-pptx-raster` 的元素保留在截图里。
+- `data-pptx-native="chart"` 结合 `data-pptx-chart` 导出原生折线图。数据含 `labels`、`axes` 和 `series`。坐标轴用 `min`、`max`、`step` 和 `unit` 定义。数列用 `name`、六位十六进制 `color` 和对应标签的 `values` 定义，`null` 表示空缺，`axis: 1` 使用第二条数值轴。
+
+先执行 `html-video pptx <id> --publish` 发布图片版，再用 `--mode editable --publish` 发布混合版。PPT 模式的工具栏会显示已发布的下载选项。执行 `html-video bundle` 可把两版随静态站点一起发布。
 
 ## 工程门禁（本仓开发）
 

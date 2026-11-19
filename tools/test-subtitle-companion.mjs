@@ -17,7 +17,7 @@ function fixture() {
   const scene = { duration: 3, cues: [cue] };
   const lead = { innerHTML: '', children: [], appendChild(child) { this.children.push(child); } };
   const text = { firstChild: {}, lastChild: {} };
-  const subs = { dataset: {}, style: { setProperty() {}, removeProperty() {} },
+  const subs = { dataset: {}, style: { getPropertyValue() { return ''; }, setProperty() {}, removeProperty() {} },
     querySelector(selector) {
       if (selector === '.sub-lead') return lead;
       if (selector === '.sub-text') return text;
@@ -66,5 +66,20 @@ checkCallbacks('Runtime onUpdate override', ['onUpdate'], ['onUpdate'], 'runtime
 checkCallbacks('Configured update alias', ['update'], [], 'config.update');
 checkCallbacks('Runtime update alias override', ['update'], ['update'], 'runtime.update');
 checkCallbacks('onUpdate priority across sources', ['onUpdate'], ['update'], 'config.onUpdate');
+
+{
+  const { V, cue, subs } = fixture();
+  const next = { start: 4, end: 6, text: 'Next subtitle', speaker: null };
+  const scene = { duration: 6, cues: [cue, next] };
+  const runtime = V._subtitlesRuntime;
+  runtime.bindSubElements(subs);
+  runtime.prepareVideoCue(scene, 0.5);
+  const gap = runtime.prepareVideoCue(scene, 3);
+  assert.equal(gap.cue, null);
+  assert.equal(gap.activeCueIdx, -1);
+  assert.equal(subs.querySelector('.sub-text').lastChild.textContent, next.text);
+  runtime.updateSubs(scene, 0, 3, 3, 3, true, gap);
+  assert.equal(subs.style.visibility, 'hidden');
+}
 
 console.log('Subtitle companion preserves configured callbacks and runtime callback precedence.');

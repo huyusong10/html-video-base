@@ -136,10 +136,7 @@ html, body {
   transition: background 0.3s ease;
 }
 
-body.ctrl-overlay #viewport,
-body.web-full #viewport,
-body.os-full #viewport,
-body.record #viewport {
+body:is(.ctrl-overlay, .web-full, .os-full, .record, [data-video-host-fullscreen]) #viewport {
   inset: 0;
 }
 
@@ -224,7 +221,6 @@ body.record #viewport {
   height: var(--hud-h);
   z-index: 10;
   cursor: pointer;
-  touch-action: none;
 }
 #hud.is-off { display: none; }
 body.record #hud { pointer-events: none; }
@@ -301,7 +297,6 @@ body.record #hud { pointer-events: none; }
   --sub-left: var(--sub-edge, 120px);
   --sub-right: auto;
   --sub-transform: translateX(var(--sub-offset-x, 0px));
-  --sub-align: left;
 }
 #subs[data-sub-pos="right"] {
   --sub-left: auto;
@@ -313,6 +308,10 @@ body.record #hud { pointer-events: none; }
   --sub-top: var(--sub-top-edge, 72px);
   --sub-has-top: auto;
 }
+#subs[data-sub-size="medium"] { --sub-viewer-scale: 1.25; }
+#subs[data-sub-size="large"] { --sub-viewer-scale: 1.5; }
+#subs[data-sub-align="left"] { --sub-viewer-align: left; }
+#subs[data-sub-align="center"] { --sub-viewer-align: center; }
 body.record #subs {
   --ctrl-dodge: 0px;
   transition: none !important;
@@ -335,7 +334,7 @@ body.record #subs {
   border-radius: var(--ctrl-radius);
   background: var(--accent);
   color: #ffffff;
-  font-size: calc(var(--sub-font-size, var(--sub-size)) * 0.72);
+  font-size: calc(var(--sub-font-size, var(--sub-size)) * var(--sub-viewer-scale, 1) * 0.72);
   font-weight: 700;
   letter-spacing: 0.03em;
   line-height: 1.3;
@@ -344,13 +343,15 @@ body.record #subs {
 .sub-text {
   display: grid;
   margin: 0;
-  font-size: var(--sub-font-size, var(--sub-size));
+  min-width: 0;
+  font-size: calc(var(--sub-font-size, var(--sub-size)) * var(--sub-viewer-scale, 1));
   line-height: 1.42;
   letter-spacing: 0.02em;
   color: var(--sub-color, var(--sub-fg));
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   unicode-bidi: plaintext;
-  text-align: var(--sub-align, center);
+  text-align: var(--sub-align, var(--sub-viewer-align, center));
 }
 .sub-text > span { grid-area: 1 / 1; }
 .sub-text > .ghost { visibility: hidden; }
@@ -363,6 +364,7 @@ body.egg-mode #subs {
 
 /* 彩蛋 / 沙盒互动试玩浮条（保持 :where 低权重，允许业务通过 .egg-banner 等类自由覆盖像素或品牌皮肤） */
 :where(.v-sandbox-bar) {
+  visibility: hidden;
   position: absolute;
   left: 50%;
   bottom: calc(62px + var(--ctrl-dodge, 0px));
@@ -380,6 +382,7 @@ body.egg-mode #subs {
   transition: opacity 0.22s, transform 0.22s, bottom 0.22s;
 }
 :where(.v-sandbox-bar.on) {
+  visibility: visible;
   opacity: 1;
   pointer-events: auto;
   transform: translate(-50%, 0);
@@ -442,7 +445,7 @@ body.record #checkpoint-overlay { display: none !important; }
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
   transition: opacity 0.25s;
 }
-:is(body.ctrl-overlay, body.web-full, body.os-full) #start-hint { top: 50%; }
+body:is(.ctrl-overlay, .web-full, .os-full, [data-video-host-fullscreen]) #start-hint { top: 50%; }
 body.playing #start-hint, body.started #start-hint, body.record #start-hint { opacity: 0; }
 
 /* 底部播放控制栏（默认 PotPlayer 式悬浮：鼠标移入视频即显、静止自动隐退、移出窗口速隐、全屏同步隐鼠） */
@@ -459,24 +462,22 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   user-select: none;
 }
 
-:is(body.ctrl-overlay, body.web-full, body.os-full) #controls {
+body:is(.ctrl-overlay, .web-full, .os-full, [data-video-host-fullscreen]) #controls {
   backdrop-filter: blur(10px);
   opacity: 0;
   transition: opacity 0.16s ease;
 }
-:is(body.ctrl-overlay, body.web-full, body.os-full):is(:not(.playing):not(.ppt-mode), .ui-active, .scrubbing, .menu-open) #controls,
-:is(body.ctrl-overlay, body.web-full, body.os-full) #controls:has(.chap-search:focus) {
+body:is(.ctrl-overlay, .web-full, .os-full, [data-video-host-fullscreen]):is(.ui-active, .scrubbing, .menu-open, .ui-keyboard:has(:where(#controls) :focus-visible)) #controls {
   opacity: 1;
 }
-:is(body.ctrl-overlay, body.web-full, body.os-full):not(.record):is(:not(.playing):not(.ppt-mode), .ui-active, .scrubbing, .menu-open) #stage,
-:is(body.ctrl-overlay, body.web-full, body.os-full):not(.record):has(#controls .chap-search:focus) #stage {
+body:is(.ctrl-overlay, .web-full, .os-full, [data-video-host-fullscreen]):not(.record):is(.ui-active, .scrubbing, .menu-open, .ui-keyboard:has(:where(#controls) :focus-visible)) #stage {
   --ctrl-dodge: var(--ctrl-overlap, 52px);
 }
-:is(body.web-full, body.os-full).playing:not(.ui-active, .scrubbing, .menu-open) #viewport {
+body:is(.web-full, .os-full, [data-video-host-fullscreen]).playing:not(.ui-active, .scrubbing, .menu-open, .ui-keyboard:has(:where(#controls) :focus-visible)) #viewport {
   cursor: none;
 }
 
-#controls :where(button, .ctrl-home) {
+#controls :where(button, .ctrl-home, .ctrl-pptx-download) {
   appearance: none;
   margin: 0;
   height: var(--ctrl-btn-h);
@@ -494,7 +495,7 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   cursor: pointer;
   transition: background 0.14s, border-color 0.14s, color 0.14s, opacity 0.14s;
 }
-#controls :where(button, .ctrl-home):hover {
+#controls :where(button, .ctrl-home, .ctrl-pptx-download):hover {
   background: var(--ctrl-btn-hover-bg);
   border-color: var(--ctrl-fg);
 }
@@ -573,7 +574,6 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   height: 28px;
   margin: 0 4px;
   cursor: pointer;
-  touch-action: none;
 }
 .track::before {
   content: "";
@@ -675,6 +675,8 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 
 .chap-menu,
 .rate-menu,
+.pptx-menu,
+.subs-menu,
 .sound-menu {
   position: absolute;
   bottom: calc(100% + 12px);
@@ -698,13 +700,53 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
   padding: 5px; gap: 2px;
   transform: translate(-50%, 6px);
 }
-.sound-menu {
-  left: 0;
+.sound-menu,
+.subs-menu {
   width: var(--ctrl-sound-menu-w);
   padding: 5px; gap: 2px;
   transform: translateY(6px);
 }
+.sound-menu { left: 0; }
+.pptx-wrap { position: relative; display: inline-flex; flex: none; }
+.pptx-menu {
+  right: 0;
+  width: max-content;
+  padding: 5px;
+  gap: 2px;
+  transform: translateY(6px);
+}
+.pptx-download-option {
+  display: block;
+  padding: 8px 12px;
+  border-radius: 4px;
+  color: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.pptx-download-option:is(:hover, :focus-visible) { background: var(--ctrl-btn-hover); }
+.subs-wrap { position: relative; display: inline-flex; flex: none; }
+.subs-menu {
+  right: 0;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.subs-menu fieldset { margin: 0; padding: 0; border: 0; }
+.subs-menu legend { padding: 3px 11px; color: var(--ctrl-muted); }
+.subs-options { display: grid; gap: 2px; }
+.subs-menu .sound-item { position: relative; }
+.subs-menu input {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%; margin: 0;
+  opacity: 0; cursor: inherit;
+}
+.subs-menu .sound-item:has(:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  opacity: 1;
+}
 #controls.chap-open .chap-menu,
+#controls[data-menu="pptx"] .pptx-menu,
+#controls[data-menu="subs"] .subs-menu,
 #controls.sound-open .sound-menu {
   opacity: 1; visibility: visible; transform: translateY(0);
   transition: opacity 0.15s, transform 0.15s, visibility 0s;
@@ -791,8 +833,8 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 .rate-item i,
 .sound-item i { font-style: normal; font-size: 0.85em; opacity: 0; }
 .rate-item.on i,
-.sound-item.on i { opacity: 1; }
-.sound-item:not(.on) { opacity: 0.62; }
+.sound-item:is(.on, :has(:checked)) i { opacity: 1; }
+.sound-item:not(.on, :has(:checked)) { opacity: 0.62; }
 .sound-item:hover { background: rgba(255, 255, 255, 0.12); opacity: 1; }
 .sound-menu [hidden] { display: none; }
 .sound-vol-row {
@@ -825,10 +867,14 @@ body.playing #start-hint, body.started #start-hint, body.record #start-hint { op
 
 @media (max-width: 960px) {
   :root {
-    --ctrl-chap-w: 156px;
     --ctrl-btn-w: 38px;
     --ctrl-icon-btn-w: 30px;
     --ctrl-time-w: 86px;
+  }
+  .chap-wrap {
+    flex-shrink: 1;
+    min-width: 40px;
+    max-width: 156px;
   }
 }
 
@@ -889,6 +935,7 @@ body.record *, body.record *::before, body.record *::after {
   animation-delay: var(--anim-t, 0s) !important;
 }
 body.record #controls, body.record #osd, body.record #dev-hud, body.record #safe-guide { display: none !important; }
+body.record.ppt-mode #hud { display: none !important; }
 
 /* 独立 PPT 人工讲解模式（?ppt=1） */
 body.ppt-mode #start-hint { display: none !important; }
@@ -912,4 +959,81 @@ body.ppt-mode #subs {
 body.ppt-mode #subs .sub-text {
   font-size: 21px;
   line-height: 1.48;
+}
+
+
+/* 加载提示和键盘焦点 */
+#buffering-status {
+  position:absolute;
+  left:50%;
+  top:18px;
+  transform:translateX(-50%);
+  z-index:35;
+  padding:8px 16px;
+  border-radius:8px;
+  background:var(--surface);
+  color:var(--ink);
+  font:14px/1.5 var(--font-sans);
+  box-shadow:0 4px 20px #0002;
+  pointer-events:none;
+  opacity:0;
+  transition:opacity .15s;
+}
+body.is-buffering #buffering-status {
+  opacity:1;
+  pointer-events:auto;
+  transition-delay:.2s;
+}
+#buffering-status.video-loading-panel {
+  top:50%;
+  transform:translate(-50%,-50%);
+  display:flex;
+  align-items:center;
+  gap:12px;
+  padding:12px 18px;
+  max-width:calc(100% - 32px);
+  font-size:16px;
+  transition:none;
+}
+#buffering-status.video-loading-panel button {
+  margin-left:0;
+}
+#buffering-status button {
+  margin-left:12px;
+  padding:4px 12px;
+  border:1px solid currentColor;
+  border-radius:6px;
+  background:transparent;
+  color:inherit;
+  font:inherit;
+  cursor:pointer;
+}
+#stage [data-interactive]:focus-visible {
+  outline:3px solid var(--accent);
+  outline-offset:4px;
+}
+body.record #buffering-status {
+  display:none;
+}
+#controls :focus-visible {
+  outline:2px solid var(--accent);
+  outline-offset:3px;
+}
+#controls button.chap-item, #controls button.rate-item {
+  display:flex;
+  justify-content:space-between;
+  width:100%;
+  height:auto;
+  min-height:34px;
+  padding:8px 10px;
+  border:0;
+  background:transparent;
+  text-align:left;
+}
+#controls button.chap-item:hover, #controls button.rate-item:hover {
+  background:var(--ctrl-btn-hover-bg);
+}
+#controls button.chap-item.on, #controls button.rate-item.on {
+  background:var(--ctrl-btn-active-bg);
+  color:var(--ctrl-btn-active-fg);
 }

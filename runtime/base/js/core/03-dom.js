@@ -1,6 +1,23 @@
 /* core/03-dom.js · 轻量 DOM/SVG 构造、运镜、仿真光标与确定性受控 <video> 切片原语 */
 (function (V) {
   const { clamp, lerp, prog, ease, appear, keyframes } = V.u;
+  const styleCache = new WeakMap();
+
+  function attr(el, name, value) {
+    const text = String(value);
+    if (el.getAttribute(name) !== text) el.setAttribute(name, text);
+  }
+
+  function writeStyle(el, property, value) {
+    let values = styleCache.get(el);
+    if (!values) { values = {}; styleCache.set(el, values); }
+    const cached = values[property] || (values[property] = {});
+    const input = String(value);
+    if (cached.input === input && cached.applied === el.style[property]) return;
+    el.style[property] = value;
+    cached.input = input;
+    cached.applied = el.style[property];
+  }
 
   function applyAttr(el, k, val) {
     if (k === 'class') el.className = val;
@@ -47,11 +64,11 @@
     const r = pickOpt(opts, 'r', 'rotate', 0);
     const { x = 0, y = 0, sx, sy, origin } = opts;
     if (o !== undefined) {
-      el.style.opacity = o;
-      el.style.visibility = o <= 0.001 ? 'hidden' : 'visible';
+      writeStyle(el, 'opacity', o);
+      writeStyle(el, 'visibility', o <= 0.001 ? 'hidden' : 'visible');
     }
-    el.style.transform = `translate(${x}px,${y}px) ${formatScale(s, sx, sy)} rotate(${r}deg)`;
-    if (origin) el.style.transformOrigin = origin;
+    writeStyle(el, 'transform', `translate(${x}px,${y}px) ${formatScale(s, sx, sy)} rotate(${r}deg)`);
+    if (origin) writeStyle(el, 'transformOrigin', origin);
   }
 
   function pop(el, k, { dy = 24, s0 = 0.96 } = {}) {
@@ -124,11 +141,24 @@
     return handlers && typeof handlers === 'object' ? handlers.sfx : undefined;
   }
 
+  function bindInteractiveKeyboard(el) {
+    if (!el.matches('button, input, select, textarea, a[href]')) {
+      if (!el.hasAttribute('role')) el.setAttribute('role', 'button');
+      if (!el.hasAttribute('tabindex')) el.tabIndex = 0;
+      el.addEventListener('keydown', e => {
+        if (e.target !== el || (e.key !== 'Enter' && e.key !== ' ')) return;
+        e.preventDefault(); e.stopPropagation();
+        if (el.getAttribute('aria-disabled') !== 'true') el.click();
+      });
+    }
+  }
+
   function interactive(el, handlers, opts) {
     if (!el) return el;
     if (el.setAttribute) el.setAttribute('data-interactive', '1');
     if (el.style && !el.style.pointerEvents) el.style.pointerEvents = 'auto';
     const sfxSpec = resolveInteractiveSfx(handlers, opts);
+    if (typeof handlers === 'function' || typeof handlers?.click === 'function') bindInteractiveKeyboard(el);
     if (typeof handlers === 'function') {
       bindInteractiveEvent(el, 'click', handlers, sfxSpec);
     } else if (handlers && typeof handlers === 'object') {
@@ -321,7 +351,7 @@
   }
 
   V.u = Object.assign(V.u || {}, {
-    h, svg, set, pop, typeText, type, scramble, countUp,
+    h, svg, attr, set, pop, typeText, type, scramble, countUp,
     drawPath, toggle, interactive, spotlight, camera, makeCursor, cursor,
     videoClip, syncVideoClip,
   });

@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import vm from 'node:vm';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { PKG_ROOT, resolveFfmpeg, resolvePython, loadChromium, findBrowserExecutable, loadVideoSandbox } from './lib/paths.mjs';
@@ -118,7 +119,7 @@ function writeTestProjectFiles(videoDir) {
     '    s02: {',
     '      title: "Verification",',
     '      texts: { "PURE F(T)": "PURE F(T) EN" },',
-    '      lines: ["Every pure function stays deterministic."],',
+    '      lines: [{ text: "Every pure function stays deterministic.", speechText: "Every pure function stays deterministic." }],',
     '    },',
     '  },',
     '});',
@@ -236,6 +237,7 @@ async function verifyIframeWebFullContract(page, port) {
 async function verifyPotPlayerAutoHideContract(page) {
   await page.mouse.move(200, 200);
   await page.evaluate(() => {
+    document.activeElement?.blur();
     window.__video.seek(window.V.scenes[1].start + 0.05);
     window.__video.play();
   });
@@ -277,9 +279,13 @@ async function verifyPotPlayerAutoHideContract(page) {
   assert.ok(fullAutoHidden.opacity < 0.05, `Fullscreen #controls must still auto-hide after button focus, got opacity ${fullAutoHidden.opacity}`);
 
   await page.evaluate(() => { window.__video.pause(); window.__video.seek(0.2); });
+  await page.mouse.move(205, 195);
   await page.waitForTimeout(200);
   const pausedHold = await page.evaluate(() => Number(getComputedStyle(document.getElementById('controls')).opacity));
-  assert.ok(pausedHold > 0.95, 'Paused state must keep #controls visible');
+  assert.ok(pausedHold > 0.95, 'Mouse activity must show #controls during pause');
+  await page.waitForTimeout(450);
+  const pausedIdle = await page.evaluate(() => Number(getComputedStyle(document.getElementById('controls')).opacity));
+  assert.ok(pausedIdle < 0.05, 'Paused controls must also hide after pointer inactivity');
 }
 
 async function verifyPlayerBarContracts(page, port) {
@@ -403,6 +409,50 @@ async function verifyHttpRanges(port) {
   const badUrlRes = await fetch(`http://127.0.0.1:${port}/%E0%A4%A`);
   assert.equal(badUrlRes.status, 400, 'Malformed URI path must return 400 without crashing HTTP server');
   await badUrlRes.arrayBuffer();
+}
+
+async function verifyHttpRevalidation(port) {
+  const route = `http://127.0.0.1:${port}/demo/assets/revalidation.txt`;
+  const file = path.join(TEST_ROOT, 'videos/demo/assets/revalidation.txt');
+  fs.writeFileSync(file, 'Original');
+  const full = await fetch(route);
+  const tag = full.headers.get('etag');
+  assert.match(tag, /^W\/".+"$/);
+  assert.equal(full.headers.get('cache-control'), 'no-cache');
+  assert.equal(await full.text(), 'Original');
+
+  const unchanged = await fetch(route, { headers: { 'If-None-Match': `"other,tag", ${tag.slice(2)}`, Range: 'bytes=0-1' } });
+  assert.equal(unchanged.status, 304);
+  assert.equal(unchanged.headers.get('etag'), tag);
+  assert.equal(await unchanged.text(), '');
+  const head = await fetch(route, { method: 'HEAD', headers: { 'If-None-Match': tag } });
+  assert.equal(head.status, 304);
+
+  const partial = await fetch(route, { headers: { Range: 'bytes=0-1' } });
+  assert.equal(partial.status, 206);
+  assert.equal(partial.headers.get('etag'), tag);
+  assert.equal(await partial.text(), 'Or');
+
+  fs.writeFileSync(file, 'New revision');
+  const changed = await fetch(route, { headers: { 'If-None-Match': tag, 'If-Range': tag, Range: 'bytes=0-1' } });
+  assert.equal(changed.status, 200);
+  assert.notEqual(changed.headers.get('etag'), tag);
+  assert.equal(await changed.text(), 'New revision');
+  fs.unlinkSync(file);
+}
+
+function verifyVersionedBundle(dist, single, sourceContent) {
+  const courseDir = single ? dist : path.join(dist, 'demo');
+  const entry = fs.readFileSync(path.join(courseDir, 'index.html'), 'utf8');
+  const name = entry.match(/content="(assets\/model\/index\.sha256-[a-f0-9]{24}\.html)"/)?.[1];
+  assert.ok(name, 'Declared asset should have a content version in the bundle entry');
+  const expected = single ? sourceContent.replace('../../../base/', '../../base/') : sourceContent;
+  assert.equal(fs.readFileSync(path.join(courseDir, name), 'utf8'), expected);
+  assert.equal(fs.readFileSync(path.join(courseDir, 'assets/model/index.html'), 'utf8'), expected,
+    'Direct references to the original asset URL must still work');
+  const headers = fs.readFileSync(path.join(dist, '_headers'), 'utf8');
+  assert.ok(headers.includes(`/${single ? '' : 'demo/'}${name}\n  Cache-Control: private, max-age=31536000, immutable`));
+  return name;
 }
 
 async function verifyDomAndPronunciation(page) {
@@ -611,17 +661,20 @@ async function verifySubtitleLayoutAndTimeline(page, port) {
     const subs = document.getElementById('subs');
     window.__video.seek(0.2);
     const posS1 = subs.dataset.subPos;
+    const leftS1 = subs.style.getPropertyValue('--sub-left');
     window.__video.seek(window.V.scenes[1].start + 0.2);
     const posS2 = subs.dataset.subPos;
+    const leftS2 = subs.style.getPropertyValue('--sub-left');
     window.__video.seek(0.35);
     window.__video.seekVisual(1.4);
     window.__video.seek(0.35);
     const backNow = window.__video.getSyncState().now;
     const cue0 = window.V.scenes[0].cues[0];
-    return { posS1, posS2, backNow, enSlowdown: cue0.enSlowdown, align: cue0.align };
+    return { posS1, posS2, leftS1, leftS2, backNow, enSlowdown: cue0.enSlowdown, align: cue0.align };
   });
   assert.equal(rt.posS1, 'left', 'Scene 1 declarative subLayout must apply');
-  assert.equal(rt.posS2, 'center', 'Entering Scene 2 without subLayout must reset #subs back to center');
+  assert.equal(rt.posS2, 'left', 'Entering Scene 2 without subLayout must restore the default left position');
+  assert.notEqual(rt.leftS1, rt.leftS2, 'A scene layout offset must not carry over to the next scene');
   assert.ok(Math.abs(rt.backNow - 0.35) < 0.03, `Rapid scrub-back seek must not be dropped by dedupe guard, got ${rt.backNow}`);
   assert.equal(rt.enSlowdown, 0.9, 'Per-line enSlowdown override must survive timeline buildCueEntry');
   assert.equal(rt.align, 'acoustic', 'Per-line align override must survive timeline buildCueEntry');
@@ -644,9 +697,9 @@ async function verifyConditionalSubtitlesAndHiddenControls(page) {
       if (t > 0.35) window.V.setSubLayout('mascotLeft');
     };
     window.__video.seek(sc1.start + 0.55);
-    const subLate = subs.dataset.subPos;
+    const subLate = subs.style.getPropertyValue('--sub-left');
     window.__video.seek(sc1.start + 0.1);
-    const subEarly = subs.dataset.subPos;
+    const subEarly = subs.style.getPropertyValue('--sub-left');
     sc1.update = origUpdate;
 
     window.__video.seek(0.2);
@@ -658,25 +711,27 @@ async function verifyConditionalSubtitlesAndHiddenControls(page) {
     track.dispatchEvent(new PointerEvent('pointerdown', {
       clientX: tr.left + tr.width * 0.9,
       clientY: tr.top + tr.height * 0.5,
-      pointerType: 'touch',
+      pointerType: 'mouse',
       bubbles: true,
       cancelable: true,
     }));
     track.dispatchEvent(new MouseEvent('click', {
+      detail: 1,
       clientX: tr.left + tr.width * 0.9,
       clientY: tr.top + tr.height * 0.5,
       bubbles: true,
       cancelable: true,
     }));
-    const afterBlindTapNow = window.__video.getSyncState().now;
-    const wokeFromBlindTap = document.body.classList.contains('ui-active');
-    window.__video.pause();
-    return { subLate, subEarly, notScrubbed: Math.abs(afterBlindTapNow - beforeNow) < 0.15, wokeFromBlindTap };
+    const afterClick = window.__video.getSyncState();
+    return { subLate, subEarly, notScrubbed: Math.abs(afterClick.now - beforeNow) < 0.15,
+      controlsVisible: document.body.classList.contains('ui-active'),
+      paused: !window.V.player.getState().playing };
   });
-  assert.equal(res.subLate, 'left', 'Conditional intra-scene V.setSubLayout must apply when condition holds');
-  assert.equal(res.subEarly, 'center', 'Scrubbing backward in same scene must reset conditional V.setSubLayout');
-  assert.equal(res.notScrubbed, true, 'Blind tap on hidden overlay #controls .track must not accidentally scrub');
-  assert.equal(res.wokeFromBlindTap, true, 'Blind tap on hidden overlay #controls must wake ui-active');
+  assert.equal(res.subLate, '180px', 'Conditional intra-scene V.setSubLayout must apply its custom offset');
+  assert.equal(res.subEarly, '', 'Scrubbing backward in same scene must reset conditional V.setSubLayout');
+  assert.equal(res.notScrubbed, true, 'Clicking the hidden track must not seek');
+  assert.equal(res.controlsVisible, true, 'Clicking the hidden controls must reveal them');
+  assert.equal(res.paused, true, 'Clicking the hidden controls must pause playback');
 }
 
 async function verifyProgressResumeAndLivePlayback(page) {
@@ -1572,14 +1627,15 @@ async function verifyPptDeckMode(page, port) {
   assert.equal(init.prevDisabled, true, 'Prev button must be disabled on Page 1');
   assert.equal(init.pageNumTxt, '1 / 2', 'PPT page badge must render "1 / 2"');
 
-  await page.locator('[data-act="subs"]').click();
+  assert.equal(await page.locator('[data-act="subs"]').count(), 0, 'PPT mode must omit the subtitles button');
+  await page.evaluate(() => window.__video.setSubs(true));
   const notes = await page.evaluate(() => ({
     subsOn: window.__video.getSyncState().subsEnabled,
     subVis: getComputedStyle(document.getElementById('subs')).visibility,
     subOp: getComputedStyle(document.getElementById('subs')).opacity,
     subTxt: document.querySelector('#subs .sub-text > span:last-child')?.textContent,
   }));
-  assert.equal(notes.subsOn, true, 'Clicking [data-act="subs"] in PPT mode must open speaker teleprompter');
+  assert.equal(notes.subsOn, true, 'The public subtitles API can display the speaker notes');
   assert.equal(notes.subVis, 'visible', 'Speaker teleprompter must render #subs visible');
   assert.equal(notes.subOp, '1', 'Speaker teleprompter must stay at opacity 1 without fade-out');
   assert.ok(notes.subTxt && notes.subTxt.includes('微内核时间轴引擎'), 'Speaker teleprompter must show full Scene 0 script');
@@ -1992,7 +2048,7 @@ const widget=V.u.interactive(V.u.h('div',{id:'input-widget',tabindex:'0',role:'l
 keydown(e){if(['ArrowRight','/',' ','Escape'].includes(e.key)){e.preventDefault();this.dataset.handled=e.key;}},
 wheel(e){e.preventDefault();this.dataset.wheeled='yes';}
 });root.append(widget);},update(){}});`);
-  const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   try {
     for (const mode of ['video', 'ppt']) {
       await page.goto(`http://127.0.0.1:${port}/${id}/${mode === 'ppt' ? '?ppt=1' : ''}`, { waitUntil: 'networkidle' });
@@ -2846,18 +2902,31 @@ function verifyMixAudioRegressions() {
 }
 
 function verifySpokenTextRules() {
+  const sandbox = vm.createContext({ console });
+  const engine = path.join(PKG_ROOT, 'runtime/base/js/engine.js');
+  vm.runInContext(fs.readFileSync(engine, 'utf8'), sandbox);
+  const V = sandbox.V;
   for (const spec of [
     { text: '执行命令行', word: '直形命令航', config: {} },
     { text: '品牌', word: 'Brand', config: { pronunciation: { '品牌': 'Brand' } } },
     { text: '执行', word: '执行', config: { tts: { polyphoneFix: false } } },
   ]) {
     const errors = [];
-    const V = { config: spec.config, scenes: [{ lines: [{ text: spec.text }] }], voice: { durations: [[1]], words: [[[[0, spec.word]]]] } };
+    V.config = spec.config;
+    V.scenes = [];
+    V.scene({ lines: [{ text: spec.text }] });
+    V.voice = { durations: [[1]], words: [[[[0, spec.word]]]] };
+    V.layout();
     assert.equal(verifySpokenTimings(V, errors), 1);
     assert.deepEqual(errors, [], 'Existing pronunciation rules must remain valid for offline remix');
   }
   const legacyErrors = [];
-  verifySpokenTimings({ scenes: [{ lines: [{ text: '旧版字幕。' }] }], voice: { durations: [[1]], segs: [[[[1, '旧版字幕。']]]] } }, legacyErrors);
+  V.config = {};
+  V.scenes = [];
+  V.scene({ lines: [{ text: '旧版字幕。' }] });
+  V.voice = { durations: [[1]], segs: [[[[1, '旧版字幕。']]]] };
+  V.layout();
+  verifySpokenTimings(V, legacyErrors);
   assert.deepEqual(legacyErrors, [], 'Valid legacy subtitle-only timings must remain supported');
 }
 
@@ -3072,9 +3141,10 @@ function verifyBundleSafetyAndDepth(videoDir, colDir) {
 function verifyLocalizedRemixAndBgmVolume(videoDir) {
   const enLocalePath = path.join(videoDir, 'locales/en.js');
   const origEn = fs.readFileSync(enLocalePath, 'utf8');
+  // Use supported display-only punctuation while keeping the recorded speech input.
   const editedEn = origEn.replace(
     'Every pure function stays deterministic.',
-    'Every pure function, stays deterministic.'
+    'Every pure function， stays deterministic.'
   );
   assert.notEqual(editedEn, origEn, 'locales/en.js test target string must match');
   fs.writeFileSync(enLocalePath, editedEn, 'utf8');
@@ -3116,6 +3186,7 @@ async function verifyScaffoldAndStaticBundle() {
   const { srv, port } = await startEphemeralVideoServer({ videosDir: path.join(TEST_ROOT, 'videos') });
   try {
     await verifyHttpRanges(port);
+    await verifyHttpRevalidation(port);
     for (const route of ['/demo/', '/demo/video.config.js', '/demo/js/scenes.js', '/base/js/engine.js', '/base/css/base.css']) {
       const response = await fetch(`http://127.0.0.1:${port}${route}`);
       assert.equal(response.status, 200, `Scaffold asset must be served: ${route}`);
@@ -3126,11 +3197,29 @@ async function verifyScaffoldAndStaticBundle() {
     await new Promise(resolve => srv.close(resolve));
   }
   verifyInvalidRenderCliArgs();
+  const entry = path.join(TEST_ROOT, 'videos/demo/index.html');
+  const model = path.join(TEST_ROOT, 'videos/demo/assets/model/index.html');
+  const modelText = '<script src="../../../base/js/frame-client.js"></script>\n';
+  const sourceEntry = fs.readFileSync(entry, 'utf8');
+  fs.mkdirSync(path.dirname(model), { recursive: true });
+  fs.writeFileSync(model, modelText);
+  fs.appendFileSync(entry, '\n<meta id="model" name="video-versioned-asset" content="assets/model/index.html">\n');
   const dist = path.join(TEST_ROOT, 'smoke-dist');
   runCliCmd(['bundle', 'demo', '--out', dist]);
   assert.ok(fs.existsSync(path.join(dist, 'base/js/engine.js')), 'Bundle must include the runtime');
   assert.ok(fs.existsSync(path.join(dist, 'demo/index.html')), 'Bundle must include the video');
   verifyBundledProjectFiles(dist);
+  const firstVersion = verifyVersionedBundle(dist, false, modelText);
+  const single = path.join(TEST_ROOT, 'smoke-single');
+  runCliCmd(['bundle', 'demo', '--single', '--out', single]);
+  verifyVersionedBundle(single, true, modelText);
+  assert.equal(fs.readFileSync(model, 'utf8'), modelText, 'Bundling must preserve the unversioned source');
+  fs.appendFileSync(model, '<!-- revision -->');
+  runCliCmd(['bundle', 'demo', '--out', dist]);
+  assert.notEqual(verifyVersionedBundle(dist, false, modelText + '<!-- revision -->'), firstVersion);
+  fs.writeFileSync(entry, sourceEntry);
+  fs.unlinkSync(model);
+  fs.rmdirSync(path.dirname(model));
   verifyBundleSourcePreflight();
   verifyBundleProtectedDirectories();
 }
@@ -3142,7 +3231,7 @@ async function runQuickChecks() {
   verifyHttpFileMutationRegressions();
   verifyInputPathSafetyRegressions(true);
   verifyModuleEntryRegressions();
-  for (const name of ['test-content-sampling.mjs', 'test-components.mjs', 'test-actor-failures.mjs', 'test-subtitle-companion.mjs']) {
+  for (const name of ['test-content-sampling.mjs', 'test-components.mjs', 'test-actor-failures.mjs', 'test-subtitle-companion.mjs', 'test-layered-config.mjs']) {
     const check = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools', name)], { encoding: 'utf8', timeout: 30000 });
     assert.equal(check.status, 0, name + '\n' + check.stdout + check.stderr);
   }
@@ -3151,6 +3240,10 @@ async function runQuickChecks() {
   verifySceneSourceParsing();
   verifyRenderArgumentValidation();
   verifySpokenTextRules();
+  const speechCheck = spawnSync(process.execPath,
+    [path.join(PKG_ROOT, 'tools/test-speech-flow.mjs'), path.join(TEST_ROOT, 'speech-flow')],
+    { encoding: 'utf8', timeout: 60000 });
+  assert.equal(speechCheck.status, 0, speechCheck.stdout + speechCheck.stderr);
   verifyTimingOutputRegressions();
   verifyRenderCacheIdentityRegressions();
   verifyRenderParallelRegressions();
@@ -3173,7 +3266,7 @@ async function main() {
     if (process.argv.includes('--quick')) return;
 
     console.log('[Full 1/5] Build input protection, encoder/mux failures and audio regressions...');
-    for (const name of ['test-frame-interfaces.mjs', 'test-managed-sources.mjs', 'test-player-api.mjs', 'test-player-reliability.mjs', 'test-audit-session.mjs']) {
+    for (const name of ['test-frame-interfaces.mjs', 'test-managed-sources.mjs', 'test-player-api.mjs', 'test-player-reliability.mjs', 'test-audit-session.mjs', 'test-pptx.mjs']) {
       const check = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools', name)], { encoding: 'utf8', timeout: 180000 });
       assert.equal(check.status, 0, name + '\n' + check.stdout + check.stderr);
     }

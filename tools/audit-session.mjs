@@ -92,7 +92,7 @@ function videoHandle(page, metadata, issues, id, pages) {
 
 async function openVideo(browser, server, pages, projectRoot, id, options) {
   const { mode = 'record', lang = '' } = options;
-  if (!['record', 'interactive', 'ppt'].includes(mode)) throw new TypeError(`Unknown audit mode: ${mode}`);
+  if (!['record', 'interactive', 'ppt', 'ppt-capture'].includes(mode)) throw new TypeError(`Unknown audit mode: ${mode}`);
   const metadata = readVideoMetadata({ projectRoot, id, lang });
   const cfg = metadata.config;
   const page = await browser.newPage({ viewport: { width: cfg.width || 1920, height: cfg.height || 1080 }, deviceScaleFactor: 1 });
@@ -102,6 +102,7 @@ async function openVideo(browser, server, pages, projectRoot, id, options) {
   const query = new URLSearchParams({ autoplay: '0' });
   if (mode === 'record') query.set('record', '1');
   if (mode === 'ppt') query.set('ppt', '1');
+  if (mode === 'ppt-capture') query.set('capture', 'ppt');
   if (lang) query.set('lang', lang);
   try {
     await page.goto(`${server.origin}/${encodeURIComponent(id)}/?${query}`, { waitUntil: 'domcontentloaded' });

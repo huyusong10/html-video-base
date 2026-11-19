@@ -24,6 +24,7 @@
   function detectInitialPptMode() {
     if (typeof location === 'undefined' || !location.search) return false;
     const sp = new URLSearchParams(location.search);
+    if (sp.get('capture') === 'ppt') return true;
     if (sp.has('record') || sp.has('capture')) return false;
     const raw = (sp.get('ppt') || '').toLowerCase();
     return raw === '1' || raw === 'true' || (sp.get('mode') || '').toLowerCase() === 'ppt';
@@ -261,12 +262,36 @@
   }
 
   function mergeTtsDict(a, b) {
-    if (!a && !b) return undefined;
-    const out = Object.assign({}, a || {}, b || {});
-    if ((a && a.speakers) || (b && b.speakers)) {
-      out.speakers = Object.assign({}, (a && a.speakers) || {}, (b && b.speakers) || {});
+    const out = mergeConfigValue(a, b);
+    if (isConfigDict(a) && isConfigDict(b)) {
+      if (a.speakers || b.speakers) out.speakers = { ...a.speakers, ...b.speakers };
+      if (a.pronunciation || b.pronunciation) out.pronunciation = { ...a.pronunciation, ...b.pronunciation };
     }
     return out;
+  }
+
+  function isConfigDict(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function mergeConfigValue(base, next) {
+    if (next === undefined) return base;
+    return isConfigDict(base) && isConfigDict(next) ? { ...base, ...next } : next;
+  }
+
+  function checkPronunciationMap(value, field) {
+    if (value !== undefined && !isConfigDict(value)) {
+      throw new TypeError(`${field} must be an object mapping terms to readings or false`);
+    }
+  }
+
+  function readLayerTts(layer) {
+    const legacy = layer.pronunciation;
+    const nested = layer.tts?.pronunciation;
+    checkPronunciationMap(legacy, 'pronunciation');
+    checkPronunciationMap(nested, 'tts.pronunciation');
+    if (legacy === undefined || layer.tts === false) return layer.tts;
+    return { ...layer.tts, pronunciation: { ...legacy, ...nested } };
   }
 
   function mergeOptionalDict(a, b, c) {
@@ -280,13 +305,18 @@
     const loc = (lang && V.locales[lang]) || null;
     const locCfg = extractLocaleCfg(loc);
     const td = V.themeDefaults || {}, vc = V.config || {};
-    const merged = Object.assign({}, td, vc, locCfg);
-    merged.ui = mergeUiDict(mergeUiDict(td.ui, vc.ui), locCfg.ui);
-    const tts = mergeTtsDict(mergeTtsDict(td.tts, vc.tts), locCfg.tts);
-    if (tts) merged.tts = tts;
-    const texts = mergeOptionalDict(td.texts, vc.texts, loc && loc.texts);
+    const pd = V.projectDefaults || {};
+    const layers = [pd, td, vc, locCfg];
+    const merged = Object.assign({}, ...layers);
+    merged.ui = layers.reduce((base, layer) => mergeUiDict(base, layer.ui), undefined);
+    const tts = layers.reduce((base, layer) => mergeTtsDict(base, readLayerTts(layer)), undefined);
+    if (tts !== undefined) merged.tts = tts;
+    for (const key of ['bgm', 'sfx']) {
+      if (merged[key] !== undefined) merged[key] = layers.reduce((base, layer) => mergeConfigValue(base, layer[key]), undefined);
+    }
+    const texts = mergeOptionalDict(mergeOptionalDict(pd.texts, td.texts), vc.texts, loc && loc.texts);
     if (texts) merged.texts = texts;
-    const strings = mergeOptionalDict(td.strings, vc.strings, loc && loc.strings);
+    const strings = mergeOptionalDict(mergeOptionalDict(pd.strings, td.strings), vc.strings, loc && loc.strings);
     if (strings) merged.strings = strings;
     return merged;
   };

@@ -168,7 +168,7 @@ function assertMixReady(videoId, lang) {
     process.exit(1);
   }
   const errors = [];
-  verifySpokenTimings(sandbox.V, errors, lang);
+  verifySpokenTimings(sandbox.V, errors);
   if (errors.length) {
     const build = `html-video build ${videoId}${lang ? ' --lang ' + lang : ''}`;
     console.error(`Error: Spoken lines no longer match timings for '${videoId}'. Run "${build}" instead of "mix".\n${errors.join('\n')}`);
@@ -308,6 +308,7 @@ function printHelp() {
     '  html-video verify [video-id ...] [--stamp-baked] [--visual] [--strict] [--lang en]',
     '  html-video audit [video-id ...] [--strict] [--screenshots <dir>] [--lang en]',
     '  html-video storyboard [video-id] [out.html] [--per-cue] [--pdf] [--lang en]',
+    '  html-video pptx <video-id> [out.pptx | --publish] [--mode image|editable] [--pages 1,3-5] [--lang en]',
     '  html-video render [video-id] [output.mp4] [--workers N] [--scene K] [--range t0:t1] [--fps N] [--lang en] [--no-bgm] [--no-cache] [--no-frame-reuse]',
     '  html-video bundle [video-id ... | --single | --all] [--out dist]',
     '',
@@ -326,6 +327,7 @@ const COMMANDS = {
   verify: r => run(process.execPath, [path.join(TOOLS_DIR, 'verify-sync.mjs'), ...r]),
   audit: r => run(process.execPath, [path.join(TOOLS_DIR, 'audit-visual.mjs'), ...r]),
   storyboard: r => run(process.execPath, [path.join(TOOLS_DIR, 'storyboard.mjs'), ...r]),
+  pptx: r => run(process.execPath, [path.join(TOOLS_DIR, 'pptx.mjs'), ...r]),
   render: r => run(process.execPath, [path.join(TOOLS_DIR, 'render.mjs'), ...r]),
   bundle: r => run(process.execPath, [path.join(TOOLS_DIR, 'bundle.mjs'), ...r]),
   'check-cc': () => run(process.execPath, [path.join(TOOLS_DIR, 'check-complexity.mjs')]),

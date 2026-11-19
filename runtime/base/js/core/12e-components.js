@@ -133,17 +133,22 @@
   };
 
   V.subtitleReservation = function (options = {}) {
-    const stage = Object.assign({ left: 960, paddingLeft: 34 }, options.stage);
+    const stage = Object.assign({ paddingLeft: 34 }, options.stage);
     const docked = Object.assign({ left: 146, paddingLeft: 56, maxWidth: 1660 }, options.docked);
     return {
       resolve(blend, overrides = {}, frame) {
         const k = clamp(blend);
         const target = Object.assign({}, docked, overrides);
         if (options.resolve) return options.resolve(k, target, frame);
-        if (k <= 0.001) return { pos: 'center' };
-        return { pos: 'left', left: lerp(stage.left, target.left, k), maxWidth: target.maxWidth,
-          padding: `12px 34px 12px ${lerp(stage.paddingLeft, target.paddingLeft, k).toFixed(1)}px`,
-          transform: k >= 0.999 ? '' : `translateX(${(-50 * (1 - k)).toFixed(2)}%)` };
+        const align = V.pptMode ? 'center' : (V._subtitlesRuntime?.getAppearance().align || 'left');
+        if (k <= 0.001) return { pos: align };
+        if (align === 'center') {
+          const limit = typeof target.maxWidth === 'number' ? `${target.maxWidth}px` : target.maxWidth;
+          const inset = Math.min(2 * (target.left + target.paddingLeft) * k, (V.stageWidth || 1920) * 0.6).toFixed(1);
+          return { pos: 'center', left: stage.left, maxWidth: `min(${limit}, calc(var(--stage-w) - ${inset}px))` };
+        }
+        return { pos: 'left', left: lerp(120, target.left, k), maxWidth: target.maxWidth,
+          padding: `12px 34px 12px ${lerp(stage.paddingLeft, target.paddingLeft, k).toFixed(1)}px` };
       },
       apply(blend, overrides, frame = V.getFrameState()) {
         const layout = this.resolve(blend, overrides, frame);

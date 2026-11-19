@@ -55,7 +55,7 @@ test('search dictionaries preserve valid IDs that match Object prototype names',
 
 function layoutWithBaked(baked) {
   const sandbox = vm.createContext({ console });
-  for (const name of ['01-registry.js', '02-math.js', '04-timeline.js']) {
+  for (const name of ['01-registry.js', '02-math.js', '03a-pronunciation.js', '04-timeline.js']) {
     vm.runInContext(fs.readFileSync(path.join(PKG_ROOT, 'runtime/base/js/core', name), 'utf8'), sandbox);
   }
   const V = sandbox.V;

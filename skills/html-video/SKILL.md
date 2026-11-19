@@ -37,6 +37,7 @@ project-root/
 | `npx html-video verify [id] [--stamp-baked]` | 校验语义词锚、字幕分段与物理双音轨时长零漂移 |
 | `npx html-video audit [id] [--screenshots .runtime/audit]` | 无头浏览器巡检破损图、越界、字幕遮挡、兄弟卡片压盖、小字号与 `f(t)` 幂等性 |
 | `npx html-video render <id> [out.mp4] [--scene K] [--no-bgm]` | 按幕增量缓存 + 静止帧复用导出 1080p MP4（`--no-bgm` 可导出纯解说无配乐版） |
+| `npx html-video pptx <id> [out.pptx \| --publish] [--mode image\|editable] [--pages 1,3-5]` | 默认导出图片版。混合可编辑版将课程标记的对象写入 PPTX。加 `--publish` 后可从 PPT 工具栏下载。 |
 | `npx html-video bundle <id> --single --out dist` | 打包免依赖静态目录（`--all` 打包全部视频及项目自有文件） |
 
 ## 3. 纯函数分镜与时间轴契约
@@ -67,9 +68,10 @@ V.scene({
 
 ## 4. 字幕、控制栏与图标定制契约
 
+- **按需启用加载界面**：在课程入口的 `<body>` 开头引入 `../base/js/loading.js`。将播放器脚本和可能拖慢首屏的外部样式表放在它后面。播放器继续调用 `V.boot()`。录制和截图模式会自动隐藏加载界面。
 - **字幕伴随插槽与避让**：通过 `V.subtitle({ lead: (h, V) => el, tail, position, modes, onUpdate(cue, info, dom) })` 挂载前置吉祥物或角标；单幕可设 `subLayout: 'left' | { pos: 'center', offsetX: 56, maxWidth: 1520 }` 动态避让角色。
 - **PotPlayer 式悬浮控制栏与配置项（`V.config.ui`）**：
-  - `controlsMode: 'overlay' | 'docked'`（默认为 `'overlay'`：鼠标移入视频或在画面内移动立即唤醒底栏，在画面上静止 `idleHideDelay: 1500` 毫秒自动隐退，移出视频窗口 `leaveHideDelay: 220` 毫秒速隐，悬停底栏时保持常亮，全屏静止同步隐鼠；悬停进度条实时跟随 `.track-tip` 预览章节与时间；按键盘快进/静音/切章仅在右上角闪出 `#osd` 胶囊，不弹底栏顶跳字幕）
+  - `controlsMode: 'overlay' | 'docked'`。悬浮模式默认启用。鼠标移入或移动时显示底栏，静止 `idleHideDelay` 毫秒后隐藏，默认 1500 毫秒。鼠标移出后等待 `leaveHideDelay` 毫秒，默认 220 毫秒。窗口失焦时关闭菜单并收起底栏。打开菜单、拖动进度或用键盘操作底栏时，底栏保持可见。
   - `persist: true`（默认按路径记忆倍速、音量、字幕、双音轨开关等观看偏好）、`resume: false`（断点续播默认关闭，刷新默认从头播放；长时培训课程可显式设 `resume: true`，超过 `resumeMinSec: 5` 秒刷新自动续播）、`livePause: true`、`osd: true`、`chapterMarks: true`、`hud: true`、`rate: true`、`webFull: true`、`iconPreset: 'default' | 'pixel'`
 - **全图标控制栏与业务图标覆盖规范**：
   - 控制栏左右按钮默认统一使用 `32×30` 紧凑矢量图标（播放/暂停/重播 `play`/`pause`/`replay`、章节箭头 `chapCaret`、倍速 `rate` 在 `1.0x` 显示仪表图标并在非 `1.0x` 动态切换为紧凑数字、字幕 `subsOn`/`subsOff`、声音多态 `volumeOn`/`volumeLow`/`volumeVoice`/`volumeBgm`/`volumeMute`、全屏 `webEnter`/`webExit`/`fullEnter`/`fullExit`）。需要返回项目页面时显式设置 `homeUrl`，再显示 `home` 图标。
@@ -77,7 +79,7 @@ V.scene({
   - **覆盖默认图标**：可通过 `V.icons({ play: '...', subsOn: '...' })` 或 `V.config.ui.icons` 按需覆盖任意内置键名；像素风主题可直接设 `ui: { iconPreset: 'pixel' }` 并加 `--ctrl-ico-render: crispEdges`。图标值支持 `16×16` `<path d>` 数组、内联 SVG 字符串、完整 `<svg>` 字符串或 `(h, V) => Node` 渲染函数。
 - **内置检索、深链、音量调节、分幕配乐闪避与自动播放解锁**：按 `/` 或 `Ctrl+K` 全文检索台词与章节跳转；点击时间码复制当前 `?t=` 深链；点击声音图标打开上拉面板拖动 `0%–100%` 音量滑块（亦可在声音图标上滚轮或按 `↑`/`↓` 键按 `5%` 步进调音并闪出 `#osd` 提示，调用 `V.setVolume(v)` 编程设置），有配乐时可独立开关 BGM（`V.setBgm(on)` / `V.setVoice(on)`，按 `B` 开关配乐，按 `M` 静音）；浏览器拦截有声自动播放时声音图标自动切为高亮待开启态，点一下即刻解锁发声；单幕可设 `bgm: false | 0.25 | { volume: 0.25 }` 在混音期做 `0.4s` 平滑配乐静默或压低。
 - **多语言为纯可选项（默认严禁预埋）**：默认一律按单语种直写自然中文 DOM、台词与词锚；用户未明确提出多语言需求时，严禁在业务代码或配置中预埋 `locales`、`x.t`、`data-i18n` 或拆分多语言字典。后续确需增加外语版本时，读取 [references/i18n.md](references/i18n.md)，在外部 `locales/<lang>.js` 中用原文直映（`texts`、`lines`、`anchors`）无侵入扩展，无需返工修改分镜源码。
-- **可选 PPT 人工讲解模式（`ppt: true` / `?ppt=1`）**：需要兼顾线下人工讲课时在配置声明 `ppt: true`，通过视频地址的 `?ppt=1` 进入演示，视频与 PPT 控制栏右侧均提供低频一键互切按钮（`?ppt=1&scene=N` 与 `?scene=N` 干净跳转，保持原有视频播放体验零侵入）；PPT 模式下自动静音且不加载音轨、隐藏默认导览挂件、保留 `x.sceneClock` 驱动的背景循环动效与全部画布交互，默认按“1 幕 = 1 页定格终态”翻页（仅有多组互斥画板的分镜通过 `pptFrames: [t1, t2]` 展开为扁平多页），支持工具栏按钮、方向键/翻页笔与鼠标滚轮翻页（画布点击专供业务交互），可按需用 `pptSkip: true` 跳过介绍句或 `pptKeep: true` 保留模特类静态示范角色，点击底部字幕按钮可把 `#subs` 当整幕提词器。
+- **可选 PPT 人工讲解模式（`ppt: true` / `?ppt=1`）**：需要兼顾线下人工讲课时在配置声明 `ppt: true`，通过视频地址的 `?ppt=1` 进入演示，视频与 PPT 控制栏右侧均提供低频一键互切按钮（`?ppt=1&scene=N` 与 `?scene=N` 干净跳转，保持原有视频播放体验零侵入）；PPT 模式下自动静音且不加载音轨、隐藏默认导览挂件、保留 `x.sceneClock` 驱动的背景循环动效与全部画布交互，默认按“1 幕 = 1 页定格终态”翻页（仅有多组互斥画板的分镜通过 `pptFrames: [t1, t2]` 展开为扁平多页），支持工具栏按钮、方向键/翻页笔与鼠标滚轮翻页（画布点击专供业务交互），可按需用 `pptSkip: true` 跳过介绍句或 `pptKeep: true` 保留模特类静态示范角色。课程发布 PPTX 后，PPT 工具栏显示图片版或混合可编辑版的下载选项。
 
 ## 5. 核心 CSS 主题变量表
 
@@ -94,6 +96,7 @@ V.scene({
 
 - **单帧单焦点**：同屏并列独立模块 `<= 3` 个，严禁九宫格卡片墙与大段朗读稿上屏；讲到当前项时用 `V.u.spotlight(els, idx)` 聚光，非当前项降权。
 - **远视字阶下限**：`1920×1080` 画布正文字号 `>= 22px`，最小标签/角标 `>= 18px`（仿真第三方软件界面可设 `data-allow-small-font="1"` 豁免）。
+- **防空屏与空容器干等**：镜头切换或口播起句 `0.5s` 内必须呈现有效主体结构，禁止封面或上一幕退场后等待后置词锚造成白屏，也禁止提前露出大面积空白底框干等多秒再填内容；长句采用“骨架先入场、按词锚逐项点亮”的节奏。
 - **按改动范围验证**：执行相关视频的 `verify` 与 `audit`；组件接入或局部调整先抽查受影响分镜，使用 `sampleFrames` 与 `captureMany` 生成截图并目视核查。仅在全片内容审校或用户明确要求时，扩大到全量台词截图；接口用法见 [内容与巡检工具](references/content-and-audit.md)。
 
 ## 7. 外部画面与自定义巡检

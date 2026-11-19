@@ -11,15 +11,22 @@ function clampInScene(sc, rawT) {
   return Math.max(sc.start, Math.min(maxT, rawT));
 }
 
+function cueSamplePoints(sc, si, c, li) {
+  const out = [];
+  if (c.end - c.start >= 4.5) {
+    out.push({ t: clampInScene(sc, sc.start + c.start + 1.2), label: `S${si}L${li}-early`, isMid: false, hasCue: true });
+  }
+  out.push({ t: clampInScene(sc, Math.min(sc.start + sc.duration - 0.05, sc.start + (c.start + c.end) / 2)), label: `S${si}L${li}`, isMid: li === 0, hasCue: true });
+  return out;
+}
+
 function buildSamplePoints(V) {
   const pts = [];
   V.scenes.forEach((sc, si) => {
     if (sc.cues && sc.cues.length) {
-      sc.cues.forEach((c, li) => {
-        pts.push({ t: clampInScene(sc, Math.min(sc.start + sc.duration - 0.05, sc.start + (c.start + c.end) / 2)), label: `S${si}L${li}`, isMid: li === 0 });
-      });
+      sc.cues.forEach((c, li) => pts.push(...cueSamplePoints(sc, si, c, li)));
     } else {
-      pts.push({ t: clampInScene(sc, sc.start + sc.duration * 0.5), label: `S${si}`, isMid: true });
+      pts.push({ t: clampInScene(sc, sc.start + sc.duration * 0.5), label: `S${si}`, isMid: true, hasCue: false });
     }
   });
   return pts;
@@ -129,6 +136,26 @@ const IN_PAGE_CHAR_COUNT = () => {
   return charCount;
 };
 
+const IN_PAGE_HAS_VISUAL = () => {
+  const stage = document.getElementById('stage');
+  const sc = stage ? stage.querySelector('.scene') : null;
+  if (!stage || !sc) return true;
+  const H = window.__auditH;
+  const isBigVisible = el => {
+    if (!H.isVisible(el, 0.15)) return false;
+    const r = el.getBoundingClientRect();
+    return r.width * r.height >= 2500;
+  };
+  for (const el of stage.querySelectorAll('img, canvas, video, iframe')) {
+    if (el.closest('#subs, #controls, #hud')) continue;
+    if (isBigVisible(el)) return true;
+  }
+  for (const el of sc.querySelectorAll('svg path, svg rect, svg circle, svg ellipse, svg polygon, svg polyline, svg line, svg image')) {
+    if (isBigVisible(el)) return true;
+  }
+  return false;
+};
+
 const IN_PAGE_OVERFLOWS = () => {
   const stage = document.getElementById('stage');
   const sc = stage ? stage.querySelector('.scene') : null;
@@ -230,27 +257,35 @@ async function maybeCaptureIssueShot(page, screenshotDir, id, label, savedShots)
   savedShots.push(out);
 }
 
-async function inspectSamplePoint(page, ctx, pt) {
-  const { id, duration, minFontPx, screenshotDir, vErrors, vWarnings, savedShots } = ctx;
-  const errBefore = vErrors.length;
-  const warnBefore = vWarnings.length;
-
-  await page.evaluate(s => window.V.seekToAsync(s), pt.t);
-  const [brokenImgs, charCount, overflows, subOverlaps, collisions, smallFonts] = await Promise.all([
-    page.evaluate(IN_PAGE_BROKEN_IMGS),
-    page.evaluate(IN_PAGE_CHAR_COUNT),
-    page.evaluate(IN_PAGE_OVERFLOWS),
-    page.evaluate(IN_PAGE_SUB_OVERLAPS),
-    page.evaluate(IN_PAGE_SIBLING_COLLISIONS),
-    page.evaluate(IN_PAGE_SMALL_FONTS, minFontPx),
-  ]);
-
+function collectFrameDiagnostics(pt, metrics, vErrors, vWarnings) {
+  const { brokenImgs, charCount, hasVisual, overflows, subOverlaps, collisions, smallFonts } = metrics;
   for (const src of brokenImgs) vErrors.push(`${pt.label}: Broken <img> "${src}"`);
   for (const cls of overflows) vWarnings.push(`${pt.label}: Element "${cls}" overflows stage bounds`);
   for (const cls of subOverlaps) vWarnings.push(`${pt.label}: Element "${cls}" overlaps #subs safe zone`);
   for (const pair of collisions) vWarnings.push(`${pt.label}: Sibling layout overlap ${pair}`);
   for (const sf of smallFonts) vWarnings.push(`${pt.label}: Small font ${sf}`);
   if (charCount > 240) vWarnings.push(`${pt.label}: High on-screen text density (${charCount} chars > 240)`);
+  if (pt.hasCue && charCount === 0 && !hasVisual) {
+    vWarnings.push(`${pt.label}: Blank stage (no visible scene content during spoken cue)`);
+  }
+}
+
+async function inspectSamplePoint(page, ctx, pt) {
+  const { id, duration, minFontPx, screenshotDir, vErrors, vWarnings, savedShots } = ctx;
+  const errBefore = vErrors.length;
+  const warnBefore = vWarnings.length;
+
+  await page.evaluate(s => window.V.seekToAsync(s), pt.t);
+  const [brokenImgs, charCount, hasVisual, overflows, subOverlaps, collisions, smallFonts] = await Promise.all([
+    page.evaluate(IN_PAGE_BROKEN_IMGS),
+    page.evaluate(IN_PAGE_CHAR_COUNT),
+    page.evaluate(IN_PAGE_HAS_VISUAL),
+    page.evaluate(IN_PAGE_OVERFLOWS),
+    page.evaluate(IN_PAGE_SUB_OVERLAPS),
+    page.evaluate(IN_PAGE_SIBLING_COLLISIONS),
+    page.evaluate(IN_PAGE_SMALL_FONTS, minFontPx),
+  ]);
+  collectFrameDiagnostics(pt, { brokenImgs, charCount, hasVisual, overflows, subOverlaps, collisions, smallFonts }, vErrors, vWarnings);
 
   if (pt.isMid) {
     const fwdT = pt.t + 1.3;

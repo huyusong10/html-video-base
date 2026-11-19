@@ -4,6 +4,8 @@
 
 A lightweight web-native video engine and multi-TTS rendering toolchain.
 
+The player is designed for desktop browsers.
+
 With `html-video-base`, your videos are interactive web pages built with HTML, CSS, and JavaScript: viewers can scrub, click, and inspect them directly in the browser, and you can also synthesize voiceovers, generate subtitles, and render lossless MP4s from the exact same source. Consumer repositories only need this single npm dependency—no need to copy runtime files or build scripts across projects.
 
 Each consumer project maintains its own landing page and catalog. The preview server serves project files directly, and multi-video bundles copy files at the root of `videos/` unchanged. Without a project landing page, open a video's URL directly.
@@ -171,6 +173,14 @@ Once the core workflow is up and running, explore these built-in capabilities as
 Keep your main scene scripts clean in one primary language. Add extra languages by listing `locales` in `video.config.js` and adding `locales/<lang>.js` with `V.locale()`. Use `npx html-video build demo --lang en` to generate separate localized audio/subtitles, and switch live via `?lang=en` or the player audio menu. See [i18n.md](skills/html-video/references/i18n.md) (ZH) for details.
 
 ### 4. Theme & Player Customization
+
+Project defaults in `V.projectDefaults` are overridden by `V.themeDefaults`, `V.config`, and locale settings, in that order. Load project and theme scripts before `video.config.js` so the player and CLI see the same settings. Values in `ui`, `tts`, `bgm`, and `sfx` can be overridden by field. Set `tts: false` or `bgm: false` to disable the respective track.
+
+Pronunciation rules in `tts.pronunciation` are inherited per term. Use `false` for a term to keep its original text in speech synthesis. Rules match literal text, favor longer matches, and leave subtitles unchanged. Set `tts.polyphoneFix: false` to skip the built-in Chinese readings.
+
+Set `speechText` on a scene line to adjust its Chinese punctuation before applying pronunciation rules. It must preserve the line's wording, number and acronym tokens, and configured pronunciation phrases. Subtitles still use `text`. Use `gap` and the line's `pause` for spacing between lines; use `build` when speech input changes, or `mix` for spacing changes alone.
+
+Set `pauseReport: true` in the video configuration to generate a local report under `.runtime/reports/<video-id>/` during build, mix, or verification. It shows timeline gaps and estimates longer quiet stretches from existing voice timing data. Missing measurements are marked, and the report is not bundled.
 - **Player behavior**: Configure `V.config.ui` or `V.themeDefaults.ui` for control bar behavior (defaults to `controlsMode: 'overlay'`), playback `rates`, `iconPreset` (`'default' | 'pixel'`), and storage options (`persist`, `resume`). Control stems programmatically with `V.setBgm()`, `V.setVoice()`, `V.setMuted()`, and `V.clearSavedState()`. Set `V.config.homeUrl` to add a return link to your project page; the button is hidden when no URL is configured.
 - **CSS theme variables**: Base selectors use low specificity, so overriding `:root` variables in `style.css` restyles the entire player:
   - Viewport & stage: `--viewport-bg`, `--stage-shadow`, `--stage-bg-image`, `--font-sans`, `--font-smoothing`, `--gl-rendering`
@@ -189,6 +199,12 @@ All manuals and engineering specifications are bundled inside `node_modules/html
 
 ---
 
+In video mode, click the subtitles icon to open the settings panel. From there you can show or hide subtitles, choose a font size, and set left or center alignment. Medium and left are the defaults. Small uses the course's original font size, and the player remembers preferences per course.
+
+### Optional loading screen
+
+Place `<script src="../base/js/loading.js"></script>` at the start of the course's `<body>`, ahead of external stylesheets and player scripts. Call `V.boot()` as usual. The screen covers startup, playback buffering, and slides that are waiting for visuals. Recording and capture hide this interface automatically.
+
 ## CLI Reference
 
 | Command | Description |
@@ -202,8 +218,13 @@ All manuals and engineering specifications are bundled inside `node_modules/html
 | `html-video verify [id ...] [--stamp-baked] [--visual] [--strict]` | Verify word anchors, subtitles, and audio-visual sync |
 | `html-video audit [id ...] [--strict] [--screenshots <dir>]` | Headless Chromium check for layout, images, and `f(t)` idempotency |
 | `html-video storyboard [id] [out.html] [--per-cue] [--pdf]` | Export single-file visual storyboard review sheet |
+| `html-video pptx <id> [out.pptx \| --publish] [--mode image\|editable] [--pages 1,3-5] [--lang en]` | Export image slides or hybrid editable slides with speaker notes |
 | `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--no-bgm] [--no-cache]` | Render 1080p MP4 with incremental scene caching |
 | `html-video bundle [id ... \| --single \| --all] [--out dist]` | Bundle standalone static site without `node_modules` |
+
+Enable `ppt: true` to export a course as PPTX. The default exports every page as a full-slide image. Use `--mode editable` for a hybrid export that converts explicitly marked elements to native text, shapes, or line charts and captures the rest as an image. `--pages` accepts the page numbers shown in the browser's PPT mode.
+
+Run `html-video pptx <id> --publish` for the image deck and `html-video pptx <id> --mode editable --publish` for the hybrid deck. The PPT toolbar shows whichever files have been generated. The static bundle includes both published files.
 
 ## Quality Gates (Repo Development)
 

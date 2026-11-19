@@ -68,11 +68,13 @@ function render(index, time) {
 const delay = time => new Promise(resolve => setTimeout(resolve, time));
 const host = { isConnected: true, style: { visibility: '' } };
 let initialized = 0, prepared = 0, disposed = 0;
+const visibilityChanges = [];
 const source = V.managedSource({ id: 'native', element: () => host, active: frame => frame.sceneIndex === 0,
   timeoutMs: 10, readyTimeoutMs: 200,
   async initialize({ signal }) { initialized++; await delay(40); assert.equal(signal.aborted, false); return 'model'; },
   prepare(state, frame, { data }) { prepared++; assert.equal(data, 'model'); assert.equal(state.value, 2); },
   dispose() { disposed++; },
+  onVisibilityChange(visible) { visibilityChanges.push(visible); },
 });
 source.setState({ value: 1 });
 const firstRender = render(0, 0.1);
@@ -94,6 +96,7 @@ assert.equal(host.style.visibility, 'hidden', 'Inactive scene ownership must hid
 source.setState(null);
 await render(0, 0.4).prepared;
 assert.equal(host.style.visibility, 'hidden');
+assert.deepEqual(visibilityChanges, [true, false], 'Visibility callbacks must only run when scene ownership changes');
 source.dispose(); source.dispose();
 assert.equal(disposed, 1);
 
@@ -112,10 +115,54 @@ await retry.retry();
 await render(0, 7).prepared;
 assert.equal(attempts, 2);
 retry.dispose();
-const slow = V.managedSource({ id: 'slow', element: () => host, timeoutMs: 5, prepare: () => new Promise(() => {}) });
+let finishLoadingPaint;
+const loadingPaint = new Promise(resolve => { finishLoadingPaint = resolve; });
+V._loading = { waitForPaint: () => loadingPaint };
+const afterPaint = V.managedSource({ id: 'after-loading-paint', element: () => host, readyTimeoutMs: 10,
+  initialize: () => 'ready', prepare() {} });
+const paintedReady = afterPaint.ready();
+await delay(25);
+assert.equal(afterPaint.status, 'loading', 'Waiting for UI paint must not consume the initialization timeout');
+finishLoadingPaint();
+assert.equal(await paintedReady, 'ready');
+await afterPaint.dispose();
+delete V._loading;
+let timedOutAttempts = 0, finishTimedOut;
+const slow = V.managedSource({ id: 'slow', element: () => host, timeoutMs: 20,
+  initialize() { timedOutAttempts++; },
+  prepare() { if (timedOutAttempts === 1) return new Promise(resolve => { finishTimedOut = resolve; }); },
+});
 slow.setState({});
-await assert.rejects(render(0, 8).prepared, /slow.*Preparation timed out after 5ms/);
-slow.dispose();
+await assert.rejects(render(0, 8).prepared, /slow.*Preparation timed out after 20ms/);
+finishTimedOut();
+await delay(0);
+assert.equal(slow.status, 'failed', 'Late completion must not clear the timeout');
+assert.equal(V._frameRuntime.readiness().failed, true, 'A current timeout must expose a retryable failure');
+await V._frameRuntime.retryActive();
+await render(0, 9).prepared;
+assert.equal(timedOutAttempts, 2);
+assert.equal(slow.status, 'ready');
+await slow.dispose();
+
+let rejectOldFrame, markPrepareStarted;
+const prepareStarted = new Promise(resolve => { markPrepareStarted = resolve; });
+const superseded = V.managedSource({ id: 'superseded', element: () => host,
+  prepare(state) {
+    if (!state.outdated) return;
+    markPrepareStarted();
+    return new Promise((_, reject) => { rejectOldFrame = reject; });
+  },
+});
+superseded.setState({ outdated: true });
+const cancelledFrame = assert.rejects(render(0, 10).prepared, error => error.name === 'AbortError');
+await prepareStarted;
+superseded.setState({ outdated: false });
+await render(0, 11).prepared;
+await cancelledFrame;
+rejectOldFrame(new Error('late failure'));
+await delay(0);
+assert.equal(superseded.status, 'ready', 'A superseded frame failure must not affect a newer frame');
+await superseded.dispose();
 const throwingDispose = V.managedSource({ id: 'throwing-dispose', element: () => host, prepare() {},
   dispose() { throw new Error('Cleanup failed'); },
 });
@@ -150,7 +197,7 @@ fs.writeFileSync(path.join(videoDir, 'video.config.js'), 'V.config={width:320,he
 fs.writeFileSync(path.join(videoDir, 'error-probe.html'), '<!doctype html><body><script src="../base/js/engine.js"></script><script>V.getSceneEnergy=()=>0;</script>');
 fs.writeFileSync(path.join(videoDir, 'scenes.js'), `
 let host;
-const managed=V.iframeSource({id:'screen',src:'child.html',element:()=>host});
+const managed=V.iframeSource({id:'screen',src:'child.html',element:()=>host,active:()=>!window.sourceHidden});
 V.scene({duration:1,lines:[],build(root){host=document.createElement('iframe');root.append(host);},
 update(t){managed.setState({color:t<0.5?'#00dd44':'#ff2255',delay:t<0.5?25:1});}});
 `);
@@ -177,6 +224,10 @@ await withAuditSession({ projectRoot: root }, async audit => {
   const green = await video.capture(0.1);
   const red = await video.capture(0.8);
   assert.ok(!green.image.equals(red.image), 'The parent must wait for actual prepared iframe pixels');
+  await video.page.evaluate(() => { window.sourceHidden = true; });
+  await video.seek(0.8);
+  assert.equal(await video.page.locator('iframe').evaluate(el => el.style.display), '', 'Recording must retain iframe layout while hiding scene visibility');
+  await video.page.evaluate(() => { window.sourceHidden = false; });
   const forged = await video.page.evaluate(async () => {
     const pending = V.seekToAsync(0.1);
     const child = document.querySelector('iframe').contentWindow;

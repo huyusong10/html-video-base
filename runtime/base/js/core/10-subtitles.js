@@ -14,6 +14,8 @@
   let buildSubSpec = null;
   let updateSubTick = 0;
   let sceneScopedSpec = false;
+  let appliedSubSpec = null;
+  let subSize = 'medium', subAlign = 'left';
 
   function getSubCfg() {
     const cfg = V.getCfg();
@@ -23,12 +25,12 @@
   function resolveDefaultSubSpec() {
     if (globalOverrideSpec != null) return globalOverrideSpec;
     const subCfg = getSubCfg();
-    return subCfg.layout || subCfg.position || 'center';
+    return subCfg.layout || subCfg.position || null;
   }
 
   function resolveSubLayoutObj(spec, subCfg) {
     const eff = spec || (subCfg && (subCfg.layout || subCfg.position));
-    if (!eff) return { pos: 'center' };
+    if (!eff) return { pos: V.pptMode ? 'center' : subAlign };
     if (typeof eff === 'string') {
       const m = subCfg && subCfg.modes && subCfg.modes[eff];
       return m ? Object.assign({ pos: 'center' }, m) : { pos: eff };
@@ -37,15 +39,32 @@
   }
 
   function applySubLayout(spec) {
+    appliedSubSpec = spec;
     if (!subs) return;
     const obj = resolveSubLayoutObj(spec, getSubCfg());
-    subs.dataset.subPos = obj.pos || 'center';
+    const position = obj.pos || 'center';
+    if (subs.dataset.subPos !== position) subs.dataset.subPos = position;
     for (const [prop, cssVar] of SUB_VAR_MAP) {
       const val = obj[prop];
-      if (val == null || val === '') subs.style.removeProperty(cssVar);
-      else subs.style.setProperty(cssVar, typeof val === 'number' && prop !== 'zIndex' ? `${val}px` : String(val));
+      if (val == null || val === '') {
+        if (subs.style.getPropertyValue(cssVar)) subs.style.removeProperty(cssVar);
+      } else {
+        const value = typeof val === 'number' && prop !== 'zIndex' ? `${val}px` : String(val);
+        if (subs.style.getPropertyValue(cssVar) !== value) subs.style.setProperty(cssVar, value);
+      }
     }
   }
+  function getAppearance() { return { size: subSize, align: subAlign }; }
+
+  function setAppearance({ size, align } = {}) {
+    if (['small', 'medium', 'large'].includes(size)) subSize = size;
+    if (['left', 'center'].includes(align)) subAlign = align;
+    if (!subs || V.pptMode) return;
+    subs.dataset.subSize = subSize;
+    subs.dataset.subAlign = subAlign;
+    applySubLayout(appliedSubSpec);
+  }
+
   V.setSubLayout = function (spec) {
     if (V._inSceneBuild) {
       buildSubSpec = spec;
@@ -86,7 +105,8 @@
     const subCfg = getSubCfg();
     mountSubSlot(subLead, subCfg.lead);
     mountSubSlot(subTail, subCfg.tail);
-    if (subCfg.layout || subCfg.position) applySubLayout(subCfg.layout || subCfg.position);
+    applySubLayout(resolveDefaultSubSpec());
+    setAppearance();
   }
 
   function syncSceneSubLayout(sc, lt) {
@@ -135,23 +155,25 @@
     return { cue: null, activeCueIdx: -1 };
   }
 
-  function pickVideoCue(sc, lt) {
+  function prepareVideoCue(sc, lt) {
     const list = sc.subCues && sc.subCues.length ? sc.subCues : sc.cues;
     let cue = null, activeCueIdx = -1;
     sc.cues.forEach((c, i) => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) activeCueIdx = i; });
     list.forEach(c => { if (lt >= c.start - 0.04 && lt < c.end + 0.08) cue = c; });
+    // 句间留白时先按下一句排版，让角色能从字幕即将出现的位置展开。
+    if (subs) updateSubDomText(cue || list.find(c => lt < c.start - 0.04) || list.at(-1) || { text: '' });
     return { cue, activeCueIdx };
   }
 
-  function updateSubs(sc, idx, lt, now, clock, showSubs) {
+  function updateSubs(sc, idx, lt, now, clock, showSubs, videoCue) {
     if (!subs) return -1;
     const subCfg = getSubCfg();
     syncSceneSubLayout(sc, lt, subCfg);
-    const picked = V.pptMode ? pickPptCue(sc, lt) : pickVideoCue(sc, lt);
+    const picked = V.pptMode ? pickPptCue(sc) : (videoCue || prepareVideoCue(sc, lt));
     const { cue, activeCueIdx } = picked;
     const visible = Boolean(cue && showSubs);
     subs.style.visibility = visible ? 'visible' : 'hidden';
-    if (cue) updateSubDomText(cue);
+    if (V.pptMode && cue) updateSubDomText(cue);
     if (visible) {
       const a = V.pptMode ? 1 : Math.min(appear(lt, cue.start - 0.04, 0.14), 1 - prog(lt, cue.end, cue.end + 0.12));
       subs.style.opacity = String(clamp(a));
@@ -162,5 +184,5 @@
     return activeCueIdx;
   }
 
-  V._subtitlesRuntime = { bindSubElements, applySubLayout, resetSceneSubLayout, updateSubs };
+  V._subtitlesRuntime = { bindSubElements, applySubLayout, resetSceneSubLayout, prepareVideoCue, updateSubs, getAppearance, setAppearance };
 })(globalThis.V = globalThis.V || {});

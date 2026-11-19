@@ -104,12 +104,12 @@ def check_offline_hydration(root):
     original_cache_dir = voice.CACHE_DIR
     try:
         voice.CACHE_DIR = cache_dir
-        voice.hydrate_cached_voices([['tone']], output_dir, cfg, [])
+        voice.hydrate_cached_voices([[{'text': 'original', 'spoken': 'tone'}]], output_dir, cfg)
         assert not os.path.exists(os.path.join(output_dir, '00_00.wav')), 'Offline mix must fall back to the stem for inconsistent cache'
         source = os.path.join(folder, 'valid.wav')
         make_wave(source, 0.4)
         voice._write_cache_entry_atomic(source, cache, meta, payload(0.4))
-        voice.hydrate_cached_voices([['tone']], output_dir, cfg, [])
+        voice.hydrate_cached_voices([[{'text': 'original', 'spoken': 'tone'}]], output_dir, cfg)
         assert sf.info(os.path.join(output_dir, '00_00.wav')).duration == 0.4, 'Offline mix must still restore valid cached clips'
     finally:
         voice.CACHE_DIR = original_cache_dir

@@ -101,7 +101,7 @@
 
   V._createPptRuntime = function (deps) {
     const {
-      params, renderAt, uiText, makeCtrlIcon, swapBtnIcon, switchMode,
+      params, renderAt, uiText, makeCtrlIcon, switchMode,
       renderCustomControls, setOpenMenu, toggleOsFull, fallbackWebFull, exitWebFullIfActive, bindMenuAutoClose,
     } = deps;
 
@@ -231,7 +231,7 @@
         const firstIdx = pages.findIndex(p => p.sceneIndex === si);
         if (firstIdx < 0) return;
         const pageTag = uiText('pptChapPage', { p: firstIdx + 1 });
-        const item = h('div', { class: 'chap-item' }, h('em', null, String(si + 1).padStart(2, '0')), h('span', { class: 'chap-it-title' }, sc.title), h('small', null, pageTag));
+        const item = h('button', { type: 'button', class: 'chap-item' }, h('em', null, String(si + 1).padStart(2, '0')), h('span', { class: 'chap-it-title' }, sc.title), h('small', null, pageTag));
         item.onclick = e => { e.stopPropagation(); setOpenMenu(bar, ''); goToPage(firstIdx); };
         list.appendChild(item);
         refs.chapItems.push({ item, sceneIndex: si });
@@ -248,7 +248,6 @@
       const webBtn = uiCfg.webFull
         ? h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'webfull', title: webLabel, 'aria-label': webLabel }, makeCtrlIcon(uiCfg.icons.webEnter))
         : null;
-      const notesLabel = uiText('pptNotesShow');
       const toVideoLabel = uiText('switchToVideo');
       const fullLabel = uiText('fullEnter');
       const nav = h('div', { class: 'ppt-nav' },
@@ -265,7 +264,6 @@
         nav,
         h('div', { class: 'ppt-spacer' }),
         ...renderCustomControls('right', uiCfg),
-        h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'subs', title: notesLabel, 'aria-label': notesLabel }, makeCtrlIcon(uiCfg.icons.subsOff)),
         h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'to-video', title: toVideoLabel, 'aria-label': toVideoLabel }, makeCtrlIcon(uiCfg.icons.videoMode)),
         webBtn,
         h('button', { class: 'ctrl-rbtn ctrl-icon-btn', 'data-act': 'full', title: fullLabel, 'aria-label': fullLabel }, makeCtrlIcon(uiCfg.icons.fullEnter)));
@@ -306,7 +304,7 @@
     }
 
     function handlePptEscape(bar, e) {
-      if (bar && bar.classList.contains('menu-open')) { setOpenMenu(bar, ''); e.preventDefault(); }
+      if (bar && bar.classList.contains('menu-open')) { setOpenMenu(bar, '', true); e.preventDefault(); }
       else if (exitWebFullIfActive && exitWebFullIfActive()) e.preventDefault();
     }
 
@@ -391,15 +389,10 @@
       jumpSceneDelta,
       seekToNearestPage,
       resolveInitialPageIndex,
-      swapSubsIcon: (subsBtn, showSubs, icons) => {
-        if (!subsBtn) return;
-        const key = showSubs ? 'subsOn' : 'subsOff';
-        subsBtn.classList.toggle('is-off', !showSubs);
-        swapBtnIcon(subsBtn, key, icons[key], uiText(showSubs ? 'pptNotesHide' : 'pptNotesShow'));
-      },
       isInternalRender: () => internalRender,
       getPageNo: () => pageIdx + 1,
       getTotalPages: () => pages.length,
+      getPages: () => pages.map(page => ({ ...page })),
       getCurrentNote: () => (pages[pageIdx] ? pages[pageIdx].text : ''),
       getState: () => ({
         page: pageIdx + 1,
