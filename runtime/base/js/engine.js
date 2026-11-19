@@ -6226,15 +6226,17 @@
     const vp = document.getElementById('viewport');
     const bar = document.getElementById('controls');
     const W = V.stageWidth || 1920, H = V.stageHeight || 1080;
+    const ctrlH = (bar && bar.offsetHeight) || 46;
+    document.body.style.setProperty('--ctrl-layout-h', ctrlH + 'px');
     const vpW = (vp && vp.clientWidth) || innerWidth;
     const vpH = (vp && vp.clientHeight) || innerHeight;
-    const ctrlH = (bar && bar.offsetHeight) || 46;
     const k = Math.min(vpW / W, vpH / H);
     const letterbox = Math.max(0, (vpH - H * k) / 2);
     const overlap = Math.round(Math.max(0, (ctrlH + 6 - letterbox) / Math.max(0.1, k)));
     stage.style.transform = `translate(-50%,-50%) scale(${k})`;
     stage.style.setProperty('--ctrl-overlap', overlap + 'px');
     if (vp) vp.style.setProperty('--k', k);
+    if (bar?.dataset.menu === 'sound') positionSoundMenu(bar);
   }
 
   function waitVideoReady(vid, minimum, timeoutMs, signal) {

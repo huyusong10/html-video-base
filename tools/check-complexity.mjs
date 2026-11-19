@@ -1,12 +1,14 @@
 // 全仓圈复杂度（Cyclomatic Complexity）硬门禁校验器（限制：所有 JS/MJS 与 Python 函数 CC < 15）
-// 用法：node tools/check-complexity.mjs [--max 14]
+// 用法：node tools/check-complexity.mjs [--max 14] [--root <目录>]
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const MAX_CC = parseMaxArg(process.argv.slice(2), 14);
+const args = process.argv.slice(2);
+const MAX_CC = parseMaxArg(args, 14);
+const SOURCE_ROOT = parseSourceRoot(args);
 const SKIP_DIRS = new Set(['node_modules', '.git', '.runtime', 'vendor', '__pycache__', 'dist']);
 const NON_METHOD_KW = new Set(['if', 'for', 'while', 'switch', 'catch', 'function', 'return']);
 const METHOD_PREV = new Set(['{', ',', ';', '}', 'async', 'get', 'set', 'static']);
@@ -23,6 +25,16 @@ function parseMaxArg(args, fallback) {
   const idx = args.indexOf('--max');
   if (idx < 0) return fallback;
   return Number(args[idx + 1]) || fallback;
+}
+
+function parseSourceRoot(args) {
+  const index = args.indexOf('--root');
+  if (index < 0) return PKG_ROOT;
+  const directory = args[index + 1];
+  if (!directory || directory.startsWith('--')) throw new Error('--root requires a source directory.');
+  const root = path.resolve(directory);
+  if (!fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`Source directory not found: ${root}`);
+  return root;
 }
 
 function collectSourceFiles(dir, out = []) {
@@ -348,7 +360,7 @@ function analyzePyFiles(pyFiles) {
   return JSON.parse(r.stdout);
 }
 
-const allFiles = collectSourceFiles(PKG_ROOT);
+const allFiles = collectSourceFiles(SOURCE_ROOT);
 const jsFiles = allFiles.filter(f => /\.(m?js)$/.test(f));
 const pyFiles = allFiles.filter(f => f.endsWith('.py'));
 
@@ -363,7 +375,7 @@ const peak = records.reduce((m, r) => (r.cc > m ? r.cc : m), 0);
 if (violations.length > 0) {
   console.error(`❌ Cyclomatic complexity check FAILED (${violations.length} function(s) > ${MAX_CC}):`);
   for (const v of violations) {
-    console.error(`  [CC=${v.cc}] ${path.relative(PKG_ROOT, v.file)}:${v.line} -> ${v.name}`);
+    console.error(`  [CC=${v.cc}] ${path.relative(SOURCE_ROOT, v.file)}:${v.line} -> ${v.name}`);
   }
   process.exit(1);
 }

@@ -130,7 +130,7 @@ html, body {
 
 #viewport {
   position: fixed;
-  top: 0; left: 0; right: 0; bottom: var(--ctrl-h);
+  top: 0; left: 0; right: 0; bottom: var(--ctrl-layout-h, var(--ctrl-h));
   background: var(--viewport-bg);
   overflow: hidden;
   transition: background 0.3s ease;
@@ -436,7 +436,7 @@ body.record #checkpoint-overlay { display: none !important; }
 
 /* 未播放时的居中引导胶囊 */
 #start-hint {
-  position: fixed; left: 50%; top: calc((100% - var(--ctrl-h)) / 2); transform: translate(-50%, -50%);
+  position: fixed; left: 50%; top: calc((100% - var(--ctrl-layout-h, var(--ctrl-h))) / 2); transform: translate(-50%, -50%);
   z-index: 32; pointer-events: none;
   padding: 12px 26px; border-radius: 999px;
   background: rgba(15, 23, 42, 0.88); color: #f8fafc;
@@ -876,6 +876,38 @@ body:is(.web-full, .os-full, [data-video-host-fullscreen]).playing:not(.ui-activ
     min-width: 40px;
     max-width: 156px;
   }
+}
+
+@media (max-width: 520px) {
+  #controls {
+    height: auto;
+    min-height: var(--ctrl-h);
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 6px 8px;
+  }
+  #controls > .time { order: -2; }
+  #controls > .track {
+    order: -1;
+    flex: 1 0 calc(100% - var(--ctrl-time-w) - 4px);
+    margin: 0;
+  }
+  #controls.ppt-bar > .ppt-nav {
+    order: -1;
+    flex: 0 0 100%;
+    justify-content: center;
+  }
+  #controls.ppt-bar > .ppt-spacer { display: none; }
+  #controls > .chap-wrap { flex: 1 1 0; }
+  #controls > :is(.chap-wrap, .rate-wrap, .subs-wrap, .pptx-wrap) { position: static; }
+  #controls :is(.chap-menu, .rate-menu, .subs-menu, .sound-menu, .pptx-menu) {
+    max-width: calc(100% - 16px);
+  }
+  #controls .chap-menu { left: 8px; right: auto; }
+  #controls .rate-menu { left: auto; right: 8px; transform: translateY(6px); }
+  #controls.rate-open .rate-menu { transform: translateY(0); }
+  #controls :is(.subs-menu, .pptx-menu) { right: 8px; }
+  #controls .pptx-download-option { white-space: normal; }
 }
 
 /* ?dev=1 创作者调试覆盖层 */

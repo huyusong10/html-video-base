@@ -255,6 +255,47 @@ async function checkInteractiveKeyboard(audit) {
   await video.close();
 }
 
+async function checkCompactControls(audit) {
+  const video = await audit.openVideo('demo', { mode: 'interactive' });
+  const { page } = video;
+  await page.addStyleTag({ content: ':root { --ctrl-chap-w: 248px; }' });
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 460 });
+    const layout = await page.evaluate(() => {
+      const bar = document.getElementById('controls');
+      const bounds = selector => bar.querySelector(selector).getBoundingClientRect().toJSON();
+      return { width: bar.scrollWidth, track: bounds('.track'), play: bounds('[data-act=play]'), full: bounds('[data-act=full]') };
+    });
+    assert.ok(layout.width <= width && layout.full.right <= width, 'Every control must fit in a narrow viewport');
+    assert.ok(layout.track.width > width / 2 && layout.track.bottom <= layout.play.top, 'The track must retain a separate usable row');
+  }
+
+  for (const [trigger, menu] of [['chap', '.chap-menu'], ['rate', '.rate-menu'], ['subs', '.subs-menu'], ['mute', '.sound-menu']]) {
+    await page.locator(`[data-act=${trigger}]`).focus();
+    await page.keyboard.press('Enter');
+    const panel = await page.locator(menu).boundingBox();
+    assert.ok(panel && panel.x >= 0 && panel.x + panel.width <= 320, 'Open menus must fit inside the viewport');
+    await page.keyboard.press('Escape');
+  }
+
+  await page.evaluate(() => {
+    document.body.classList.remove('ctrl-overlay');
+    window.dispatchEvent(new Event('resize'));
+  });
+  const viewport = await page.locator('#viewport').boundingBox();
+  const bar = await page.locator('#controls').boundingBox();
+  assert.equal(viewport.y + viewport.height, bar.y, 'Pinned controls must reserve their full wrapped height');
+  await video.close();
+
+  const ppt = await audit.openVideo('demo', { mode: 'ppt' });
+  await ppt.page.setViewportSize({ width: 390, height: 460 });
+  const nav = await ppt.page.locator('.ppt-nav').boundingBox();
+  const full = await ppt.page.locator('[data-act=full]').boundingBox();
+  assert.ok(nav.width > 360 && nav.y + nav.height <= full.y && full.x + full.width <= 390,
+    'PPT navigation and the remaining controls must fit on separate rows');
+  await ppt.close();
+}
+
 async function checkSubtitleSettings(audit) {
   const page = await audit.openPage('/blank.html');
   const fixture = fs.readFileSync(path.join(dir, 'video.config.js'), 'utf8');
@@ -485,6 +526,7 @@ await withAuditSession({ projectRoot: root }, async audit => {
   await checkAudioFailure(audit);
   await checkScrubbing(audit);
   await checkInteractiveKeyboard(audit);
+  await checkCompactControls(audit);
   await checkSubtitleSettings(audit);
   await checkStyleWrites(audit);
   await checkControlFocus(audit);
