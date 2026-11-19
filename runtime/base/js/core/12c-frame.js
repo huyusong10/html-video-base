@@ -131,6 +131,9 @@
 
   V.getFrameState = () => current;
   V._frameRuntime = { begin, forScene, prepare, report,
+    prepareStartup() {
+      return Promise.all(Array.from(sources.values(), source => source.prepareStartup?.()));
+    },
     readiness() {
       const list = current ? activeSources(current) : [];
       return { waiting: list.some(source => source.status && source.status() !== 'ready'),

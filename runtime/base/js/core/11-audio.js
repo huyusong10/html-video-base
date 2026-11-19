@@ -90,6 +90,32 @@
     return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : fallback;
   }
 
+  function hasStartAudio(track) {
+    return !track.seeking && (track.readyState >= 3 ||
+      (track.readyState >= 2 && track.currentTime >= track.duration - 0.02));
+  }
+
+  function waitForStartAudio(track, signal, seekPending = () => false) {
+    return new Promise((resolve, reject) => {
+      const events = ['loadedmetadata', 'canplay', 'seeked', 'error'];
+      function finish(error) {
+        for (const event of events) track.removeEventListener(event, check);
+        signal.removeEventListener('abort', cancel);
+        if (error) reject(error);
+        else resolve();
+      }
+      const cancel = () => finish(signal.reason);
+      function check() {
+        if (track.error) finish(new Error(`Startup audio failed: ${track.currentSrc || track.src}`));
+        else if (!seekPending() && hasStartAudio(track)) finish();
+      }
+      if (signal.aborted) { cancel(); return; }
+      for (const event of events) track.addEventListener(event, check);
+      signal.addEventListener('abort', cancel, { once: true });
+      check();
+    });
+  }
+
   V._createAudioRuntime = function (hooks) {
     const { params, isRecord } = hooks;
     let audio = null, bgmAudio = null, playbackRate = 1, bgmLoop = true, bgmIsBaked = false;
@@ -363,6 +389,14 @@
       return Boolean(audio && !audioBlocked && !audioFailed);
     }
 
+    function waitForStartup(signal) {
+      const narration = audio && waitForStartAudio(audio, signal, () => targetSeekTime != null);
+      const music = bgmAudio && !bgmAudio.muted && waitForStartAudio(bgmAudio, signal).catch(error => {
+        if (signal.aborted) throw error;
+      });
+      return Promise.all([narration, music]);
+    }
+
     function tryApplyPendingSeek() {
       if (targetSeekTime == null || !audio || audio.readyState < 1 || audio.seeking) return;
       const t = targetSeekTime;
@@ -606,7 +640,7 @@
       syncSceneVolume: syncTrackVolumes, consumeRecentUnlock,
       isAllMuted, resolveSoundBtnSpec, canUseMasterClock,
       tickMasterClock, syncWithWallClock: keepBgmInSync,
-      hasBgm: () => Boolean(bgmAudio), hasError: () => audioFailed, retry, getState,
+      hasBgm: () => Boolean(bgmAudio), hasError: () => audioFailed, retry, getState, waitForStartup,
     };
   };
 })(globalThis.V = globalThis.V || {});

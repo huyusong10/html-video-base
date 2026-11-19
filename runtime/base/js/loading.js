@@ -24,22 +24,12 @@
       padding: 4px 12px; font: inherit; color: inherit; background: transparent;
       border: 1px solid currentColor; border-radius: 6px; cursor: pointer;
     }
-    .video-loading-spinner:not([hidden]) {
-      display: inline-block; width: 1em; height: 1em; box-sizing: border-box;
-      border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
-      flex: none; animation: video-loading-spin .8s linear infinite;
-    }
-    @keyframes video-loading-spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) { .video-loading-spinner { animation: none; } }
   `;
   document.head.append(style);
 
   const screen = document.createElement('div');
   screen.id = 'video-loading';
   const row = document.createElement('div');
-  const spinner = document.createElement('span');
-  spinner.className = 'video-loading-spinner';
-  spinner.setAttribute('aria-hidden', 'true');
   const status = document.createElement('span');
   status.setAttribute('role', 'status');
   status.textContent = labels[0];
@@ -48,14 +38,37 @@
   retry.textContent = labels[2];
   retry.hidden = true;
   retry.onclick = () => location.reload();
-  row.append(spinner, status, retry);
+  row.append(status, retry);
   screen.append(row);
   document.body.append(screen);
 
+  const locked = [];
+  function lock(element) {
+    if (element && !element.inert) {
+      element.inert = true;
+      locked.push(element);
+    }
+  }
+
+  function blockKeys(event) {
+    if (screen.contains(event.target)) return;
+    event.stopImmediatePropagation();
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === 'Tab' && !retry.hidden) retry.focus();
+    event.preventDefault();
+  }
+  window.addEventListener('keydown', blockKeys, true);
+
   function fail() {
-    spinner.hidden = true;
     status.textContent = labels[1];
     retry.hidden = false;
+    if (document.hasFocus()) retry.focus();
+  }
+
+  function finish() {
+    window.removeEventListener('keydown', blockKeys, true);
+    for (const element of locked.splice(0)) element.inert = false;
+    screen.remove();
   }
 
   function waitForPaint() {
@@ -70,7 +83,7 @@
     });
   }
 
-  V._loading = { fail, waitForPaint, finish: () => screen.remove() };
+  V._loading = { fail, finish, lock, waitForPaint, isActive: () => screen.isConnected };
   document.addEventListener('DOMContentLoaded', () => {
     if (typeof V.boot !== 'function' && screen.isConnected) fail();
   }, { once: true });

@@ -100,6 +100,10 @@
     const unregister = V.frameSource({
       id: definition.id, element: definition.element, active, ready, retry, status: () => phase,
       timeoutMs: definition.timeoutMs,
+      prepareStartup() {
+        const startup = typeof definition.startup === 'function' ? definition.startup(V.environment) : definition.startup;
+        if (startup) return ready();
+      },
       onPrepareError() { if (!disposed) phase = 'failed'; },
       prepare(frame, context) {
         if (context.signal.aborted) throw aborted();

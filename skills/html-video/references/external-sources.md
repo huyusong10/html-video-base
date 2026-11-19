@@ -98,6 +98,8 @@ const client = VFrameClient.connect({
 
 iframe 自行导航或刷新后，应销毁旧句柄并重新登记，避免沿用上一页的初始化结果。
 
+对已启用 `loading.js` 的课程，受管画面和 iframe 可设置 `startup: true`，也可传 `startup: env => env.mode === 'interactive'`。播放器在加载页期间等待这些资源完成初始化，即使起播分镜暂时用不到它们。在播放器的 `onStart` 回调中挂载这些资源的宿主元素。适合把会明显卡住开播的同步初始化提前完成。`preload` 仍可用于允许在播放时继续准备的资源。
+
 ## iframe 资源缓存
 
 预览服务为普通静态文件返回 `ETag`。浏览器再次访问时会校验该版本，文件未变时服务器返回 `304`，浏览器复用本地副本。

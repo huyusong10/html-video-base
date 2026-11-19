@@ -106,7 +106,7 @@ async function openVideo(browser, server, pages, projectRoot, id, options) {
   if (lang) query.set('lang', lang);
   try {
     await page.goto(`${server.origin}/${encodeURIComponent(id)}/?${query}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => window.V?.getFrameState?.() && window.__video);
+    await page.waitForFunction(() => window.V?.getFrameState?.() && window.__video && !document.getElementById('video-loading'));
     await page.evaluate(async () => { __video.pause(); await document.fonts.ready; });
     return videoHandle(page, await videoMetadata(page, metadata), issues, id, pages);
   } catch (error) { await page.close(); pages.delete(page); throw new Error(`Cannot open video "${id}": ${error.message}; ${issues.map(issue => issue.message).join("; ")}`, { cause: error }); }

@@ -189,11 +189,7 @@
     ui.retry = h('button', { type: 'button', hidden: true, 'data-interactive': '1' }, uiText('retryPlayback'));
     ui.retry.onclick = retryPlaybackAssets;
     ui.buffering = h('div', { id: 'buffering-status', role: 'status', 'aria-live': 'polite', 'data-interactive': '1' }, ui.bufferingText, ui.retry);
-    if (V._loading) {
-      ui.loadingSpinner = h('span', { class: 'video-loading-spinner', 'aria-hidden': 'true', hidden: true });
-      ui.buffering.classList.add('video-loading-panel');
-      ui.buffering.prepend(ui.loadingSpinner);
-    }
+    if (V._loading) ui.buffering.classList.add('video-loading-panel');
     sandboxState.el = sbBar;
     sandboxState.txtEl = sbTxt;
     sandboxState.backEl = sbBack;
@@ -601,10 +597,9 @@
     document.body.classList.toggle('is-buffering', value);
     if (ui.bufferingText) {
       ui.bufferingText.textContent = error
-        ? (ui.loadingSpinner ? uiText('loadingFailed') : error)
-        : (value ? uiText(ui.loadingSpinner ? 'loading' : 'buffering') : '');
+        ? (V._loading ? uiText('loadingFailed') : error)
+        : (value ? uiText(V._loading ? 'loading' : 'buffering') : '');
     }
-    if (ui.loadingSpinner) ui.loadingSpinner.hidden = !value || Boolean(error);
     if (ui.retry) ui.retry.hidden = !error;
   }
 
@@ -734,6 +729,7 @@
   }
 
   function play() {
+    if (V._loading?.isActive?.()) return;
     if (now >= V.duration - 0.01) {
       ambientOffset = 0;
       idleSec = 0;
@@ -1664,9 +1660,10 @@
     }
   }
 
-  async function waitStageAssets(signal) {
+  async function waitStageAssets(signal, fonts) {
     if (!stage) return;
     const tasks = [waitCssImages()];
+    if (fonts) tasks.push(document.fonts?.ready);
     collectImageDecodes(stage, tasks);
     for (const clip of V._videoClips) {
       if (clip.isConnected && clip._vclip) tasks.push(seekVideoElementAsync(clip, clip._vclip.targetTime, signal));
@@ -1674,7 +1671,7 @@
     if (tasks.length) await Promise.all(tasks);
   }
 
-  async function waitFrameAssets(frame) {
+  async function waitFrameAssets(frame, fonts = false) {
     const signal = V._frameRuntime.signal(frame);
     const assets = new AbortController();
     let timer, cancel;
@@ -1690,7 +1687,7 @@
       }, 30000);
       if (signal.aborted) cancel();
     });
-    try { await Promise.race([waitStageAssets(assets.signal), stopped]); }
+    try { await Promise.race([waitStageAssets(assets.signal, fonts), stopped]); }
     finally { clearTimeout(timer); signal.removeEventListener('abort', cancel); }
   }
 
@@ -2034,6 +2031,32 @@
     }
   }
 
+  function beginPlaybackLoop(cfg) {
+    requestAnimationFrame(frame);
+    if (!V.pptMode && params.has('autoplay')) play();
+    exposeBridge(cfg);
+  }
+
+  async function revealPreparedPlayer(cfg) {
+    const initialFrame = V.getFrameState();
+    const audioWait = new AbortController();
+    const audioTimeout = setTimeout(() => audioWait.abort(new Error('Startup audio preparation timed out')), 30000);
+    try {
+      await Promise.all([
+        V._frameRuntime.prepareStartup(),
+        V._frameRuntime.prepare(initialFrame).then(() => waitFrameAssets(initialFrame, true)),
+        audioRt.waitForStartup(audioWait.signal),
+      ]);
+    } finally {
+      clearTimeout(audioTimeout);
+      audioWait.abort();
+    }
+    await V._loading.waitForPaint();
+    syncAssetAvailability();
+    V._loading.finish();
+    beginPlaybackLoop(cfg);
+  }
+
   V.start = function () {
     syncInitialLocaleState();
     V.mountStage();
@@ -2102,6 +2125,10 @@
     if (RECORD) document.body.classList.add('record');
     else if (V.pptMode && pptRt) buildPptUI(cfg, uiCfg);
     else buildUI(uiCfg);
+    if (V._loading) {
+      V._loading.lock(document.getElementById('viewport'));
+      V._loading.lock(document.getElementById('controls'));
+    }
     V.emit('onStart', V._playerCtl);
 
     fit();
@@ -2110,13 +2137,8 @@
     ambientOffset = 0;
     idleSec = 0;
     startInitialRender(uiCfg);
-    if (V._loading) {
-      syncAssetAvailability();
-      V._loading.finish();
-    }
-    requestAnimationFrame(frame);
-    if (!V.pptMode && params.has('autoplay')) play();
-    exposeBridge(cfg);
+    if (V._loading) return revealPreparedPlayer(cfg);
+    beginPlaybackLoop(cfg);
   };
 
   function loadOptionalScript(src) {
@@ -2199,7 +2221,7 @@
           glEl.classList.add('is-off');
         }
       }
-      V.start();
+      await V.start();
     } catch (error) {
       V._loading?.fail();
       throw error;

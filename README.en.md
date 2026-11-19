@@ -203,7 +203,7 @@ In video mode, click the subtitles icon to open the settings panel. From there y
 
 ### Optional loading screen
 
-Place `<script src="../base/js/loading.js"></script>` at the start of the course's `<body>`, ahead of external stylesheets and player scripts. Call `V.boot()` as usual. The screen covers startup, playback buffering, and slides that are waiting for visuals. Recording and capture hide this interface automatically.
+Place `<script src="../base/js/loading.js"></script>` at the start of the course's `<body>`, ahead of external stylesheets and player scripts. Call `V.boot()` as usual. The startup screen displays a static loading message while it waits for the opening frame, playable audio, and sources marked for startup. It offers a retry if preparation fails. The player uses the same message during playback buffering and slide changes. Recording and capture hide the loading interface automatically.
 
 ## CLI Reference
 

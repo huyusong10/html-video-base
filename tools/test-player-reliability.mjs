@@ -26,8 +26,11 @@ fs.writeFileSync(path.join(loadingDir, 'index.html'), `<!doctype html><html lang
   <script src="../base/js/engine.js"></script><script src="../demo/video.config.js"></script>
   <script src="../demo/scenes.js"></script>
   <script>
+    const startup = new URLSearchParams(location.search);
+    if (startup.has('startup-audio')) V.config.audioSrc = '../audio/assets/delayed.wav';
     const source = V.managedSource({ id:'demo-visual', element:()=>document.getElementById('stage'),
       active:frame=>frame.sceneIndex===1, timeoutMs:80,
+      startup: startup.has('startup-source'),
       async initialize({signal}) {
         window.loadingOpacityAtInit = getComputedStyle(document.getElementById('buffering-status')).opacity;
         const response = await fetch('visual.txt', {signal});
@@ -82,6 +85,7 @@ async function checkOptionalLoading(audit) {
     await page.goto(audit.origin + '/loading/', { waitUntil: 'commit' });
     const startup = page.locator('#video-loading');
     await startup.getByText('正在加载…').waitFor();
+    assert.equal(await startup.evaluate(el => el.getAnimations({ subtree: true }).length), 0);
     await page.waitForFunction(() => performance.getEntriesByName('first-contentful-paint').length > 0);
     assert.equal(await page.locator('#stage').count(), 0);
     release();
@@ -103,6 +107,51 @@ async function checkOptionalLoading(audit) {
   } finally { release(); await page.close(); }
 }
 
+async function checkStartupAssets(audit) {
+  const page = await audit.openPage('/blank.html');
+  let releaseAudio, releaseVisual;
+  const audio = new Promise(resolve => { releaseAudio = resolve; });
+  const visual = new Promise(resolve => { releaseVisual = resolve; });
+  await page.route('**/delayed.wav', async route => { await audio; await route.continue(); });
+  await page.route('**/visual.txt', async route => { await visual; await route.fulfill({ status: 200, body: '' }); });
+  try {
+    const visualRequested = page.waitForRequest('**/visual.txt');
+    await page.goto(audit.origin + '/loading/?startup-source&startup-audio');
+    await visualRequested;
+    const startup = page.locator('#video-loading');
+    await startup.getByText('正在加载…').waitFor();
+    assert.equal(await page.locator('#viewport').evaluate(el => el.inert), true);
+    await page.keyboard.press('Space');
+    assert.equal(await page.evaluate(() => V.getFrameState().playing), false);
+    const visualResponse = page.waitForResponse('**/visual.txt');
+    releaseVisual();
+    await visualResponse;
+    await startup.getByText('正在加载…').waitFor();
+    releaseAudio();
+    await startup.waitFor({ state: 'detached' });
+    assert.equal(await page.locator('#viewport').evaluate(el => el.inert), false);
+    await page.mouse.click(120, 120);
+    await page.waitForFunction(() => V.getFrameState().now > 0.1);
+  } finally { releaseVisual(); releaseAudio(); await page.close(); }
+}
+
+async function checkStartupRetryAtTarget(audit) {
+  const page = await audit.openPage('/blank.html');
+  let fail = true;
+  await page.route('**/visual.txt', route => route.fulfill({ status: fail ? 503 : 200, body: '' }));
+  try {
+    await page.goto(audit.origin + '/loading/?t=4.2');
+    const startup = page.locator('#video-loading');
+    await startup.getByText('加载失败', { exact: true }).waitFor();
+    assert.equal(await page.locator('#viewport').evaluate(el => el.inert), true);
+    fail = false;
+    await startup.getByRole('button', { name: '重试' }).click();
+    await page.waitForFunction(() => window.preparedVisualFrame && !document.getElementById('video-loading'));
+    assert.equal(await page.evaluate(() => V.getFrameState().now), 4.2);
+    assert.equal(await page.evaluate(() => V.getFrameState().id), await page.evaluate(() => preparedVisualFrame));
+  } finally { await page.close(); }
+}
+
 async function checkLoadingInPpt(audit) {
   const page = await audit.openPage('/blank.html');
   let release;
@@ -114,10 +163,11 @@ async function checkLoadingInPpt(audit) {
   });
   try {
     await page.goto(audit.origin + '/loading/?ppt=1');
-    await page.waitForFunction(() => window.V?.player);
+    await page.waitForFunction(() => window.V?.player && !document.getElementById('video-loading'));
     await page.evaluate(() => V.player.nextPage());
     const panel = page.locator('#buffering-status');
     await panel.getByText('正在加载…').waitFor();
+    assert.equal(await panel.evaluate(el => el.getAnimations({ subtree: true }).length), 0);
     await page.waitForFunction(() => window.loadingOpacityAtInit !== undefined);
     assert.equal(await page.evaluate(() => window.loadingOpacityAtInit), '1', 'Show the loading panel before initializing the visual source');
     release();
@@ -134,7 +184,7 @@ async function checkVisualPrepareRetry(audit) {
   await page.route('**/visual.txt', route => route.fulfill({ status: 200, body: '' }));
   try {
     await page.goto(audit.origin + '/loading/');
-    await page.waitForFunction(() => window.V?.player);
+    await page.waitForFunction(() => window.V?.player && !document.getElementById('video-loading'));
     await assert.rejects(page.evaluate(() => {
       window.prepareBlocked = true;
       return V.seekToAsync(4.2);
@@ -520,6 +570,8 @@ async function checkAssetCancellation(audit) {
 
 await withAuditSession({ projectRoot: root }, async audit => {
   await checkOptionalLoading(audit);
+  await checkStartupAssets(audit);
+  await checkStartupRetryAtTarget(audit);
   await checkLoadingInPpt(audit);
   await checkVisualPrepareRetry(audit);
   await checkAudioBuffering(audit);
