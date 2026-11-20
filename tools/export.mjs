@@ -108,7 +108,7 @@ const cuesPayload = {
   lang,
   videoDir,
   duration: V.duration,
-  audioBitrate: process.env.AUDIO_BITRATE || cfg.audioBitrate || '192k',
+  audioBitrate: process.env.AUDIO_BITRATE || cfg.audioBitrate || '160k',
   bgmBitrate: process.env.BGM_BITRATE || cfg.bgmBitrate || '128k',
   audioMaster: cfg.audioMaster === undefined ? false : cfg.audioMaster,
   audioTargetLufs: cfg.audioTargetLufs !== undefined ? Number(cfg.audioTargetLufs) : -15,

@@ -14,6 +14,7 @@ from mix import (
     _measure_ebu_lufs,
     _select_aac_encoder,
     decode_audio_file,
+    parse_bgm_cfg,
     write_master_output,
 )
 
@@ -156,9 +157,10 @@ def verify_mastering_quality(root):
     assert ratio_speech_8k < 0.85, f'Opt-in speech must gently attenuate 8kHz (< 0.85), got {ratio_speech_8k:.3f}'
 
     assert _select_aac_encoder('64k', 'auto') != 'aac_mf', 'aac_mf must be skipped below 96 kbps to prevent HE-AAC drift'
-    enc_192 = _select_aac_encoder('192k', 'auto')
-    assert enc_192 in ('libfdk_aac', 'aac_at', 'aac_mf', 'aac'), f'Unexpected encoder {enc_192}'
-    print(f'  Mastering quality: THD={thd * 100:.4f}%, lag={lag}, flat_lufs={lufs_flat:.1f}, speech_8k={ratio_speech_8k:.3f}, enc192={enc_192}')
+    enc_160 = _select_aac_encoder('160k', 'auto')
+    assert enc_160 in ('libfdk_aac', 'aac_at', 'aac_mf', 'aac'), f'Unexpected encoder {enc_160}'
+    assert parse_bgm_cfg({'src': 'x.m4a', 'bake': False})['mode'] == 'none', 'Unbaked shared BGM must not be rendered per course'
+    print(f'  Mastering quality: THD={thd * 100:.4f}%, lag={lag}, flat_lufs={lufs_flat:.1f}, speech_8k={ratio_speech_8k:.3f}, enc160={enc_160}')
 
 
 if __name__ == '__main__':

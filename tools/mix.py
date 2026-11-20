@@ -308,6 +308,8 @@ def parse_bgm_cfg(raw_bgm):
         mode = raw_bgm if raw_bgm in ('ambient', 'chiptune') else 'file'
         return {'mode': mode, 'src': raw_bgm, 'volume': 0.16 if mode != 'file' else 0.18, 'duck': 0.55, 'loop': True}
     if isinstance(raw_bgm, dict):
+        if raw_bgm.get('bake') is False:
+            return {'mode': 'none', 'volume': 0.0, 'duck': 0.0, 'loop': True}
         if raw_bgm.get('src'):
             return {'mode': 'file', 'src': raw_bgm['src'], 'volume': float(raw_bgm.get('volume', 0.18)), 'duck': float(raw_bgm.get('duck', 0.55)), 'loop': bool(raw_bgm.get('loop', True))}
         preset = raw_bgm.get('preset', 'ambient')
@@ -549,15 +551,15 @@ def mix_video_clip_tracks(data, video_dir, n):
 
 
 def normalize_audio_bitrate(raw) -> str:
-    val = str(raw or '192k').strip().lower()
+    val = str(raw or '160k').strip().lower()
     if len(val) >= 3 and val.endswith('k') and val[:-1].isdigit():
         return val
-    return '192k'
+    return '160k'
 
 
 def _parse_bitrate_kbps(bitrate: str) -> int:
     norm = normalize_audio_bitrate(bitrate)
-    return int(norm[:-1]) if norm[:-1].isdigit() else 192
+    return int(norm[:-1]) if norm[:-1].isdigit() else 160
 
 
 def _probe_available_encoders() -> set[str]:
@@ -696,7 +698,7 @@ def _master_voice_track(voice: np.ndarray, has_voice: bool, stem_mask: np.ndarra
     return processed
 
 
-def write_master_output(mix, out, bitrate='192k', encoder=None):
+def write_master_output(mix, out, bitrate='160k', encoder=None):
     output_dir = os.path.dirname(os.path.abspath(out))
     os.makedirs(output_dir, exist_ok=True)
     prefix = os.path.join(output_dir, f'.html-video-{os.getpid()}-{uuid.uuid4().hex}.tmp')

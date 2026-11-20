@@ -263,6 +263,11 @@ export function extractRawBgmSrc(cfg) {
   return typeof b === 'string' && !BUILTIN_BGM_PRESETS.has(b) ? b : null;
 }
 
+export function isBgmUnbakedCfg(cfg) {
+  const b = cfg && cfg.bgm;
+  return Boolean(b && typeof b === 'object' && b.bake === false && extractRawBgmSrc(cfg));
+}
+
 function assertSinglePathComponent(value, label) {
   const segment = String(value ?? '');
   if (!segment.replace(/[. ]+$/, '') || /[\/\\\u0000]/.test(segment)) {
@@ -280,7 +285,7 @@ export function resolveLangMediaPaths(cfg, lang = '') {
   if (lang) assertSinglePathComponent(lang, 'language code');
   const baseTimings = (cfg && cfg.timingsScript) || 'assets/voice/timings.js';
   const baseAudio = cfg && cfg.audioSrc === false ? null : ((cfg && cfg.audioSrc) || 'assets/soundtrack.m4a');
-  const baseBgm = isBgmDisabledCfg(cfg) ? null : ((cfg && cfg.bgmSrc) || 'assets/bgm.m4a');
+  const baseBgm = (isBgmDisabledCfg(cfg) || isBgmUnbakedCfg(cfg)) ? null : ((cfg && cfg.bgmSrc) || 'assets/bgm.m4a');
   if (!lang) return { timingsRel: baseTimings, audioRel: baseAudio, bgmRel: baseBgm };
   return {
     timingsRel: baseTimings.replace(/\.js$/i, `.${lang}.js`),

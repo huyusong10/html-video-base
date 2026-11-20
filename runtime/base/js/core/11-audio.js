@@ -56,9 +56,38 @@
 
   function resolveBgmTrackSpec(cfg, isRecord) {
     if (isRecord || isBgmDisabledInCfg(cfg)) return null;
-    if (isVoiceLocaleMatch() && V.voice.bgmSrc) return { src: V.voice.bgmSrc, volume: 1, baked: true };
+    if (isVoiceLocaleMatch() && V.voice.bgmSrc) return { src: V.voice.bgmSrc, volume: 1, baked: true, duck: 0 };
     const src = localizeFallbackMedia(extractRawBgmSrc(cfg), 'bgmSrc');
-    return src ? { src, volume: resolveRawBgmVolume(cfg), baked: false } : null;
+    const duck = cfg.bgm && typeof cfg.bgm === 'object' && cfg.bgm.duck !== undefined
+      ? clampUnitVolume(cfg.bgm.duck, 0.55) : 0.55;
+    return src ? { src, volume: resolveRawBgmVolume(cfg), baked: false, duck } : null;
+  }
+
+  function cueVoicePresenceAt(cue, lt) {
+    if (lt >= cue.start && lt <= cue.end) return 1;
+    if (lt >= cue.start - 0.15 && lt < cue.start) return (lt - (cue.start - 0.15)) / 0.15;
+    if (lt > cue.end && lt <= cue.end + 0.25) return 1 - (lt - cue.end) / 0.25;
+    return 0;
+  }
+
+  function computeCueVoicePresence(sc, t) {
+    if (!sc || !Array.isArray(sc.cues) || !sc.cues.length) return 0;
+    const lt = t - (sc.start || 0);
+    let peak = 0;
+    for (let i = 0; i < sc.cues.length; i++) {
+      const p = cueVoicePresenceAt(sc.cues[i], lt);
+      if (p > peak) peak = p;
+      if (peak >= 1) return 1;
+    }
+    return peak;
+  }
+
+  function computeLiveBgmEnvelope(t, sc, duckDepth, voiceActive) {
+    const dur = Number(V.duration) || 0;
+    const fadeIn = dur > 3 ? Math.min(1, Math.max(0, t) / 1.5) : 1;
+    const fadeOut = dur > 4 ? Math.min(1, Math.max(0, dur - t) / 3.0) : 1;
+    const duck = voiceActive && duckDepth > 0 ? 1 - duckDepth * computeCueVoicePresence(sc, t) : 1;
+    return clampUnitVolume(fadeIn * fadeOut * duck, 1);
   }
 
   function resolveSceneBgmFactor(sc) {
@@ -118,7 +147,7 @@
 
   V._createAudioRuntime = function (hooks) {
     const { params, isRecord } = hooks;
-    let audio = null, bgmAudio = null, playbackRate = 1, bgmLoop = true, bgmIsBaked = false;
+    let audio = null, bgmAudio = null, playbackRate = 1, bgmLoop = true, bgmIsBaked = false, bgmDuckDepth = 0;
     let volume = 1, restoreVolume = 1, bgmBaseVolume = 1;
     let voiceOn = !params.has('novoice'), bgmOn = !params.has('nobgm'), muted = false;
     let audioBlocked = false, unlockArmed = false, lastUnlockTs = 0;
@@ -133,9 +162,22 @@
       return !activeVoice && !activeBgm;
     }
 
-    function computeEffectiveBgmVol() {
-      const scFactor = bgmIsBaked ? 1 : resolveSceneBgmFactor(hooks.getCurrentScene ? hooks.getCurrentScene() : null);
-      return clampUnitVolume(bgmBaseVolume * volume * scFactor, 1);
+    function computeEffectiveBgmVol(refT) {
+      if (bgmIsBaked) return clampUnitVolume(bgmBaseVolume * volume, 1);
+      const t = refT != null ? refT : resolveRefTime();
+      const sc = hooks.getCurrentScene ? hooks.getCurrentScene() : null;
+      const scFactor = resolveSceneBgmFactor(sc);
+      const voiceActive = Boolean(audio && voiceOn && !isAllMuted());
+      const envFactor = computeLiveBgmEnvelope(t, sc, bgmDuckDepth, voiceActive);
+      return clampUnitVolume(bgmBaseVolume * volume * scFactor * envFactor, 1);
+    }
+
+    function syncBgmVolumeAt(refT) {
+      if (!bgmAudio) return;
+      const nextVol = computeEffectiveBgmVol(refT);
+      if (Math.abs(bgmAudio.volume - nextVol) > 0.002) {
+        try { bgmAudio.volume = nextVol; } catch {}
+      }
     }
 
     function syncTrackVolumes() {
@@ -249,6 +291,7 @@
       if (!hooks.isPlaying() || bgmAudio.muted) { bgmAudio.pause(); return; }
       const refT = resolveRefTime();
       if (bgmAudio.readyState >= 1 && !alignBgmToTime(refT, 0.18)) return;
+      syncBgmVolumeAt(refT);
       safePlayBgm();
     }
 
@@ -259,6 +302,7 @@
         if (!bgmAudio.paused) bgmAudio.pause();
         return;
       }
+      syncBgmVolumeAt(masterTime);
       if (bgmAudio.paused) { safePlayBgm(); return; }
       const nowTs = performance.now();
       if (bgmAudio.readyState >= 2 && nowTs - lastBgmSeekTs > 1200 && computeBgmDrift(bgmAudio.currentTime, target.time, target.dur, bgmLoop) > 0.32) {
@@ -370,6 +414,7 @@
 
     function seekTracks(nowVal) {
       alignBgmToTime(nowVal, 0.02);
+      syncBgmVolumeAt(nowVal);
       if (!audio) return;
       lastAudioMoveTs = performance.now();
       if (audio.readyState >= 1) {
@@ -534,6 +579,7 @@
         el.loop = bgmLoop;
         const target = resolveBgmTarget(el, resolveRefTime(), bgmLoop);
         if (target.time > 0.05) { try { el.currentTime = target.time; } catch {} }
+        syncBgmVolumeAt(resolveRefTime());
         if (hooks.isPlaying() && !el.muted && el.paused && !target.ended) safePlayBgm();
       });
       el.addEventListener('error', () => handleBgmAudioError(el));
@@ -572,6 +618,7 @@
       const bgmSpec = resolveBgmTrackSpec(cfg, isRecord);
       bgmBaseVolume = bgmSpec ? bgmSpec.volume : 1;
       bgmIsBaked = Boolean(bgmSpec && bgmSpec.baked);
+      bgmDuckDepth = bgmSpec ? bgmSpec.duck : 0;
       bgmAudio = bgmSpec ? createBgmAudio(bgmSpec) : null;
       syncTrackVolumes();
       V._allMuted = isAllMuted();

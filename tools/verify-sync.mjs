@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { ROOT, listVideoIds, loadVideoSandbox, resolveFfmpeg, probeSceneAnchors, getSandboxCfg, isBgmDisabledCfg, extractRawBgmSrc, normalizeCliArgs, isMainModule } from './lib/paths.mjs';
+import { ROOT, listVideoIds, loadVideoSandbox, resolveFfmpeg, probeSceneAnchors, getSandboxCfg, isBgmDisabledCfg, isBgmUnbakedCfg, extractRawBgmSrc, normalizeCliArgs, isMainModule } from './lib/paths.mjs';
 import { writeSubtitleFiles } from './lib/subtitles.mjs';
 import { writeUtf8FileAtomic } from './lib/file-output.mjs';
 import { writePauseReport } from './lib/pause-report.mjs';
@@ -200,7 +200,13 @@ function verifyDecodedWaveform(V, cfg, samples, sr, videoId, totalLines, errors)
 }
 
 function verifyBgmStem(videoDir, V, cfg, voice, ffmpegBin, errors) {
-  if (isBgmDisabledCfg(cfg) || !voice.bgmSrc) return;
+  if (isBgmDisabledCfg(cfg)) return;
+  if (isBgmUnbakedCfg(cfg) && !voice.bgmSrc) {
+    const sharedBgm = path.join(videoDir, extractRawBgmSrc(cfg));
+    if (!fs.existsSync(sharedBgm)) errors.push(`Missing shared unbaked BGM file: ${sharedBgm}`);
+    return;
+  }
+  if (!voice.bgmSrc) return;
   const bgmPath = path.join(videoDir, voice.bgmSrc);
   if (!fs.existsSync(bgmPath)) { errors.push(`Missing physical BGM stem: ${bgmPath}`); return; }
   const sr = 8000;
