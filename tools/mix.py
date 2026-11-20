@@ -1,11 +1,12 @@
 """通用混音管线：支持 BGM 侧链闪避、48kHz 程序化动作微音效、受控 <video> 切片原声混入与 AAC 封装。"""
-import json, math, os, subprocess, sys, uuid
+import json, math, os, re, subprocess, sys, tempfile, uuid
 import imageio_ffmpeg, numpy as np, soundfile as sf
 from scipy.signal import fftconvolve, resample_poly
 
 SR = 48000
 rng = np.random.default_rng(7)
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+_AVAILABLE_ENCODERS = None
 
 
 def env_ad(n, a, d):
@@ -369,10 +370,50 @@ def _maybe_load_stem(stem_loaded, stem_mono, fallback_stem_path):
     return True, None
 
 
+def _fade_edges(seg: np.ndarray, ms: float = 4.0) -> np.ndarray:
+    edge = min(len(seg) // 4, int(ms * 0.001 * SR))
+    if edge <= 1:
+        return seg
+    out = seg.copy()
+    ramp = np.linspace(0.0, 1.0, edge, dtype=np.float32)
+    out[:edge] *= ramp
+    out[-edge:] *= ramp[::-1]
+    return out
+
+
+def _measure_active_rms(seg: np.ndarray) -> float:
+    if len(seg) == 0:
+        return 0.0
+    peak = float(np.abs(seg).max())
+    if peak <= 1e-5:
+        return 0.0
+    act = seg[np.abs(seg) > max(0.01, peak * 0.05)]
+    return float(np.sqrt(np.mean(act ** 2))) if len(act) else 0.0
+
+
+def _level_dry_cues(cues: list) -> list:
+    dry_rms = []
+    for _, y, used in cues:
+        if not used:
+            rms = _measure_active_rms(y)
+            if rms > 1e-4:
+                dry_rms.append(rms)
+    med = float(np.median(dry_rms)) if len(dry_rms) >= 2 else 0.0
+    out = []
+    for at, y, used in cues:
+        if used:
+            out.append((at, y, True))
+            continue
+        rms = _measure_active_rms(y) if med > 0.0 else 0.0
+        scale = float(np.clip(med / rms, 0.75, 1.33)) if rms > 1e-4 else 1.0
+        out.append((at, _fade_edges(y * scale, 4.0), False))
+    return out
+
+
 def mix_voice_track(scenes, vdir, n, fallback_stem_path=None, baked_scenes=None):
-    voice, active, has_voice = np.zeros(n), np.zeros(n), False
+    voice, active = np.zeros(n), np.zeros(n)
     stem_mask = np.zeros(n, dtype=bool)
-    stem_mono, stem_loaded = None, False
+    stem_mono, stem_loaded, collected = None, False, []
     for si, sc in enumerate(scenes):
         for li, c in enumerate(sc.get('cues', [])):
             wav_path = f'{vdir}/{si:02d}_{li:02d}.wav'
@@ -382,17 +423,23 @@ def mix_voice_track(scenes, vdir, n, fallback_stem_path=None, baked_scenes=None)
             else:
                 stem_loaded, stem_mono = _maybe_load_stem(stem_loaded, stem_mono, fallback_stem_path)
                 y = _slice_stem_cue(stem_mono, baked_scenes, si, sc, li, c)
-            if y is None or len(y) == 0:
-                continue
-            has_voice = True
-            at = sc['start'] + c['start']
-            place(voice, y, at)
-            a, b = max(0, int(at * SR)), min(n, int((at + len(y) / SR) * SR))
-            if b > a:
-                active[a:b] = 1
-                if used_stem:
-                    stem_mask[a:b] = True
-    return voice, active, has_voice, stem_mask
+            if y is not None and len(y) > 0:
+                collected.append((sc['start'] + c['start'], y, used_stem))
+    stem_count = sum(1 for _, _, used in collected if used)
+    if stem_count:
+        print(
+            f'Warning: voice-cache missed for {stem_count} cue(s); slicing existing soundtrack (re-encoding compressed audio). '
+            'Run build to regenerate dry voice cache.',
+            file=sys.stderr,
+        )
+    for at, y, used_stem in _level_dry_cues(collected):
+        place(voice, y, at)
+        a, b = max(0, int(at * SR)), min(n, int((at + len(y) / SR) * SR))
+        if b > a:
+            active[a:b] = 1
+            if used_stem:
+                stem_mask[a:b] = True
+    return voice, active, len(collected) > 0, stem_mask
 
 
 def _resolve_scene_bgm_gain(sc) -> float:
@@ -429,11 +476,12 @@ def build_scene_bgm_env(secs, n: int) -> np.ndarray:
     return np.clip(smoothed, 0.0, 2.0)
 
 
-def build_bgm_track(bgm_cfg, video_dir, dur, n, secs, active, has_voice):
+def build_bgm_track(bgm_cfg, video_dir, dur, n, secs, active, has_voice, target_lufs=-16.0):
     if bgm_cfg['mode'] == 'none' or bgm_cfg['volume'] <= 0:
         return np.zeros((n, 2), dtype=np.float32)
     if bgm_cfg['mode'] == 'file':
-        mus = loop_track(decode_audio_file(resolve_asset(video_dir, bgm_cfg['src']), channels=2), n, loop=bgm_cfg['loop'])
+        raw_mus = decode_audio_file(resolve_asset(video_dir, bgm_cfg['src']), channels=2)
+        mus = loop_track(_normalize_to_lufs(raw_mus, target_lufs), n, loop=bgm_cfg['loop'])
     elif bgm_cfg['mode'] == 'chiptune':
         mus = music_chiptune(dur, secs)
     else:
@@ -535,7 +583,150 @@ def normalize_audio_bitrate(raw) -> str:
     return '128k'
 
 
-def write_master_output(mix, out, bitrate='128k'):
+def _parse_bitrate_kbps(bitrate: str) -> int:
+    norm = normalize_audio_bitrate(bitrate)
+    return int(norm[:-1]) if norm[:-1].isdigit() else 128
+
+
+def _probe_available_encoders() -> set[str]:
+    global _AVAILABLE_ENCODERS
+    if _AVAILABLE_ENCODERS is not None:
+        return _AVAILABLE_ENCODERS
+    found = {'aac'}
+    try:
+        proc = subprocess.Popen(
+            [FFMPEG, '-hide_banner', '-encoders'],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        out, _ = proc.communicate(timeout=15)
+        for line in (out or '').splitlines():
+            if line.startswith(' A'):
+                parts = line.split()
+                if len(parts) >= 2:
+                    found.add(parts[1].strip().lower())
+    except Exception:
+        pass
+    _AVAILABLE_ENCODERS = found
+    return found
+
+
+def _select_aac_encoder(bitrate: str, requested: str | None = None) -> str:
+    choice = str(requested or os.environ.get('AUDIO_ENCODER') or 'auto').strip().lower()
+    avail = _probe_available_encoders()
+    if choice and choice != 'auto':
+        return choice if choice in avail else 'aac'
+    kbps = _parse_bitrate_kbps(bitrate)
+    for cand in ('libfdk_aac', 'aac_at'):
+        if cand in avail:
+            return cand
+    # Media Foundation swaps to HE-AAC (+77ms priming drift) below 96 kbps.
+    if 'aac_mf' in avail and kbps >= 96:
+        return 'aac_mf'
+    return 'aac'
+
+
+def _match_sample_len(y: np.ndarray, target_len: int, is_stereo: bool) -> np.ndarray:
+    if y.ndim == 2 and not is_stereo:
+        y = y.mean(axis=1)
+    elif y.ndim == 1 and is_stereo:
+        y = np.stack([y, y], axis=1)
+    if len(y) > target_len:
+        return y[:target_len].astype(np.float32)
+    if len(y) < target_len:
+        pad_shape = (target_len - len(y), 2) if is_stereo else (target_len - len(y),)
+        return np.concatenate([y.astype(np.float32), np.zeros(pad_shape, dtype=np.float32)])
+    return y.astype(np.float32)
+
+
+def _run_ffmpeg_float_filter(samples: np.ndarray, af_chain: str) -> np.ndarray:
+    if not af_chain or len(samples) == 0:
+        return samples
+    tmp_dir = tempfile.gettempdir()
+    token = f'hv-flt-{os.getpid()}-{uuid.uuid4().hex}'
+    tmp_in = os.path.join(tmp_dir, f'{token}.in.wav')
+    tmp_out = os.path.join(tmp_dir, f'{token}.out.wav')
+    is_stereo = samples.ndim == 2
+    try:
+        sf.write(tmp_in, samples.astype(np.float32), SR, subtype='FLOAT')
+        subprocess.run(
+            [FFMPEG, '-y', '-loglevel', 'error', '-i', tmp_in, '-af', af_chain, '-c:a', 'pcm_f32le', tmp_out],
+            check=True,
+        )
+        y, _ = sf.read(tmp_out, dtype='float32')
+        return _match_sample_len(y, len(samples), is_stereo)
+    finally:
+        for p in (tmp_in, tmp_out):
+            if os.path.exists(p):
+                os.remove(p)
+
+
+def _measure_ebu_lufs(samples: np.ndarray) -> float | None:
+    if len(samples) == 0 or float(np.abs(samples).max()) < 1e-5:
+        return None
+    # Measure mono voice as duplicated stereo so EBU R128 includes the +3.01 dB channel sum.
+    stereo = np.stack([samples, samples], axis=1) if samples.ndim == 1 else samples
+    tmp_wav = os.path.join(tempfile.gettempdir(), f'hv-lufs-{os.getpid()}-{uuid.uuid4().hex}.wav')
+    try:
+        sf.write(tmp_wav, stereo.astype(np.float32), SR, subtype='FLOAT')
+        proc = subprocess.run(
+            [FFMPEG, '-hide_banner', '-i', tmp_wav, '-af', 'ebur128=peak=true', '-f', 'null', os.devnull],
+            capture_output=True, text=True,
+        )
+        matches = re.findall(r'^\s*I:\s*(-?\d+(?:\.\d+)?)\s*LUFS', proc.stderr or '', re.M)
+        if not matches:
+            return None
+        val = float(matches[-1])
+        return val if val > -65.0 else None
+    finally:
+        if os.path.exists(tmp_wav):
+            os.remove(tmp_wav)
+
+
+def _normalize_to_lufs(samples: np.ndarray, target_lufs: float, max_gain: float = 4.0, min_gain: float = 0.25) -> np.ndarray:
+    measured = _measure_ebu_lufs(samples)
+    if measured is None:
+        return samples
+    gain = float(np.clip(10.0 ** ((target_lufs - measured) / 20.0), min_gain, max_gain))
+    return (samples * gain).astype(np.float32)
+
+
+def _limit_true_peak(sig: np.ndarray, limit_db: float = -1.5) -> np.ndarray:
+    if len(sig) == 0:
+        return sig
+    limit_lin = 10.0 ** (limit_db / 20.0)
+    if float(np.abs(sig).max()) <= limit_lin:
+        return sig
+    return _run_ffmpeg_float_filter(sig, f'alimiter=limit={limit_lin:.4f}:attack=5:release=50:level=disabled')
+
+
+def _resolve_master_filter(master_cfg) -> str:
+    if master_cfg in (False, None, 'none', ''):
+        return ''
+    if str(master_cfg).lower() == 'clean':
+        return 'highpass=f=70:poles=2'
+    return (
+        'highpass=f=80:poles=2,'
+        'equalizer=f=210:t=q:w=1.1:g=-2.5,'
+        'equalizer=f=3000:t=q:w=1.1:g=2.0,'
+        'highshelf=f=7500:t=q:w=0.7:g=-1.5,'
+        'acompressor=threshold=-20dB:ratio=2:attack=12:release=120:makeup=0dB'
+    )
+
+
+def _master_voice_track(voice: np.ndarray, has_voice: bool, stem_mask: np.ndarray, master_cfg, target_lufs: float) -> np.ndarray:
+    if not has_voice:
+        return voice
+    if stem_mask is not None and stem_mask.all():
+        return voice
+    flt = _resolve_master_filter(master_cfg)
+    processed = _run_ffmpeg_float_filter(voice, flt) if flt else voice.copy()
+    processed = _normalize_to_lufs(processed, target_lufs)
+    if stem_mask is not None and stem_mask.any():
+        return np.where(stem_mask, voice, processed)
+    return processed
+
+
+def write_master_output(mix, out, bitrate='128k', encoder=None):
     output_dir = os.path.dirname(os.path.abspath(out))
     os.makedirs(output_dir, exist_ok=True)
     prefix = os.path.join(output_dir, f'.html-video-{os.getpid()}-{uuid.uuid4().hex}.tmp')
@@ -543,21 +734,21 @@ def write_master_output(mix, out, bitrate='128k'):
     tmp_wav = f'{prefix}.wav'
     tmp_out = f'{prefix}.m4a' if is_m4a else prefix + os.path.splitext(out)[1]
     try:
-        sf.write(tmp_wav if is_m4a else tmp_out, mix.astype(np.float32), SR)
         if is_m4a:
+            sf.write(tmp_wav, mix.astype(np.float32), SR, subtype='FLOAT')
+            norm_br = normalize_audio_bitrate(bitrate)
+            enc = _select_aac_encoder(norm_br, encoder)
             subprocess.run([
                 FFMPEG, '-y', '-loglevel', 'error', '-i', tmp_wav,
-                '-c:a', 'aac', '-b:a', normalize_audio_bitrate(bitrate), '-ac', '2', '-ar', '48000', '-movflags', '+faststart', tmp_out,
+                '-c:a', enc, '-b:a', norm_br, '-ac', '2', '-ar', '48000', '-movflags', '+faststart', tmp_out,
             ], check=True)
+        else:
+            sf.write(tmp_out, mix.astype(np.float32), SR)
         os.replace(tmp_out, out)
     finally:
         for p in (tmp_wav, tmp_out):
             if os.path.exists(p):
                 os.remove(p)
-
-
-def _soft_clip(sig):
-    return np.tanh(sig * 1.1) / np.tanh(1.1)
 
 
 def _compose_foreground_bus(voice, f, vc, stem_mask):
@@ -569,31 +760,20 @@ def _compose_foreground_bus(voice, f, vc, stem_mask):
     return voice_st + extras
 
 
-def _clip_preserving_stem(sig, stem_mask):
+def _limit_preserving_stem(sig, stem_mask, limit_db: float = -1.5):
+    limited = _limit_true_peak(sig, limit_db)
     if stem_mask is not None and stem_mask.any():
-        return np.where(stem_mask[:, None], sig, _soft_clip(sig))
-    return _soft_clip(sig)
+        return np.where(stem_mask[:, None], sig, limited)
+    return limited
 
 
-def _compute_master_scale(ref_peak: float, has_voice: bool) -> float:
-    if ref_peak <= 1e-6:
-        return 1.0
-    raw = 0.95 / ref_peak
-    return min(2.5, raw) if has_voice else min(1.0, raw)
-
-
-def _write_dual_stems(fg, m, out, bgm_out, dur, bitrate, bgm_bitrate, stem_mask=None, has_voice=True):
-    fg_s, m_s = _clip_preserving_stem(fg, stem_mask), _soft_clip(m)
+def _write_dual_stems(fg, m, out, bgm_out, dur, bitrate, bgm_bitrate, stem_mask=None, encoder=None):
     has_fg = bool(out)
-    mix_peak = float(np.abs(fg_s + m_s).max()) if has_fg else float(np.abs(m_s).max())
-    fg_peak = float(np.abs(fg_s).max()) if has_fg else 0.0
-    ref_peak = max(mix_peak, fg_peak, float(np.abs(m_s).max()))
-    scale = _compute_master_scale(ref_peak, has_voice)
     if has_fg:
-        write_master_output(fg_s * scale, out, bitrate)
+        write_master_output(_limit_preserving_stem(fg, stem_mask), out, bitrate, encoder=encoder)
     bgm_written = False
     if float(np.abs(m).max()) > 1e-5:
-        write_master_output(m_s * scale, bgm_out, bgm_bitrate or '96k')
+        write_master_output(_limit_true_peak(m), bgm_out, bgm_bitrate or '96k', encoder=encoder)
         bgm_written = True
     elif os.path.exists(bgm_out):
         os.remove(bgm_out)
@@ -615,11 +795,15 @@ def main():
     video_dir = data.get('videoDir') or os.path.dirname(os.path.dirname(os.path.abspath(ref_out)))
     def_e = [0.45, 0.55, 0.62, 0.68, 0.65]
     secs = [dict(s, energy=s.get('energy', def_e[i] if i < len(def_e) else 0.58)) for i, s in enumerate(data['scenes'])]
+    master_cfg = data.get('audioMaster', 'speech')
+    target_lufs = float(np.clip(float(data.get('audioTargetLufs', -16.0)), -24.0, -12.0))
+    audio_encoder = data.get('audioEncoder', 'auto')
 
     voice, active, has_voice, stem_mask = mix_voice_track(
         data['scenes'], vdir, n, fallback_stem_path=(out or None), baked_scenes=data.get('bakedScenes')
     )
-    m = build_bgm_track(parse_bgm_cfg(data.get('bgm')), video_dir, dur, n, secs, active, has_voice)
+    voice = _master_voice_track(voice, has_voice, stem_mask, master_cfg, target_lufs)
+    m = build_bgm_track(parse_bgm_cfg(data.get('bgm')), video_dir, dur, n, secs, active, has_voice, target_lufs=target_lufs)
     f = mix_sfx_bus(data, parse_sfx_cfg(data.get('sfx')), video_dir, n)
     vc = mix_video_clip_tracks(data, video_dir, n)
     fg = _compose_foreground_bus(voice, f, vc, stem_mask)
@@ -627,7 +811,7 @@ def main():
     if bgm_out:
         _write_dual_stems(
             fg, m, out, bgm_out, dur, data.get('audioBitrate'), data.get('bgmBitrate'),
-            stem_mask=stem_mask, has_voice=has_voice,
+            stem_mask=stem_mask, encoder=audio_encoder,
         )
         return
 
@@ -635,11 +819,9 @@ def main():
     if stem_mask is not None and stem_mask.any():
         bgm_masked = m.copy()
         bgm_masked[stem_mask] = 0.0
-    mix = _clip_preserving_stem(bgm_masked + fg, stem_mask)
-    peak = float(np.abs(mix).max())
-    mix = mix * _compute_master_scale(peak, has_voice)
+    mix = _limit_preserving_stem(bgm_masked + fg, stem_mask)
 
-    write_master_output(mix, out, data.get('audioBitrate'))
+    write_master_output(mix, out, data.get('audioBitrate'), encoder=audio_encoder)
     print('written', out, round(dur, 1), 's')
 
 

@@ -174,7 +174,7 @@ Keep your main scene scripts clean in one primary language. Add extra languages 
 
 ### 4. Theme & Player Customization
 
-Project defaults in `V.projectDefaults` are overridden by `V.themeDefaults`, `V.config`, and locale settings, in that order. Load project and theme scripts before `video.config.js` so the player and CLI see the same settings. Values in `ui`, `tts`, `bgm`, and `sfx` can be overridden by field. Set `tts: false` or `bgm: false` to disable the respective track.
+Project defaults in `V.projectDefaults` are overridden by `V.themeDefaults`, `V.config`, and locale settings, in that order. Load project and theme scripts before `video.config.js` so the player and CLI see the same settings. Values in `ui`, `tts`, `bgm`, and `sfx` can be overridden by field. Set `tts: false` or `bgm: false` to disable the respective track. Audio mixing defaults to `audioMaster: 'speech'`, `audioTargetLufs: -16`, and `audioEncoder: 'auto'` (preferring `libfdk_aac > aac_at > aac_mf (>=96k) > aac`), and also supports `audioMaster: 'clean' | false`, `audioBitrate`, and `bgmBitrate`.
 
 Pronunciation rules in `tts.pronunciation` are inherited per term. Use `false` for a term to keep its original text in speech synthesis. Rules match literal text, favor longer matches, and leave subtitles unchanged. Set `tts.polyphoneFix: false` to skip the built-in Chinese readings.
 
@@ -203,7 +203,7 @@ In video mode, click the subtitles icon to open the settings panel. From there y
 
 ### Optional loading screen
 
-Place `<script src="../base/js/loading.js"></script>` at the start of the course's `<body>`, ahead of external stylesheets and player scripts. Call `V.boot()` as usual. The startup screen displays a static loading message while it waits for the opening frame, playable audio, and sources marked for startup. It offers a retry if preparation fails. The player uses the same message during playback buffering and slide changes. Recording and capture hide the loading interface automatically.
+Place `<script src="../base/js/loading.js"></script>` at the start of the course's `<body>`, ahead of external stylesheets and player scripts. Call `V.boot()` as usual. The startup screen displays a static loading message while it waits for the opening frame, playable audio, and sources marked for startup. If a visible startup image or video fails, the screen offers a retry. Mark decorative elements or their container with `data-video-optional` to let startup proceed without them. The player uses the loading message during playback buffering and slide changes. Recording and capture hide the loading interface automatically.
 
 ## CLI Reference
 

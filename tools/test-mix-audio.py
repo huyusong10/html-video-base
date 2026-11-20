@@ -7,7 +7,15 @@ from unittest.mock import patch
 import numpy as np
 import soundfile as sf
 
-from mix import SR, decode_audio_file, write_master_output
+from mix import (
+    SR,
+    _limit_true_peak,
+    _master_voice_track,
+    _measure_ebu_lufs,
+    _select_aac_encoder,
+    decode_audio_file,
+    write_master_output,
+)
 
 
 def verify_clip_playback_speed(root):
@@ -98,9 +106,36 @@ def verify_master_write_failures(root):
         print(f'  Master output {name} failure: previous audio preserved, temporary files cleaned')
 
 
+def verify_mastering_quality(root):
+    os.makedirs(root, exist_ok=True)
+    times = np.arange(SR, dtype=np.float32) / SR
+    sine_07 = np.stack([0.7 * np.sin(2 * np.pi * 1000 * times), 0.7 * np.sin(2 * np.pi * 1000 * times)], axis=1)
+    clean = _limit_true_peak(sine_07, -1.5)
+    spec = np.abs(np.fft.rfft(clean[:, 0]))
+    thd = float(np.sqrt(np.sum(spec[[2000, 3000, 4000, 5000]] ** 2)) / max(1e-12, spec[1000]))
+    assert thd < 0.0005, f'Normal levels must remain linear (THD < 0.05%), got {thd * 100:.4f}%'
+
+    sine_14 = np.stack([1.4 * np.sin(2 * np.pi * 1000 * times), 1.4 * np.sin(2 * np.pi * 1000 * times)], axis=1)
+    limited = _limit_true_peak(sine_14, -1.5)
+    assert float(np.abs(limited).max()) <= 0.86, f'Limiter must cap 1.4 peak below -1.3 dBFS, got {float(np.abs(limited).max()):.4f}'
+
+    t2 = np.arange(int(1.2 * SR), dtype=np.float32) / SR
+    speech_sig = (0.18 * np.sin(2 * np.pi * 500 * t2) + 0.12 * np.sin(2 * np.pi * 1200 * t2)).astype(np.float32)
+    mastered = _master_voice_track(speech_sig, True, np.zeros(len(speech_sig), dtype=bool), 'speech', -16.0)
+    lufs = _measure_ebu_lufs(mastered)
+    assert lufs is not None and -17.0 <= lufs <= -15.0, f'Expected -16 LUFS (+/-1), got {lufs}'
+    assert float(np.abs(mastered).max()) <= 0.92, 'Mastered voice must leave headroom'
+
+    assert _select_aac_encoder('64k', 'auto') != 'aac_mf', 'aac_mf must be skipped below 96 kbps to prevent HE-AAC drift'
+    enc_128 = _select_aac_encoder('128k', 'auto')
+    assert enc_128 in ('libfdk_aac', 'aac_at', 'aac_mf', 'aac'), f'Unexpected encoder {enc_128}'
+    print(f'  Mastering quality: THD={thd * 100:.4f}%, peak={float(np.abs(limited).max()):.3f}, lufs={lufs:.1f}, enc128={enc_128}')
+
+
 if __name__ == '__main__':
     test_root = os.path.abspath(sys.argv[1])
     verify_clip_playback_speed(test_root)
     verify_master_output_extensions(test_root)
     verify_master_write_failures(test_root)
-    print('Clip playback speed, master output formats and write failure protection PASSED.')
+    verify_mastering_quality(os.path.join(test_root, 'mastering'))
+    print('Clip playback speed, master output formats, mastering quality and write failure protection PASSED.')
