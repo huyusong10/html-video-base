@@ -230,6 +230,7 @@ async function checkLoadingInPpt(audit) {
     await page.evaluate(() => V.player.nextPage());
     const panel = page.locator('#buffering-status');
     await panel.getByText('正在加载…').waitFor();
+    assert.equal(await page.evaluate(() => document.body.classList.contains('is-buffering-center')), true);
     assert.equal(await panel.evaluate(el => el.getAnimations({ subtree: true }).length), 0);
     await page.waitForFunction(() => window.loadingOpacityAtInit !== undefined);
     assert.equal(await page.evaluate(() => window.loadingOpacityAtInit), '1', 'Show the loading panel before initializing the visual source');
@@ -277,6 +278,7 @@ async function checkAudioBuffering(audit) {
     const pending = await page.evaluate(() => ({ state: V.player.getState(), frame: V.getFrameState() }));
     assert.ok(pending.state.now < 0.05, 'Narration buffering must freeze the narrative timeline');
     assert.equal(pending.state.buffering, true);
+    assert.equal(await page.evaluate(() => document.body.classList.contains('is-buffering-center')), false);
     assert.ok(pending.frame.clock > 0.5, 'Ambient animation must continue while narration buffers');
     release();
     await page.waitForFunction(() => starts.length > 0 && !V.player.getState().buffering);
@@ -631,6 +633,39 @@ async function checkAssetCancellation(audit) {
   await video.close();
 }
 
+async function checkSeekNoLoadingFlash(audit) {
+  const page = await audit.openPage('/blank.html');
+  try {
+    await page.goto(audit.origin + '/audio/');
+    await page.waitForFunction(() => window.V?.player && window.testAudio);
+    await page.evaluate(() => {
+      window.bufferingFlashes = 0;
+      window.audioSeekingEvents = 0;
+      testAudio.addEventListener('seeking', () => { window.audioSeekingEvents += 1; });
+      new MutationObserver(() => {
+        if (document.body.classList.contains('is-buffering')) window.bufferingFlashes += 1;
+      }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+      V.player.play();
+    });
+    await page.waitForFunction(() => starts.length > 0 && !V.player.getState().buffering);
+    await page.keyboard.press('ArrowRight');
+    await page.waitForTimeout(250);
+    await page.keyboard.press('ArrowLeft');
+    await page.waitForTimeout(250);
+    const box = await page.locator('.track').boundingBox();
+    await page.mouse.click(box.x + box.width * 0.45, box.y + box.height / 2);
+    await page.waitForTimeout(250);
+    const result = await page.evaluate(() => ({
+      flashes: window.bufferingFlashes,
+      seekingEvents: window.audioSeekingEvents,
+      state: V.player.getState(),
+    }));
+    assert.ok(result.seekingEvents >= 3, 'Seek actions must trigger native audio seeking');
+    assert.equal(result.flashes, 0, 'Short audio seeks must not flash is-buffering');
+    assert.equal(result.state.buffering, false);
+  } finally { await page.close(); }
+}
+
 await withAuditSession({ projectRoot: root }, async audit => {
   await checkOptionalLoading(audit);
   await checkStartupAssets(audit);
@@ -640,6 +675,7 @@ await withAuditSession({ projectRoot: root }, async audit => {
   await checkLoadingInPpt(audit);
   await checkVisualPrepareRetry(audit);
   await checkAudioBuffering(audit);
+  await checkSeekNoLoadingFlash(audit);
   await checkAudioFailure(audit);
   await checkScrubbing(audit);
   await checkInteractiveKeyboard(audit);

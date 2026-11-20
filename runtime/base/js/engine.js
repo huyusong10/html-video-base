@@ -4877,7 +4877,8 @@
 
   let stage = null, current = null, now = 0, prevRenderNow = 0, playing = false;
   let lastTs = 0, lastFrameTs = 0, ambientOffset = 0, idleSec = 0, ended = false, scrubbing = false;
-  let buffering = false, bufferingError = '', waitingAssets = false;
+  const AUDIO_BUFFERING_DELAY_MS = 300;
+  let buffering = false, bufferingError = '', waitingAssets = false, audioStallSince = 0;
   let showSubs = !params.has('nosubs'), playbackRate = 1, loopScene = false;
   let lastSeekTarget = -1, lastSeekAt = 0, activeCueIdx = -1;
   let webFull = false, savedFrameStyle = null, idleTimer = 0, osdTimer = 0;
@@ -5453,6 +5454,8 @@
   }
 
   function setBuffering(value, error = '') {
+    const centered = Boolean(value && (error || waitingAssets));
+    document.body.classList.toggle('is-buffering-center', centered);
     if (buffering === value && bufferingError === error) return;
     buffering = value;
     bufferingError = error;
@@ -5466,6 +5469,7 @@
   }
 
   function retryPlaybackAssets() {
+    audioStallSince = performance.now() - AUDIO_BUFFERING_DELAY_MS;
     audioRt?.retry();
     V._frameRuntime.retryActive().catch(() => {});
     setBuffering(true);
@@ -5495,17 +5499,23 @@
   function advanceAudioClock(ts, rawDt) {
     const mTime = audioRt.tickMasterClock();
     lastTs = ts;
-    setBuffering(mTime == null && audioRt.canUseMasterClock());
     if (mTime != null) {
+      audioStallSince = 0;
+      setBuffering(false);
       if (checkSceneLoop(mTime)) return;
       if (mTime >= V.duration - 0.01) finishPlayback();
       else render(mTime, 0, false);
       return;
     }
+    const audioWaiting = audioRt.canUseMasterClock();
+    if (!audioWaiting) audioStallSince = 0;
+    else if (!audioStallSince) audioStallSince = ts;
+    setBuffering(audioWaiting && ts - audioStallSince >= AUDIO_BUFFERING_DELAY_MS);
     renderBufferingFrame(rawDt);
   }
 
   function advanceWallClock(ts) {
+    audioStallSince = 0;
     setBuffering(false);
     const dt = Math.min(0.1, (ts - lastTs) / 1000) * playbackRate;
     lastTs = ts;
@@ -5605,6 +5615,7 @@
     V._checkpointsRuntime.closeCheckpointOverlay();
     setOpenMenu(document.getElementById('controls'), '');
     playing = true;
+    audioStallSince = 0;
     setBuffering(false);
     lastTs = performance.now();
     syncAssetAvailability();
@@ -5620,6 +5631,7 @@
 
   function pause() {
     playing = false;
+    audioStallSince = 0;
     setBuffering(false);
     idleSec = 0;
     ended = now >= V.duration - 0.01;
@@ -5691,6 +5703,8 @@
     if (!force && isRedundantSeek(target, ts)) return;
     lastTs = ts;
     idleSec = 0;
+    audioStallSince = 0;
+    if (!waitingAssets && !bufferingError) setBuffering(false);
     lastSeekTarget = target;
     lastSeekAt = ts;
     if (V._checkpointsRuntime && V._checkpointsRuntime.onSeek) V._checkpointsRuntime.onSeek(target);
