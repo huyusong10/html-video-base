@@ -231,6 +231,29 @@ def check_timings_write_failures(root):
     print('  Timing partial writes, failed replacement, successful retry and Node loading PASSED.')
 
 
+def check_native_samplerate_preservation(root):
+    folder = tempfile.mkdtemp(prefix='native-sr-', dir=root)
+    sr = 48000
+    t = np.arange(sr, dtype=np.float32) / sr
+    wave = np.zeros(sr, dtype=np.float32)
+    wave[int(0.1 * sr):int(0.3 * sr)] = 0.002 * np.sin(2 * np.pi * 440 * t[int(0.1 * sr):int(0.3 * sr)])
+    wave[int(0.3 * sr):int(0.8 * sr)] = 0.15 * np.sin(2 * np.pi * 440 * t[int(0.3 * sr):int(0.8 * sr)])
+
+    src_trim, raw_trim, out_trim = [os.path.join(folder, f) for f in ('in1.wav', 'raw1.wav', 'out1.wav')]
+    sf.write(src_trim, wave, sr, subtype='PCM_24')
+    dur_t, _, _ = voice.post_process_audio(src_trim, raw_trim, out_trim, [], 1.0, 'tone', {})
+    assert sf.info(out_trim).samplerate == 48000, f'Voice pipeline must preserve 48000Hz source rate, got {sf.info(out_trim).samplerate}'
+    samples_t, _ = sf.read(out_trim, dtype='float32')
+    assert float(np.max(np.abs(samples_t[:int(0.2 * sr)]))) >= 0.0015, 'Conservative -60dB trim must retain soft 0.002 onset'
+    assert 0.80 <= dur_t <= 0.90, f'Expected ~0.85s after conservative silence trim, got {dur_t}'
+
+    src_raw, raw_raw, out_raw = [os.path.join(folder, f) for f in ('in2.wav', 'raw2.wav', 'out2.wav')]
+    sf.write(src_raw, wave, sr, subtype='PCM_24')
+    dur_r, _, _ = voice.post_process_audio(src_raw, raw_raw, out_raw, [], 1.0, 'tone', {'trim': False})
+    assert sf.info(out_raw).samplerate == 48000 and abs(dur_r - 1.0) < 1e-3, 'trim=False must skip trimming cleanly'
+    print('  Native 48kHz preservation, conservative trim threshold and trim=False PASSED.')
+
+
 if __name__ == '__main__':
     root = os.path.abspath(sys.argv[1])
     os.makedirs(root, exist_ok=True)
@@ -239,4 +262,5 @@ if __name__ == '__main__':
     check_offline_hydration(root)
     check_processed_voice_output(root)
     check_timings_write_failures(root)
+    check_native_samplerate_preservation(root)
     print('Voice output protection, cache integrity, timing publication, concurrent writes, legacy entries and offline hydration PASSED.')

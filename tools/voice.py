@@ -23,13 +23,13 @@ _WHISPER_MODELS = {}
 _WHISPER_LOCK = threading.Lock()
 
 
-def trim(y, thr=0.005, pad=0.05):
+def trim(y, sr: int = 24000, thr: float = 0.001, pad: float = 0.05):
     idx = np.where(np.abs(y) > thr)[0]
     if not len(idx):
         return y, 0.0
-    a = max(0, idx[0] - int(pad * 24000))
-    b = min(len(y), idx[-1] + int(pad * 24000))
-    return y[a:b], a / 24000.0
+    a = max(0, idx[0] - int(pad * sr))
+    b = min(len(y), idx[-1] + int(pad * sr))
+    return y[a:b], a / float(sr)
 
 
 def extract_envelope_30hz(y: np.ndarray, sr: int = 24000) -> list[int]:
@@ -63,12 +63,12 @@ def merge_en_spans(words):
     return spans
 
 
-def stretch_span(seg, tmp_base, ratio=0.78):
+def stretch_span(seg, tmp_base, ratio=0.78, sr: int = 24000):
     clamped = max(0.5, min(2.0, float(ratio)))
-    if clamped >= 0.99 or len(seg) < int(0.08 * 24000):
+    if clamped >= 0.99 or len(seg) < int(0.08 * sr):
         return seg
     s_in, s_out = tmp_base + '.sin.wav', tmp_base + '.sout.wav'
-    sf.write(s_in, seg, 24000)
+    sf.write(s_in, seg, sr, subtype='PCM_24')
     try:
         subprocess.run([FFMPEG, '-y', '-loglevel', 'error', '-i', s_in, '-af', f'atempo={clamped}', s_out], check=True)
         y_st, _ = sf.read(s_out, dtype='float32')
@@ -90,7 +90,7 @@ def _remap_word_time(t0: float, shifts: list) -> float:
     return t_new
 
 
-def apply_en_slowdown(y, words, tmp_base, ratio=0.78):
+def apply_en_slowdown(y, words, tmp_base, ratio=0.78, sr: int = 24000):
     if ratio >= 0.99 or not words:
         return y, [(round(t0, 3), w) for t0, _, w in words]
     spans = merge_en_spans(words)
@@ -98,13 +98,13 @@ def apply_en_slowdown(y, words, tmp_base, ratio=0.78):
         return y, [(round(t0, 3), w) for t0, _, w in words]
     pieces, shifts, cur, cum_shift = [], [], 0, 0.0
     for s0, s1 in spans:
-        i0, i1 = max(cur, int(s0 * 24000)), min(len(y), int((s1 + 0.03) * 24000))
+        i0, i1 = max(cur, int(s0 * sr)), min(len(y), int((s1 + 0.03) * sr))
         if i0 > cur:
             pieces.append(y[cur:i0])
-        st = stretch_span(y[i0:i1], tmp_base, ratio)
+        st = stretch_span(y[i0:i1], tmp_base, ratio, sr=sr)
         pieces.append(st)
-        orig_d, new_d = (i1 - i0) / 24000.0, len(st) / 24000.0
-        shifts.append((i0 / 24000.0, i1 / 24000.0, cum_shift, new_d / max(orig_d, 1e-6)))
+        orig_d, new_d = (i1 - i0) / float(sr), len(st) / float(sr)
+        shifts.append((i0 / float(sr), i1 / float(sr), cum_shift, new_d / max(orig_d, 1e-6)))
         cum_shift += new_d - orig_d
         cur = i1
     if cur < len(y):
@@ -213,24 +213,25 @@ def align_words_acoustic(y: np.ndarray, sr: int, spoken: str, wav_path: str, cfg
 
 def post_process_audio(src_audio, raw_wav, out_wav, words, en_ratio, spoken, cfg):
     try:
-        subprocess.run([FFMPEG, '-y', '-loglevel', 'error', '-i', src_audio, '-ar', '24000', '-ac', '1', raw_wav], check=True)
-        y, _ = sf.read(raw_wav, dtype='float32')
+        subprocess.run([FFMPEG, '-y', '-loglevel', 'error', '-i', src_audio, '-ac', '1', '-c:a', 'pcm_f32le', raw_wav], check=True)
+        y, sr = sf.read(raw_wav, dtype='float32')
     finally:
         for tmp in (src_audio, raw_wav):
             if os.path.exists(tmp):
                 os.remove(tmp)
-    y, adj_words = apply_en_slowdown(y, words, out_wav, en_ratio)
-    y, trim_s = trim(y)
-    if adj_words:
-        adj_words = [(round(max(0.0, t - trim_s), 3), w) for t, w in adj_words]
+    y, adj_words = apply_en_slowdown(y, words, out_wav, en_ratio, sr=sr)
+    if cfg.get('trim') is not False:
+        y, trim_s = trim(y, sr=sr)
+        if adj_words:
+            adj_words = [(round(max(0.0, t - trim_s), 3), w) for t, w in adj_words]
     temporary = os.path.join(os.path.dirname(out_wav), f'.html-video-{os.getpid()}-{uuid.uuid4().hex}.tmp{os.path.splitext(out_wav)[1]}')
     try:
-        sf.write(temporary, y, 24000)
+        sf.write(temporary, y, sr, subtype='PCM_24')
         if not adj_words:
-            adj_words = align_words_acoustic(y, 24000, spoken, temporary, cfg)
-        env_30hz = extract_envelope_30hz(y, 24000)
+            adj_words = align_words_acoustic(y, sr, spoken, temporary, cfg)
+        env_30hz = extract_envelope_30hz(y, sr)
         os.replace(temporary, out_wav)
-        return round(len(y) / 24000, 3), adj_words, env_30hz
+        return round(len(y) / sr, 3), adj_words, env_30hz
     finally:
         if os.path.exists(temporary):
             os.remove(temporary)
@@ -330,7 +331,7 @@ def _try_load_cached_voice(c_wav: str, c_meta: str, out_wav: str):
 def _resolve_media_ext(cfg: dict) -> str:
     if cfg.get('format'):
         return str(cfg['format']).lstrip('.')
-    if cfg.get('provider') in ('edge', 'openai', 'elevenlabs') and not cfg.get('script'):
+    if cfg.get('provider') in ('edge', 'elevenlabs') and not cfg.get('script'):
         return 'mp3'
     return 'wav'
 

@@ -381,35 +381,6 @@ def _fade_edges(seg: np.ndarray, ms: float = 4.0) -> np.ndarray:
     return out
 
 
-def _measure_active_rms(seg: np.ndarray) -> float:
-    if len(seg) == 0:
-        return 0.0
-    peak = float(np.abs(seg).max())
-    if peak <= 1e-5:
-        return 0.0
-    act = seg[np.abs(seg) > max(0.01, peak * 0.05)]
-    return float(np.sqrt(np.mean(act ** 2))) if len(act) else 0.0
-
-
-def _level_dry_cues(cues: list) -> list:
-    dry_rms = []
-    for _, y, used in cues:
-        if not used:
-            rms = _measure_active_rms(y)
-            if rms > 1e-4:
-                dry_rms.append(rms)
-    med = float(np.median(dry_rms)) if len(dry_rms) >= 2 else 0.0
-    out = []
-    for at, y, used in cues:
-        if used:
-            out.append((at, y, True))
-            continue
-        rms = _measure_active_rms(y) if med > 0.0 else 0.0
-        scale = float(np.clip(med / rms, 0.75, 1.33)) if rms > 1e-4 else 1.0
-        out.append((at, _fade_edges(y * scale, 4.0), False))
-    return out
-
-
 def mix_voice_track(scenes, vdir, n, fallback_stem_path=None, baked_scenes=None):
     voice, active = np.zeros(n), np.zeros(n)
     stem_mask = np.zeros(n, dtype=bool)
@@ -432,7 +403,8 @@ def mix_voice_track(scenes, vdir, n, fallback_stem_path=None, baked_scenes=None)
             'Run build to regenerate dry voice cache.',
             file=sys.stderr,
         )
-    for at, y, used_stem in _level_dry_cues(collected):
+    for at, y, used_stem in collected:
+        y = y if used_stem else _fade_edges(y, 4.0)
         place(voice, y, at)
         a, b = max(0, int(at * SR)), min(n, int((at + len(y) / SR) * SR))
         if b > a:
@@ -577,15 +549,15 @@ def mix_video_clip_tracks(data, video_dir, n):
 
 
 def normalize_audio_bitrate(raw) -> str:
-    val = str(raw or '128k').strip().lower()
+    val = str(raw or '192k').strip().lower()
     if len(val) >= 3 and val.endswith('k') and val[:-1].isdigit():
         return val
-    return '128k'
+    return '192k'
 
 
 def _parse_bitrate_kbps(bitrate: str) -> int:
     norm = normalize_audio_bitrate(bitrate)
-    return int(norm[:-1]) if norm[:-1].isdigit() else 128
+    return int(norm[:-1]) if norm[:-1].isdigit() else 192
 
 
 def _probe_available_encoders() -> set[str]:
@@ -690,7 +662,7 @@ def _normalize_to_lufs(samples: np.ndarray, target_lufs: float, max_gain: float 
     return (samples * gain).astype(np.float32)
 
 
-def _limit_true_peak(sig: np.ndarray, limit_db: float = -1.5) -> np.ndarray:
+def _limit_true_peak(sig: np.ndarray, limit_db: float = -1.0) -> np.ndarray:
     if len(sig) == 0:
         return sig
     limit_lin = 10.0 ** (limit_db / 20.0)
@@ -702,11 +674,13 @@ def _limit_true_peak(sig: np.ndarray, limit_db: float = -1.5) -> np.ndarray:
 
 
 def _resolve_master_filter(master_cfg) -> str:
-    if master_cfg in (False, None, 'none', ''):
+    if master_cfg in (False, None, 'none', '', 'flat', 'raw'):
         return ''
     if str(master_cfg).lower() == 'speech':
         return 'highpass=f=75:poles=2,highshelf=f=6500:t=q:w=0.7:g=-2.5'
-    return 'highpass=f=70:poles=2'
+    if str(master_cfg).lower() == 'clean':
+        return 'highpass=f=70:poles=2'
+    return ''
 
 
 def _master_voice_track(voice: np.ndarray, has_voice: bool, stem_mask: np.ndarray, master_cfg, target_lufs: float) -> np.ndarray:
@@ -722,7 +696,7 @@ def _master_voice_track(voice: np.ndarray, has_voice: bool, stem_mask: np.ndarra
     return processed
 
 
-def write_master_output(mix, out, bitrate='128k', encoder=None):
+def write_master_output(mix, out, bitrate='192k', encoder=None):
     output_dir = os.path.dirname(os.path.abspath(out))
     os.makedirs(output_dir, exist_ok=True)
     prefix = os.path.join(output_dir, f'.html-video-{os.getpid()}-{uuid.uuid4().hex}.tmp')
@@ -756,7 +730,7 @@ def _compose_foreground_bus(voice, f, vc, stem_mask):
     return voice_st + extras
 
 
-def _limit_preserving_stem(sig, stem_mask, limit_db: float = -1.5):
+def _limit_preserving_stem(sig, stem_mask, limit_db: float = -1.0):
     limited = _limit_true_peak(sig, limit_db)
     if stem_mask is not None and stem_mask.any():
         return np.where(stem_mask[:, None], sig, limited)
@@ -769,7 +743,7 @@ def _write_dual_stems(fg, m, out, bgm_out, dur, bitrate, bgm_bitrate, stem_mask=
         write_master_output(_limit_preserving_stem(fg, stem_mask), out, bitrate, encoder=encoder)
     bgm_written = False
     if float(np.abs(m).max()) > 1e-5:
-        write_master_output(_limit_true_peak(m), bgm_out, bgm_bitrate or '96k', encoder=encoder)
+        write_master_output(_limit_true_peak(m), bgm_out, bgm_bitrate or '128k', encoder=encoder)
         bgm_written = True
     elif os.path.exists(bgm_out):
         os.remove(bgm_out)
@@ -791,7 +765,7 @@ def main():
     video_dir = data.get('videoDir') or os.path.dirname(os.path.dirname(os.path.abspath(ref_out)))
     def_e = [0.45, 0.55, 0.62, 0.68, 0.65]
     secs = [dict(s, energy=s.get('energy', def_e[i] if i < len(def_e) else 0.58)) for i, s in enumerate(data['scenes'])]
-    master_cfg = data.get('audioMaster', 'clean')
+    master_cfg = data.get('audioMaster', False)
     target_lufs = float(np.clip(float(data.get('audioTargetLufs', -15.0)), -24.0, -12.0))
     audio_encoder = data.get('audioEncoder', 'auto')
 

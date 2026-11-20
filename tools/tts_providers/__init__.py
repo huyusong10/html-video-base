@@ -89,7 +89,7 @@ def _build_openai_payload(text: str, cfg: dict) -> dict:
         'model': cfg.get('model') or 'gpt-4o-mini-tts',
         'input': text,
         'voice': cfg.get('voice') or 'alloy',
-        'response_format': cfg.get('format') or 'mp3',
+        'response_format': cfg.get('format') or 'wav',
         'speed': float(cfg.get('speed', 1.0)),
     }
     if cfg.get('instructions'):
@@ -202,7 +202,7 @@ async def synth_azure(text: str, out_path: str, cfg: dict):
     headers = {
         'Ocp-Apim-Subscription-Key': api_key,
         'Content-Type': 'application/ssml+xml',
-        'X-Microsoft-OutputFormat': cfg.get('outputFormat') or 'riff-24khz-16bit-mono-pcm',
+        'X-Microsoft-OutputFormat': cfg.get('outputFormat') or 'riff-48khz-16bit-mono-pcm',
         'User-Agent': 'html-video-base',
     }
     audio_bytes, _ = await _request_with_retry(endpoint, method='POST', headers=headers, body_bytes=ssml.encode('utf-8'))

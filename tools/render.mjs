@@ -812,7 +812,7 @@ function pushVoiceOnlyMuxArgs(muxArgs, audioPath, isSlice, startSec, renderDur, 
   pushSlicedAudioInput(muxArgs, audioPath, isSlice, startSec, renderDur);
   muxArgs.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy');
   const canCopy = !isSlice && /\.m4a$/i.test(audioPath);
-  muxArgs.push(...(canCopy ? ['-c:a', 'copy', '-shortest'] : ['-c:a', 'aac', '-b:a', audioBitrate || '128k', '-shortest']));
+  muxArgs.push(...(canCopy ? ['-c:a', 'copy', '-shortest'] : ['-c:a', 'aac', '-b:a', audioBitrate || '192k', '-shortest']));
 }
 
 function buildBgmFilterOps({ isSlice, startSec, renderDur, bgmVolume, padToEnd }) {
@@ -828,7 +828,7 @@ function pushBgmOnlyMuxArgs(muxArgs, { bgmPath, bgmLoop, bgmVolume, isSlice, sta
   muxArgs.push('-i', bgmPath);
   const ops = buildBgmFilterOps({ isSlice, startSec, renderDur, bgmVolume, padToEnd: !bgmLoop });
   if (ops.length) muxArgs.push('-af', ops.join(','));
-  muxArgs.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', audioBitrate || '128k', '-shortest');
+  muxArgs.push('-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', audioBitrate || '192k', '-shortest');
 }
 
 function pushDualStemMuxArgs(muxArgs, { audioPath, bgmPath, bgmLoop, bgmVolume, isSlice, startSec, renderDur, audioBitrate }) {
@@ -840,7 +840,7 @@ function pushDualStemMuxArgs(muxArgs, { audioPath, bgmPath, bgmLoop, bgmVolume, 
   muxArgs.push(
     '-filter_complex', `${bgmGraph}amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`,
     '-map', '0:v:0', '-map', '[aout]', '-c:v', 'copy',
-    '-c:a', 'aac', '-b:a', audioBitrate || '128k', '-shortest'
+    '-c:a', 'aac', '-b:a', audioBitrate || '192k', '-shortest'
   );
 }
 
@@ -916,7 +916,7 @@ export function resolveStageSpec(V, cfg, opts) {
     FPS: positiveRenderNumber(opts.fps ?? (process.env.FPS || (cfg.fps ?? 30)), 'FPS'),
     scenes: V.scenes || [],
     fullDur: positiveRenderNumber(V.totalDuration ?? V.duration ?? 1, 'Video duration'),
-    audioBitrate: cfg.audioBitrate || '128k',
+    audioBitrate: cfg.audioBitrate || '192k',
   };
 }
 

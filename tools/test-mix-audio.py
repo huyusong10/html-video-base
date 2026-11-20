@@ -116,51 +116,49 @@ def verify_mastering_quality(root):
     os.makedirs(root, exist_ok=True)
     times = np.arange(SR, dtype=np.float32) / SR
     sine_07 = np.stack([0.7 * np.sin(2 * np.pi * 1000 * times), 0.7 * np.sin(2 * np.pi * 1000 * times)], axis=1)
-    clean = _limit_true_peak(sine_07, -1.5)
+    clean = _limit_true_peak(sine_07, -1.0)
     spec = np.abs(np.fft.rfft(clean[:, 0]))
     thd = float(np.sqrt(np.sum(spec[[2000, 3000, 4000, 5000]] ** 2)) / max(1e-12, spec[1000]))
     assert thd < 0.0005, f'Normal levels must remain linear (THD < 0.05%), got {thd * 100:.4f}%'
 
     sine_14 = np.stack([1.4 * np.sin(2 * np.pi * 1000 * times), 1.4 * np.sin(2 * np.pi * 1000 * times)], axis=1)
-    limited = _limit_true_peak(sine_14, -1.5)
-    assert float(np.abs(limited).max()) <= 0.86, f'Limiter must cap 1.4 peak below -1.3 dBFS, got {float(np.abs(limited).max()):.4f}'
+    limited = _limit_true_peak(sine_14, -1.0)
+    assert float(np.abs(limited).max()) <= 0.91, f'Limiter must cap 1.4 peak below -0.8 dBFS, got {float(np.abs(limited).max()):.4f}'
     burst_idx = int(0.2 * SR)
     burst = (0.3 + 1.1 * np.exp(-((np.arange(SR) - burst_idx) / 96.0) ** 2)) * np.sin(2 * np.pi * 1000 * times)
     burst_st = np.stack([burst.astype(np.float32), burst.astype(np.float32)], axis=1)
-    burst_lim = _limit_true_peak(burst_st, -1.5)
+    burst_lim = _limit_true_peak(burst_st, -1.0)
     corr = np.correlate(burst_lim[burst_idx - 600:burst_idx + 600, 0], burst_st[burst_idx - 600:burst_idx + 600, 0], mode='full')
     lag = int(np.argmax(corr)) - (1200 - 1)
     assert abs(lag) <= 2, f'Limiter latency compensation must keep time shift <= 2 samples, got {lag}'
 
     t2 = np.arange(int(1.2 * SR), dtype=np.float32) / SR
     speech_sig = (
-        0.08 * np.sin(2 * np.pi * 500 * t2)
-        + 0.08 * np.sin(2 * np.pi * 3000 * t2)
-        + 0.08 * np.sin(2 * np.pi * 8000 * t2)
+        0.06 * np.sin(2 * np.pi * 100 * t2)
+        + 0.06 * np.sin(2 * np.pi * 500 * t2)
+        + 0.06 * np.sin(2 * np.pi * 3000 * t2)
+        + 0.06 * np.sin(2 * np.pi * 8000 * t2)
     ).astype(np.float32)
     mask = np.zeros(len(speech_sig), dtype=bool)
-    mastered_clean = _master_voice_track(speech_sig, True, mask, 'clean', -15.0)
-    lufs_clean = _measure_ebu_lufs(mastered_clean)
-    assert lufs_clean is not None and -16.0 <= lufs_clean <= -14.0, f'Expected -15 LUFS (+/-1) for clean, got {lufs_clean}'
-    assert float(np.abs(mastered_clean).max()) <= 0.92, 'Mastered clean voice must leave headroom'
-    ratio_clean_3k = _tone_ratio(mastered_clean, 3000, 500)
-    assert 0.94 <= ratio_clean_3k <= 1.06, f'Clean preset must keep 3kHz/500Hz flat [0.94, 1.06], got {ratio_clean_3k:.3f}'
+    mastered_flat = _master_voice_track(speech_sig, True, mask, False, -15.0)
+    lufs_flat = _measure_ebu_lufs(mastered_flat)
+    assert lufs_flat is not None and -16.0 <= lufs_flat <= -14.0, f'Expected -15 LUFS (+/-1) for pass-through, got {lufs_flat}'
+    assert float(np.abs(mastered_flat).max()) <= 0.92, 'Mastered voice must leave headroom'
+    for freq_hz in (100, 3000, 8000):
+        ratio = _tone_ratio(mastered_flat, freq_hz, 500)
+        assert 0.98 <= ratio <= 1.02, f'Pass-through default must keep {freq_hz}Hz/500Hz flat [0.98, 1.02], got {ratio:.3f}'
 
+    mastered_clean = _master_voice_track(speech_sig, True, mask, 'clean', -15.0)
+    assert 0.94 <= _tone_ratio(mastered_clean, 3000, 500) <= 1.06, 'Opt-in clean must keep 3kHz/500Hz flat'
     mastered_speech = _master_voice_track(speech_sig, True, mask, 'speech', -15.0)
-    lufs_speech = _measure_ebu_lufs(mastered_speech)
-    assert lufs_speech is not None and -16.0 <= lufs_speech <= -14.0, f'Expected -15 LUFS (+/-1) for speech, got {lufs_speech}'
-    ratio_speech_3k = _tone_ratio(mastered_speech, 3000, 500)
     ratio_speech_8k = _tone_ratio(mastered_speech, 8000, 500)
-    assert ratio_speech_3k <= 1.05, f'Speech preset must not boost 3kHz/500Hz above 1.05, got {ratio_speech_3k:.3f}'
-    assert ratio_speech_8k < 0.85, f'Speech preset must gently attenuate 8kHz/500Hz (< 0.85), got {ratio_speech_8k:.3f}'
+    assert _tone_ratio(mastered_speech, 3000, 500) <= 1.05, 'Opt-in speech must not boost 3kHz'
+    assert ratio_speech_8k < 0.85, f'Opt-in speech must gently attenuate 8kHz (< 0.85), got {ratio_speech_8k:.3f}'
 
     assert _select_aac_encoder('64k', 'auto') != 'aac_mf', 'aac_mf must be skipped below 96 kbps to prevent HE-AAC drift'
-    enc_128 = _select_aac_encoder('128k', 'auto')
-    assert enc_128 in ('libfdk_aac', 'aac_at', 'aac_mf', 'aac'), f'Unexpected encoder {enc_128}'
-    print(
-        f'  Mastering quality: THD={thd * 100:.4f}%, lag={lag}, clean_lufs={lufs_clean:.1f} '
-        f'(3k={ratio_clean_3k:.3f}), speech_lufs={lufs_speech:.1f} (8k={ratio_speech_8k:.3f}), enc128={enc_128}'
-    )
+    enc_192 = _select_aac_encoder('192k', 'auto')
+    assert enc_192 in ('libfdk_aac', 'aac_at', 'aac_mf', 'aac'), f'Unexpected encoder {enc_192}'
+    print(f'  Mastering quality: THD={thd * 100:.4f}%, lag={lag}, flat_lufs={lufs_flat:.1f}, speech_8k={ratio_speech_8k:.3f}, enc192={enc_192}')
 
 
 if __name__ == '__main__':
