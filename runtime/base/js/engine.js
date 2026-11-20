@@ -6335,16 +6335,20 @@
       const done = ok => {
         clearTimeout(timer);
         events.forEach(event => vid.removeEventListener(event, onReady));
-        vid.removeEventListener('error', onErr);
-        signal.removeEventListener('abort', onErr);
+        vid.removeEventListener('error', onError, true);
+        signal.removeEventListener('abort', onAbort);
         resolve(ok);
       };
       const onReady = () => { if (isReady()) done(true); };
-      const onErr = () => done(false);
+      const onAbort = () => done(false);
+      const onError = event => {
+        if (event.target === vid) done(false);
+        else queueMicrotask(() => { if (vid.networkState === vid.NETWORK_NO_SOURCE) done(false); });
+      };
       const timer = setTimeout(() => done(false), timeoutMs);
       events.forEach(event => vid.addEventListener(event, onReady));
-      vid.addEventListener('error', onErr, { once: true });
-      signal.addEventListener('abort', onErr, { once: true });
+      vid.addEventListener('error', onError, true);
+      signal.addEventListener('abort', onAbort, { once: true });
       if (signal.aborted) done(false);
     });
   }
@@ -6366,11 +6370,12 @@
     if (signal.aborted) throw new DOMException('Frame superseded', 'AbortError');
   }
 
-  async function seekVideoElementAsync(vid, targetSec, signal) {
-    const metadataReady = await waitVideoReady(vid, 1, RECORD ? 15000 : 2000, signal);
+  async function seekVideoElementAsync(vid, targetSec, signal, startup = false) {
+    const strict = RECORD || startup;
+    const metadataReady = await waitVideoReady(vid, 1, strict ? 15000 : 2000, signal);
     assertAssetRequestActive(signal);
     if (!metadataReady) {
-      if (RECORD) throw videoFrameError(vid, 'metadata');
+      if (strict) throw videoFrameError(vid, 'metadata');
       return;
     }
     // 元数据可能晚于场景更新到达，按真实片长重新计算末帧或循环位置。
@@ -6378,14 +6383,14 @@
     vid._vclip.targetTime = targetSec;
     if (Math.abs((vid.currentTime || 0) - targetSec) > 0.000001 || vid.seeking) {
       try { vid.currentTime = targetSec; } catch (err) {
-        if (RECORD) throw err;
+        if (strict) throw err;
         return;
       }
     }
-    const frameReady = await waitVideoReady(vid, 2, RECORD ? 15000 : 1500, signal);
+    const frameReady = await waitVideoReady(vid, 2, strict ? 15000 : 1500, signal);
     assertAssetRequestActive(signal);
     const atTarget = frameReady && Math.abs(vid.currentTime - targetSec) <= 0.000001;
-    if (RECORD && !atTarget) throw videoFrameError(vid, `frame at ${targetSec.toFixed(3)}s`);
+    if (strict && !atTarget) throw videoFrameError(vid, `frame at ${targetSec.toFixed(3)}s`);
   }
 
   function unescapeCssImageUrl(value) {
@@ -6394,20 +6399,30 @@
     });
   }
 
-  function collectCssImageUrls(style, sources) {
-    const images = [style.backgroundImage, style.maskImage, style.borderImageSource, style.listStyleImage, style.content].join(' ');
-    for (const match of images.matchAll(/url\("((?:\\.|[^"\\])*)"\)/g)) {
-      sources.add(unescapeCssImageUrl(match[1]));
+  function collectCssImageUrls(style, sources, startup) {
+    const images = [style.backgroundImage, style.maskImage, style.borderImageSource, style.listStyleImage, style.content];
+    for (const image of images) {
+      // The browser selects one candidate in an image-set. The unused alternatives are not startup requirements.
+      if (!image || (startup && /image-set\(/i.test(image))) continue;
+      for (const match of image.matchAll(/url\("((?:\\.|[^"\\])*)"\)/g)) {
+        const src = unescapeCssImageUrl(match[1]);
+        if (!startup || (src && !src.startsWith('#') && !src.startsWith(location.href.split('#')[0] + '#'))) sources.add(src);
+      }
     }
   }
 
-  function decodeCssImage(src) {
+  function imageLoadError(src, cause) {
+    return new Error(`Cannot decode startup image "${src}"`, { cause });
+  }
+
+  function decodeImageUrl(src, required) {
     if (!cssImageDecodes.has(src)) {
       const image = new Image();
       image.src = src;
-      cssImageDecodes.set(src, image.decode().catch(() => {}));
+      cssImageDecodes.set(src, image.decode().then(() => null, cause => imageLoadError(src, cause)));
     }
-    return cssImageDecodes.get(src);
+    const result = cssImageDecodes.get(src);
+    return required ? result.then(error => { if (error) throw error; }) : result;
   }
 
   function cssMayUseImages(text) {
@@ -6440,7 +6455,17 @@
     return false;
   }
 
-  function waitCssImages() {
+  function collectElementCssImages(el, style, sources, startup) {
+    if (style.visibility === 'visible' && style.display !== 'contents') collectCssImageUrls(style, sources, startup);
+    for (const pseudo of ['::before', '::after']) {
+      const computed = getComputedStyle(el, pseudo);
+      if (computed.content === 'none' || computed.content === 'normal' || computed.display === 'none' ||
+          computed.visibility !== 'visible' || (startup && computed.opacity === '0')) continue;
+      collectCssImageUrls(computed, sources, startup);
+    }
+  }
+
+  function waitCssImages(startup = false) {
     // 没有 CSS 图片来源时，避免逐帧读取每个元素及其伪元素的计算样式。
     // 每次寻道重新检查声明，仍可发现动态内联样式、CSSOM 和影子根更新。
     if (!stageMayUseCssImages()) return Promise.resolve();
@@ -6449,18 +6474,12 @@
     while (pending.length) {
       const el = pending.pop();
       const style = getComputedStyle(el);
-      if (style.display === 'none') continue;
+      if (style.display === 'none' || (startup && skipStartupSubtree(el, style))) continue;
       pending.push(...el.children);
       if (el.shadowRoot) pending.push(...el.shadowRoot.children);
-      if (style.visibility === 'visible' && style.display !== 'contents') collectCssImageUrls(style, sources);
-      for (const pseudo of ['::before', '::after']) {
-        const pseudoStyle = getComputedStyle(el, pseudo);
-        if (pseudoStyle.content !== 'none' && pseudoStyle.content !== 'normal' && pseudoStyle.display !== 'none' && pseudoStyle.visibility === 'visible') {
-          collectCssImageUrls(pseudoStyle, sources);
-        }
-      }
+      collectElementCssImages(el, style, sources, startup);
     }
-    return Promise.all(Array.from(sources, decodeCssImage));
+    return Promise.all(Array.from(sources, src => decodeImageUrl(src, startup)));
   }
 
   function collectImageDecodes(root, tasks) {
@@ -6475,10 +6494,60 @@
     }
   }
 
-  async function waitStageAssets(signal, fonts) {
+  function skipStartupSubtree(el, style) {
+    return el.hasAttribute('data-video-optional') || style.opacity === '0' || style.contentVisibility === 'hidden';
+  }
+
+  function visibleStartupMedia(el) {
+    if (getComputedStyle(el).visibility !== 'visible') return false;
+    for (let node = el; node; node = node.parentElement || node.getRootNode().host) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || skipStartupSubtree(node, style)) return false;
+      if (node === stage) return true;
+    }
+    return false;
+  }
+
+  function startupImage(img) {
+    if (img.localName === 'image') {
+      const src = img.href?.baseVal;
+      if (src) return decodeImageUrl(new URL(src, img.baseURI).href, true);
+      return;
+    }
+    if (!(img.currentSrc || img.getAttribute('src') || img.srcset || img.parentElement?.querySelector('source[srcset]'))) return;
+    if (img.loading === 'lazy') img.loading = 'eager';
+    return img.decode().catch(cause => { throw imageLoadError(img.currentSrc || img.src || img.srcset, cause); });
+  }
+
+  async function startupVideo(vid, signal) {
+    if (!(vid.currentSrc || vid.getAttribute('src') || vid.srcObject || vid.querySelector('source[src]'))) {
+      if (vid.poster) await decodeImageUrl(vid.poster, true);
+      return;
+    }
+    vid.preload = 'auto';
+    if (vid._vclip) return seekVideoElementAsync(vid, vid._vclip.targetTime, signal, true);
+    const ready = await waitVideoReady(vid, 2, 30000, signal);
+    assertAssetRequestActive(signal);
+    if (!ready) throw videoFrameError(vid, 'startup frame');
+  }
+
+  function collectStartupMedia(root, tasks, signal) {
+    for (const el of root.querySelectorAll('img, image, video')) {
+      if (visibleStartupMedia(el)) tasks.push(el.localName === 'video' ? startupVideo(el, signal) : startupImage(el));
+    }
+    if (root.shadowRoot) collectStartupMedia(root.shadowRoot, tasks, signal);
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) collectStartupMedia(el.shadowRoot, tasks, signal);
+    }
+  }
+
+  async function waitStageAssets(signal, startup) {
     if (!stage) return;
-    const tasks = [waitCssImages()];
-    if (fonts) tasks.push(document.fonts?.ready);
+    const tasks = [waitCssImages(startup)];
+    if (startup) {
+      collectStartupMedia(stage, tasks, signal);
+      return Promise.all([...tasks, document.fonts?.ready]);
+    }
     collectImageDecodes(stage, tasks);
     for (const clip of V._videoClips) {
       if (clip.isConnected && clip._vclip) tasks.push(seekVideoElementAsync(clip, clip._vclip.targetTime, signal));
@@ -6486,7 +6555,7 @@
     if (tasks.length) await Promise.all(tasks);
   }
 
-  async function waitFrameAssets(frame, fonts = false) {
+  async function waitFrameAssets(frame, startup = false) {
     const signal = V._frameRuntime.signal(frame);
     const assets = new AbortController();
     let timer, cancel;
@@ -6502,8 +6571,12 @@
       }, 30000);
       if (signal.aborted) cancel();
     });
-    try { await Promise.race([waitStageAssets(assets.signal, fonts), stopped]); }
-    finally { clearTimeout(timer); signal.removeEventListener('abort', cancel); }
+    try { await Promise.race([waitStageAssets(assets.signal, startup), stopped]); }
+    finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', cancel);
+      assets.abort();
+    }
   }
 
   function consumeHmrTime() {

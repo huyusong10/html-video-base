@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { PKG_ROOT } from './lib/paths.mjs';
+import { spawnSync } from 'node:child_process';
+import { PKG_ROOT, resolveFfmpeg } from './lib/paths.mjs';
 import { withAuditSession } from './audit-session.mjs';
 
 const root = fs.mkdtempSync(path.join(PKG_ROOT, '.runtime/player-reliability-'));
@@ -70,6 +71,68 @@ function silenceWav() {
 
 fs.mkdirSync(path.join(audioDir, 'assets'));
 fs.writeFileSync(path.join(audioDir, 'assets/delayed.wav'), silenceWav());
+
+function createStartupMedia() {
+  const media = path.join(root, 'videos/startup-media');
+  fs.mkdirSync(media);
+  fs.writeFileSync(path.join(media, 'asset.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="blue"/></svg>');
+  const movie = spawnSync(resolveFfmpeg(PKG_ROOT), [
+    '-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:r=8:d=1',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', path.join(media, 'asset.mp4'),
+  ], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(movie.status, 0, movie.error?.message || movie.stderr);
+  fs.writeFileSync(path.join(media, 'index.html'), `<!doctype html><html lang="zh-CN"><body>
+<script src="../base/js/loading.js"></script><link rel="stylesheet" href="../base/css/base.css">
+<script src="../base/js/engine.js"></script><script>
+V.config = {width:320,height:180,audioSrc:false,bgm:false,ui:{livePause:false,persist:false}};
+const mode = new URLSearchParams(location.search).get('mode');
+V.scene({duration:2,lines:[],build(root){
+  const media = {
+    image: '<img src="asset.svg" loading="lazy" width="64" height="64">',
+    svg: '<svg width="64" height="64"><image href="asset.svg" width="64" height="64"></image></svg>',
+    css: '<div style="width:64px;height:64px;background-image:url(asset.svg)"></div>',
+    video: '<video muted preload="none" width="64" height="64"><source src="missing-movie.mp4"><source src="asset.mp4"></video>',
+  };
+  root.innerHTML = '<div style="display:none"><img src="missing-hidden.svg"></div>' +
+    '<div data-video-optional style="background:url(missing-background.svg)"><img src="missing-decorative.svg"></div>' +
+    (media[mode] || '');
+  if (mode === 'clip') root.append(V.u.videoClip('asset.mp4', {style:'width:64px;height:64px'}));
+},update(){}});
+V.boot();
+</script></body></html>`);
+}
+
+async function checkStartupMedia(audit, mode) {
+  const page = await audit.openPage('/blank.html');
+  const asset = /\/startup-media\/asset\.(?:svg|mp4)$/;
+  let broken = true, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  await page.route(asset, async route => {
+    if (broken) await route.fulfill({ status: 404, body: '' });
+    else { await gate; await route.continue(); }
+  });
+  try {
+    const address = audit.origin + '/startup-media/?t=0.42&mode=' + mode;
+    await page.goto(address, { waitUntil: 'commit' });
+    const startup = page.locator('#video-loading');
+    await startup.getByText('加载失败', { exact: true }).waitFor({ timeout: 12000 });
+    assert.equal(await page.locator('#viewport').evaluate(el => el.inert), true);
+    broken = false;
+    const retried = page.waitForRequest(asset);
+    await startup.getByRole('button', { name: '重试', exact: true }).click();
+    await retried;
+    await startup.getByText('正在加载…', { exact: true }).waitFor();
+    assert.equal(await page.locator('#viewport').evaluate(el => el.inert), true);
+    release();
+    await page.waitForFunction(() => window.V?.getFrameState?.() && !document.getElementById('video-loading'));
+    assert.equal(page.url(), address);
+    assert.equal(await page.evaluate(() => V.getFrameState().now), 0.42);
+    if (mode === 'image') assert.equal(await page.locator('img[src="asset.svg"]').evaluate(el => el.naturalWidth), 64);
+    if (mode === 'video' || mode === 'clip') {
+      assert.ok(await page.locator('video').evaluate(el => el.readyState >= 2));
+    }
+  } finally { release(); await page.close(); }
+}
 
 async function checkOptionalLoading(audit) {
   const page = await audit.openPage('/blank.html');
@@ -572,6 +635,8 @@ await withAuditSession({ projectRoot: root }, async audit => {
   await checkOptionalLoading(audit);
   await checkStartupAssets(audit);
   await checkStartupRetryAtTarget(audit);
+  createStartupMedia();
+  for (const mode of ['image', 'svg', 'css', 'clip', 'video']) await checkStartupMedia(audit, mode);
   await checkLoadingInPpt(audit);
   await checkVisualPrepareRetry(audit);
   await checkAudioBuffering(audit);

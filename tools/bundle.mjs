@@ -82,7 +82,7 @@ function buildCollisionRules(collisions, prefixFrom, prefixTo) {
   });
 }
 
-const BUNDLED_SYS_DIRS = new Set(['base', 'assets', 'shared-assets', 'themes']);
+const BUNDLED_SYS_DIRS = new Set(['base', 'shared-assets', 'themes']);
 
 function normCmpPath(p) {
   const absolute = path.resolve(p);
@@ -158,23 +158,26 @@ function rewriteEntryFile(entryName, full, jsRules, docRules) {
   else if (entryName.endsWith('.html') || entryName.endsWith('.css')) rewriteTextRefs(full, docRules);
 }
 
-function walkRewriteVideoDirs(dirPath, depth, collisions) {
-  if (!fs.existsSync(dirPath)) return;
+function walkRewriteVideoDirs(sourceDir, outDir, depth, { collisions, versioned }, relative = '') {
+  const inAssets = relative === 'assets' || relative.startsWith('assets/');
   const docRules = buildDepthRules(depth, collisions, false);
   const jsRules = buildDepthRules(depth, collisions, true);
-  for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
-    const full = path.join(dirPath, entry.name);
+  // Walk the course's source tree so files copied from the shared assets alone stay unchanged.
+  for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+    const out = path.join(outDir, entry.name);
+    const rel = relative ? relative + '/' + entry.name : entry.name;
     if (entry.isDirectory()) {
       if (depth === 0 && BUNDLED_SYS_DIRS.has(entry.name)) continue;
-      walkRewriteVideoDirs(full, depth + 1, collisions);
+      walkRewriteVideoDirs(path.join(sourceDir, entry.name), out, depth + 1, { collisions, versioned }, rel);
     } else if (entry.isFile()) {
-      rewriteEntryFile(entry.name, full, jsRules, docRules);
+      const scriptRules = inAssets && !versioned.has(rel) ? docRules : jsRules;
+      rewriteEntryFile(entry.name, out, scriptRules, docRules);
     }
   }
 }
 
-function rewriteBundledRefs(targetOut, collisions) {
-  walkRewriteVideoDirs(targetOut, 0, collisions);
+function rewriteBundledRefs(srcVideo, targetOut, collisions, versioned) {
+  walkRewriteVideoDirs(srcVideo, targetOut, 0, { collisions, versioned: new Set(versioned) });
   const docColRules = buildCollisionRules(collisions, '(?<!\\.\\.\\/)\\.\\.\\/', './');
   const docRelRule = [/(?<!\.\.\/)\.\.\/(base|assets|themes)\//g, './$1/'];
   const themeCssColRules = buildCollisionRules(collisions, '(?<=\\.\\.\\/)', '');
@@ -187,48 +190,63 @@ function addPptxDownloadMetadata(courseDir) {
   if (html !== null) fs.writeFileSync(path.join(courseDir, 'index.html'), html, 'utf8');
 }
 
-function rewriteSingleAsset(file, relativePath, collisions) {
-  if (!relativePath.startsWith('assets/')) return;
-  const depth = relativePath.split('/').length - 1;
-  rewriteEntryFile(path.basename(file), file, buildDepthRules(depth, collisions, true), buildDepthRules(depth, collisions, false));
+// The callback builds synchronously so that every post-processing step finishes before publication.
+export function withBundleOutput(outDir, build, projectRoot = ROOT) {
+  const target = path.resolve(outDir);
+  assertSafeBundleOutDir(target, projectRoot);
+  const parent = path.dirname(target);
+  fs.mkdirSync(parent, { recursive: true });
+  const staging = fs.mkdtempSync(path.join(parent, '.html-video-bundle-'));
+  const next = path.join(staging, 'next'), previous = path.join(staging, 'previous');
+  let keepBackup = false;
+  try {
+    fs.mkdirSync(next);
+    build(next);
+    const hadOutput = Boolean(fs.lstatSync(target, { throwIfNoEntry: false }));
+    if (hadOutput) fs.renameSync(target, previous);
+    try {
+      fs.renameSync(next, target);
+    } catch (error) {
+      if (hadOutput) {
+        try { fs.renameSync(previous, target); }
+        catch (restoreError) {
+          keepBackup = true;
+          throw new AggregateError([error, restoreError], `Cannot replace bundle. Previous output is at ${previous}`);
+        }
+      }
+      throw error;
+    }
+  } finally {
+    if (!keepBackup) {
+      try { fs.rmSync(staging, { recursive: true, force: true, maxRetries: 2 }); }
+      catch (error) { console.warn(`Could not remove temporary bundle directory "${staging}": ${error.message}`); }
+    }
+  }
 }
 
 export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
   const videosDir = path.join(projectRoot, 'videos');
   const srcVideo = resolveVideoSource(videoId, videosDir);
   const targetOut = outDir || path.join(projectRoot, 'dist', videoId);
-  assertSafeBundleOutDir(targetOut, projectRoot);
   const versioned = readVersionedAssets(srcVideo);
+  withBundleOutput(targetOut, staging => {
+    const sharedAssetsDir = path.join(videosDir, 'assets');
+    copyIfExists(RUNTIME_BASE_DIR, path.join(staging, 'base'));
+    copyIfExists(path.join(videosDir, 'base'), path.join(staging, 'base'));
+    copyIfExists(sharedAssetsDir, path.join(staging, 'assets'));
+    copyIfExists(path.join(videosDir, 'themes'), path.join(staging, 'themes'));
+    const collisions = isolateCollidingSharedAssets(sharedAssetsDir, path.join(srcVideo, 'assets'), staging);
+    fs.cpSync(srcVideo, staging, { recursive: true, force: true });
 
-  fs.rmSync(targetOut, { recursive: true, force: true });
-  fs.mkdirSync(targetOut, { recursive: true });
-
-  const sharedAssetsDir = path.join(videosDir, 'assets');
-  copyIfExists(RUNTIME_BASE_DIR, path.join(targetOut, 'base'));
-  copyIfExists(path.join(videosDir, 'base'), path.join(targetOut, 'base'));
-  copyIfExists(sharedAssetsDir, path.join(targetOut, 'assets'));
-  copyIfExists(path.join(videosDir, 'themes'), path.join(targetOut, 'themes'));
-  const collisions = isolateCollidingSharedAssets(sharedAssetsDir, path.join(srcVideo, 'assets'), targetOut);
-  fs.cpSync(srcVideo, targetOut, { recursive: true, force: true });
-
-  rewriteBundledRefs(targetOut, collisions);
-  addPptxDownloadMetadata(targetOut);
-  const paths = versionBundleAssets(targetOut, versioned, (file, rel) => rewriteSingleAsset(file, rel, collisions));
-  writeVersionedCacheHeaders(targetOut, paths);
+    rewriteBundledRefs(srcVideo, staging, collisions, versioned);
+    addPptxDownloadMetadata(staging);
+    writeVersionedCacheHeaders(staging, versionBundleAssets(staging, versioned));
+  }, projectRoot);
   console.log(`✅ Bundled single video '${videoId}' -> ${targetOut}`);
   return targetOut;
 }
 
-export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
-  const targets = videoIds && videoIds.length ? videoIds : listVideoIds();
-  if (!targets.length) throw new Error('No videos found under videos/ to bundle.');
-  assertSafeBundleOutDir(outDir, ROOT);
-  const sources = targets.map(id => resolveVideoSource(id, VIDEOS_DIR));
-  const versioned = sources.map(readVersionedAssets);
-
-  fs.rmSync(outDir, { recursive: true, force: true });
-  fs.mkdirSync(outDir, { recursive: true });
-
+function buildStaticSite(outDir, targets, sources, versioned) {
   copyIfExists(RUNTIME_BASE_DIR, path.join(outDir, 'base'));
   copyIfExists(path.join(VIDEOS_DIR, 'base'), path.join(outDir, 'base'));
   copyIfExists(path.join(VIDEOS_DIR, 'assets'), path.join(outDir, 'assets'));
@@ -246,7 +264,14 @@ export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
     if (entry.isFile()) copyIfExists(path.join(VIDEOS_DIR, entry.name), path.join(outDir, entry.name));
   }
   writeVersionedCacheHeaders(outDir, versionedPaths);
+}
 
+export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
+  const targets = videoIds && videoIds.length ? videoIds : listVideoIds();
+  if (!targets.length) throw new Error('No videos found under videos/ to bundle.');
+  const sources = targets.map(id => resolveVideoSource(id, VIDEOS_DIR));
+  const versioned = sources.map(readVersionedAssets);
+  withBundleOutput(outDir, staging => buildStaticSite(staging, targets, sources, versioned));
   console.log(`✅ Bundled ${targets.length} video(s) + standalone runtime -> ${outDir}`);
   return outDir;
 }

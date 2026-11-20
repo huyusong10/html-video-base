@@ -42,12 +42,11 @@ export function readVersionedAssets(courseDir) {
   return [...files];
 }
 
-export function versionBundleAssets(courseDir, files, rewriteAsset) {
+export function versionBundleAssets(courseDir, files) {
   if (!files.length) return [];
   const names = new Map();
   for (const rel of files) {
     const file = path.join(courseDir, rel);
-    rewriteAsset?.(file, rel);
     const hash = hashAsset(fs.readFileSync(file)).slice(0, 24);
     const ext = path.posix.extname(rel);
     const versioned = `${rel.slice(0, rel.length - ext.length)}.sha256-${hash}${ext}`;

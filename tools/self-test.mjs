@@ -3096,7 +3096,7 @@ function verifyBundleProtectedDirectories() {
   const pkg = path.join(TEST_ROOT, 'guarded-package');
   fs.mkdirSync(path.join(pkg, 'tools/lib'), { recursive: true });
   fs.copyFileSync(path.join(PKG_ROOT, 'tools/bundle.mjs'), path.join(pkg, 'tools/bundle.mjs'));
-  fs.copyFileSync(path.join(PKG_ROOT, 'tools/lib/paths.mjs'), path.join(pkg, 'tools/lib/paths.mjs'));
+  fs.cpSync(path.join(PKG_ROOT, 'tools/lib'), path.join(pkg, 'tools/lib'), { recursive: true });
   const fileOut = path.join(TEST_ROOT, 'existing-file.txt');
   const markers = [
     path.join(TEST_ROOT, '.git/HEAD'), path.join(pkg, '.git/HEAD'),
@@ -3222,6 +3222,9 @@ async function verifyScaffoldAndStaticBundle() {
   fs.rmdirSync(path.dirname(model));
   verifyBundleSourcePreflight();
   verifyBundleProtectedDirectories();
+  const transaction = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools/test-bundle-output.mjs')],
+    { encoding: 'utf8', timeout: 30000 });
+  assert.equal(transaction.status, 0, transaction.error?.message || transaction.stdout + transaction.stderr);
 }
 
 async function runQuickChecks() {
