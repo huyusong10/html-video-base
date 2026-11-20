@@ -476,7 +476,7 @@ def build_scene_bgm_env(secs, n: int) -> np.ndarray:
     return np.clip(smoothed, 0.0, 2.0)
 
 
-def build_bgm_track(bgm_cfg, video_dir, dur, n, secs, active, has_voice, target_lufs=-16.0):
+def build_bgm_track(bgm_cfg, video_dir, dur, n, secs, active, has_voice, target_lufs=-15.0):
     if bgm_cfg['mode'] == 'none' or bgm_cfg['volume'] <= 0:
         return np.zeros((n, 2), dtype=np.float32)
     if bgm_cfg['mode'] == 'file':
@@ -696,21 +696,17 @@ def _limit_true_peak(sig: np.ndarray, limit_db: float = -1.5) -> np.ndarray:
     limit_lin = 10.0 ** (limit_db / 20.0)
     if float(np.abs(sig).max()) <= limit_lin:
         return sig
-    return _run_ffmpeg_float_filter(sig, f'alimiter=limit={limit_lin:.4f}:attack=5:release=50:level=disabled')
+    return _run_ffmpeg_float_filter(
+        sig, f'alimiter=limit={limit_lin:.4f}:attack=5:release=50:level=disabled:latency=1'
+    )
 
 
 def _resolve_master_filter(master_cfg) -> str:
     if master_cfg in (False, None, 'none', ''):
         return ''
-    if str(master_cfg).lower() == 'clean':
-        return 'highpass=f=70:poles=2'
-    return (
-        'highpass=f=80:poles=2,'
-        'equalizer=f=210:t=q:w=1.1:g=-2.5,'
-        'equalizer=f=3000:t=q:w=1.1:g=2.0,'
-        'highshelf=f=7500:t=q:w=0.7:g=-1.5,'
-        'acompressor=threshold=-20dB:ratio=2:attack=12:release=120:makeup=0dB'
-    )
+    if str(master_cfg).lower() == 'speech':
+        return 'highpass=f=75:poles=2,highshelf=f=6500:t=q:w=0.7:g=-2.5'
+    return 'highpass=f=70:poles=2'
 
 
 def _master_voice_track(voice: np.ndarray, has_voice: bool, stem_mask: np.ndarray, master_cfg, target_lufs: float) -> np.ndarray:
@@ -795,8 +791,8 @@ def main():
     video_dir = data.get('videoDir') or os.path.dirname(os.path.dirname(os.path.abspath(ref_out)))
     def_e = [0.45, 0.55, 0.62, 0.68, 0.65]
     secs = [dict(s, energy=s.get('energy', def_e[i] if i < len(def_e) else 0.58)) for i, s in enumerate(data['scenes'])]
-    master_cfg = data.get('audioMaster', 'speech')
-    target_lufs = float(np.clip(float(data.get('audioTargetLufs', -16.0)), -24.0, -12.0))
+    master_cfg = data.get('audioMaster', 'clean')
+    target_lufs = float(np.clip(float(data.get('audioTargetLufs', -15.0)), -24.0, -12.0))
     audio_encoder = data.get('audioEncoder', 'auto')
 
     voice, active, has_voice, stem_mask = mix_voice_track(

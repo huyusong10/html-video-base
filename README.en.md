@@ -174,7 +174,7 @@ Keep your main scene scripts clean in one primary language. Add extra languages 
 
 ### 4. Theme & Player Customization
 
-Project defaults in `V.projectDefaults` are overridden by `V.themeDefaults`, `V.config`, and locale settings, in that order. Load project and theme scripts before `video.config.js` so the player and CLI see the same settings. Values in `ui`, `tts`, `bgm`, and `sfx` can be overridden by field. Set `tts: false` or `bgm: false` to disable the respective track. Audio mixing defaults to `audioMaster: 'speech'`, `audioTargetLufs: -16`, and `audioEncoder: 'auto'` (preferring `libfdk_aac > aac_at > aac_mf (>=96k) > aac`), and also supports `audioMaster: 'clean' | false`, `audioBitrate`, and `bgmBitrate`.
+Project defaults in `V.projectDefaults` are overridden by `V.themeDefaults`, `V.config`, and locale settings, in that order. Load project and theme scripts before `video.config.js` so the player and CLI see the same settings. Values in `ui`, `tts`, `bgm`, and `sfx` can be overridden by field. Set `tts: false` or `bgm: false` to disable the respective track. Audio mixing defaults to `audioMaster: 'clean'`, `audioTargetLufs: -15`, and `audioEncoder: 'auto'` (preferring `libfdk_aac > aac_at > aac_mf (>=96k) > aac`), and also supports `audioMaster: 'speech' | false`, `audioBitrate`, and `bgmBitrate`.
 
 Pronunciation rules in `tts.pronunciation` are inherited per term. Use `false` for a term to keep its original text in speech synthesis. Rules match literal text, favor longer matches, and leave subtitles unchanged. Set `tts.polyphoneFix: false` to skip the built-in Chinese readings.
 

@@ -180,7 +180,7 @@ V.scenes.push({
 
 ### 4. 默认配置与播放器定制
 
-`V.getCfg()` 依次读取工程 `V.projectDefaults`、主题 `V.themeDefaults`、单片 `V.config` 和语言覆写。全都未填写时，框架使用自己的默认值。工程与主题脚本放在 `video.config.js` 前加载，浏览器和构建工具会读取同一份。未填写的字段继承上层；`ui`、`tts`、`bgm` 和 `sfx` 对象允许只改其中一个字段，数组整体替换。`bgm: false` 和 `tts: false` 可分别关闭配乐和配音。混音默认开启 `audioMaster: 'speech'`、`audioTargetLufs: -16`、`audioEncoder: 'auto'`（按 `libfdk_aac > aac_at > aac_mf (>=96k) > aac` 优先选择高质量编码器），也可设置 `audioMaster: 'clean' | false`、`audioBitrate` 与 `bgmBitrate` 覆盖。
+`V.getCfg()` 依次读取工程 `V.projectDefaults`、主题 `V.themeDefaults`、单片 `V.config` 和语言覆写。全都未填写时，框架使用自己的默认值。工程与主题脚本放在 `video.config.js` 前加载，浏览器和构建工具会读取同一份。未填写的字段继承上层；`ui`、`tts`、`bgm` 和 `sfx` 对象允许只改其中一个字段，数组整体替换。`bgm: false` 和 `tts: false` 可分别关闭配乐和配音。混音默认开启 `audioMaster: 'clean'`、`audioTargetLufs: -15`、`audioEncoder: 'auto'`（按 `libfdk_aac > aac_at > aac_mf (>=96k) > aac` 优先选择高质量编码器），也可设置 `audioMaster: 'speech' | false`、`audioBitrate` 与 `bgmBitrate` 覆盖。
 
 发音写在 `tts.pronunciation`，例如 `{ 'Win+L': 'Win 加 L', AI: 'A I' }`。词表按词覆盖，同一个词填 `false` 时保留原写法。框架按字面匹配，长词优先，每处只替换一次。`tts.polyphoneFix: false` 只关闭通用多音词。发音词表不修改字幕。原有顶层 `pronunciation` 字段仍可读取。
 
