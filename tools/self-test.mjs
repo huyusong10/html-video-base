@@ -3162,18 +3162,25 @@ function verifyLocalizedRemixAndBgmVolume(videoDir) {
   fs.mkdirSync(bgmCheckDir, { recursive: true });
   const cuesJson = path.join(bgmCheckDir, 'cues.json');
   const bgmWav = path.join(bgmCheckDir, 'bgm.wav');
-  fs.writeFileSync(cuesJson, JSON.stringify({
-    duration: 1.5,
-    videoDir: bgmCheckDir,
-    bgm: { preset: 'ambient', volume: 0.12 },
-    sfx: false,
-    scenes: [{ title: 'S1', start: 0, duration: 1.5, cues: [] }],
-  }), 'utf8');
-  const r = spawnSync(py, [path.join(PKG_ROOT, 'tools/mix.py'), cuesJson, bgmCheckDir, '', bgmWav], { encoding: 'utf8' });
-  assert.equal(r.status, 0, `BGM-only mix.py failed: ${r.stderr}`);
-  const peakRes = spawnSync(py, ['-c', `import soundfile as sf, numpy as np; y,_=sf.read(${JSON.stringify(bgmWav)}); print(float(np.abs(y).max()))`], { encoding: 'utf8' });
-  const bgmPeak = parseFloat((peakRes.stdout || '').trim());
-  assert.ok(bgmPeak > 0.03 && bgmPeak < 0.35, `BGM-only volume=0.12 must preserve configured gain (got peak=${bgmPeak})`);
+  const configuredGain = 0.12;
+  const [referencePeak, bgmPeak] = [1, configuredGain].map(volume => {
+    fs.writeFileSync(cuesJson, JSON.stringify({
+      duration: 1.5,
+      videoDir: bgmCheckDir,
+      bgm: { preset: 'ambient', volume },
+      sfx: false,
+      scenes: [{ title: 'S1', start: 0, duration: 1.5, cues: [] }],
+    }), 'utf8');
+    const r = spawnSync(py, [path.join(PKG_ROOT, 'tools/mix.py'), cuesJson, bgmCheckDir, '', bgmWav], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `BGM-only mix.py failed at volume=${volume}: ${r.stderr}`);
+    const peakRes = spawnSync(py, ['-c', 'import soundfile as sf, numpy as np, sys; y,_=sf.read(sys.argv[1]); print(float(np.abs(y).max()))', bgmWav], { encoding: 'utf8' });
+    assert.equal(peakRes.status, 0, `Reading BGM peak failed at volume=${volume}: ${peakRes.stderr}`);
+    return Number.parseFloat(peakRes.stdout);
+  });
+  // Allow rounding from the two 16-bit PCM outputs.
+  const expectedPeak = referencePeak * configuredGain;
+  assert.ok(bgmPeak > 0 && Math.abs(bgmPeak - expectedPeak) <= 2 / 32768,
+    `BGM-only volume=${configuredGain} must preserve configured gain (expected peak=${expectedPeak}, got ${bgmPeak})`);
 }
 
 async function verifyScaffoldAndStaticBundle() {
