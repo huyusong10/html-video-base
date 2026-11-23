@@ -158,18 +158,33 @@
     return url;
   }
 
+  function isLocalFileOrigin(origin) {
+    return origin === 'null' || origin === 'file://';
+  }
+
+  function resolveIframeMessaging(definition, url) {
+    if (!definition.origin && typeof location !== 'undefined'
+        && location.protocol === 'file:' && url.protocol === 'file:') {
+      return { isLocalFile: true, targetOrigin: '*', acceptOrigin: 'null' };
+    }
+    const origin = definition.origin || url.origin;
+    if (!origin || origin === '*' || origin === 'null') {
+      throw new TypeError('iframeSource requires an exact HTTP(S) origin');
+    }
+    return { isLocalFile: false, targetOrigin: origin, acceptOrigin: origin };
+  }
+
   function createIframeConnection(definition, signal, reload = false) {
     const frame = iframeElement(definition);
     const url = iframeUrl(definition, frame);
-    const origin = definition.origin || url.origin;
-    if (!origin || origin === '*' || origin === 'null') throw new TypeError('iframeSource requires an exact HTTP(S) origin');
+    const messaging = resolveIframeMessaging(definition, url);
     const session = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     const pending = new Map();
     let sequence = 0, closed = false, completed = false, receivedHello = false, closedError;
 
     function send(type, requestId, payload = {}) {
       frame.contentWindow?.postMessage({ protocol: PROTOCOL, sourceId: definition.id, session,
-        type, requestId, ...payload }, origin);
+        type, requestId, ...payload }, messaging.targetOrigin);
     }
 
     function request(type, payload, requestSignal) {
@@ -188,7 +203,8 @@
 
     function receive(event) {
       const data = event.data;
-      if (event.source !== frame.contentWindow || event.origin !== origin) return;
+      const originOk = messaging.isLocalFile ? isLocalFileOrigin(event.origin) : event.origin === messaging.acceptOrigin;
+      if (event.source !== frame.contentWindow || !originOk) return;
       if (data?.protocol !== PROTOCOL || data.sourceId !== definition.id || data.session !== session) return;
       if (data.requestId === 0) receivedHello = true;
       const entry = pending.get(data.requestId);

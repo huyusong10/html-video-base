@@ -394,6 +394,11 @@
     downloadPptx: '下载 PPTX',
     downloadPptxImage: '图片版',
     downloadPptxEditable: '可编辑版（混合）',
+    downloadOfflinePack: '下载离线包',
+    offlinePacking: '正在打包离线包 {pct}%',
+    offlineDone: '离线包已开始下载',
+    offlineCancelled: '已取消离线打包',
+    offlineFailed: '离线打包失败',
     switchToVideo: '切换为视频播放',
   };
 
@@ -464,6 +469,11 @@
     downloadPptx: '下載 PPTX',
     downloadPptxImage: '圖片版',
     downloadPptxEditable: '可編輯版（混合）',
+    downloadOfflinePack: '下載離線包',
+    offlinePacking: '正在打包離線包 {pct}%',
+    offlineDone: '離線包已開始下載',
+    offlineCancelled: '已取消離線打包',
+    offlineFailed: '離線打包失敗',
     switchToVideo: '切換為影片播放',
   };
 
@@ -535,6 +545,11 @@
     downloadPptx: 'Download PPTX',
     downloadPptxImage: 'Image slides',
     downloadPptxEditable: 'Editable slides (hybrid)',
+    downloadOfflinePack: 'Download offline pack',
+    offlinePacking: 'Packing offline bundle {pct}%',
+    offlineDone: 'Offline bundle download started',
+    offlineCancelled: 'Offline download cancelled',
+    offlineFailed: 'Offline download failed',
     switchToVideo: 'Switch to Video Mode',
   };
 
@@ -4260,18 +4275,33 @@
     return url;
   }
 
+  function isLocalFileOrigin(origin) {
+    return origin === 'null' || origin === 'file://';
+  }
+
+  function resolveIframeMessaging(definition, url) {
+    if (!definition.origin && typeof location !== 'undefined'
+        && location.protocol === 'file:' && url.protocol === 'file:') {
+      return { isLocalFile: true, targetOrigin: '*', acceptOrigin: 'null' };
+    }
+    const origin = definition.origin || url.origin;
+    if (!origin || origin === '*' || origin === 'null') {
+      throw new TypeError('iframeSource requires an exact HTTP(S) origin');
+    }
+    return { isLocalFile: false, targetOrigin: origin, acceptOrigin: origin };
+  }
+
   function createIframeConnection(definition, signal, reload = false) {
     const frame = iframeElement(definition);
     const url = iframeUrl(definition, frame);
-    const origin = definition.origin || url.origin;
-    if (!origin || origin === '*' || origin === 'null') throw new TypeError('iframeSource requires an exact HTTP(S) origin');
+    const messaging = resolveIframeMessaging(definition, url);
     const session = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     const pending = new Map();
     let sequence = 0, closed = false, completed = false, receivedHello = false, closedError;
 
     function send(type, requestId, payload = {}) {
       frame.contentWindow?.postMessage({ protocol: PROTOCOL, sourceId: definition.id, session,
-        type, requestId, ...payload }, origin);
+        type, requestId, ...payload }, messaging.targetOrigin);
     }
 
     function request(type, payload, requestSignal) {
@@ -4290,7 +4320,8 @@
 
     function receive(event) {
       const data = event.data;
-      if (event.source !== frame.contentWindow || event.origin !== origin) return;
+      const originOk = messaging.isLocalFile ? isLocalFileOrigin(event.origin) : event.origin === messaging.acceptOrigin;
+      if (event.source !== frame.contentWindow || !originOk) return;
       if (data?.protocol !== PROTOCOL || data.sourceId !== definition.id || data.session !== session) return;
       if (data.requestId === 0) receivedHello = true;
       const entry = pending.get(data.requestId);
@@ -4984,6 +5015,75 @@
       return link;
     });
     bar.insertBefore(h('div', { class: 'pptx-wrap' }, trigger, h('div', { class: 'pptx-menu' }, links)), fullButton);
+  }
+
+  function resolveBaseAssetUrl(rel) {
+    const tag = document.querySelector('script[src*="base/js/engine.js"]');
+    if (tag && tag.src) return new URL(rel, tag.src).toString();
+    return `./base/js/${rel}`;
+  }
+
+  async function ensureOfflinePackLib() {
+    if (globalThis.HtmlVideoOfflinePack) return globalThis.HtmlVideoOfflinePack;
+    await loadOptionalScript(resolveBaseAssetUrl('offline-pack.js'));
+    if (!globalThis.HtmlVideoOfflinePack) throw new Error('Failed loading offline-pack runtime');
+    return globalThis.HtmlVideoOfflinePack;
+  }
+
+  function addOfflinePackDownload(bar, uiCfg) {
+    if (RECORD || location.protocol === 'file:') return;
+    const link = document.querySelector('link[rel="alternate"][data-offline-pack][href]');
+    if (!link) return;
+    const fullButton = bar.querySelector('[data-act="full"]');
+    const idleLabel = uiText('downloadOfflinePack');
+    const btn = h('button', {
+      type: 'button',
+      class: 'ctrl-rbtn ctrl-icon-btn ctrl-offline-download',
+      'data-act': 'offline-pack',
+      title: idleLabel,
+      'aria-label': idleLabel,
+    }, makeCtrlIcon(uiCfg.icons.download));
+    let activeAbort = null;
+
+    function resetBtn() {
+      activeAbort = null;
+      btn.removeAttribute('aria-busy');
+      btn.style.opacity = '';
+      btn.title = idleLabel;
+      btn.setAttribute('aria-label', idleLabel);
+    }
+
+    async function startOfflineDownload() {
+      const ctl = new AbortController();
+      activeAbort = ctl;
+      btn.setAttribute('aria-busy', 'true');
+      btn.style.opacity = '0.65';
+      try {
+        const lib = await ensureOfflinePackLib();
+        await lib.downloadOfflinePack(link.href, {
+          signal: ctl.signal,
+          onProgress(p) {
+            if (activeAbort !== ctl) return;
+            const msg = uiText('offlinePacking', { pct: p.percent });
+            btn.title = msg;
+            btn.setAttribute('aria-label', msg);
+          },
+        });
+        flashOsd(uiText('offlineDone'), 1400);
+      } catch (err) {
+        if (err && err.name === 'AbortError') flashOsd(uiText('offlineCancelled'), 1200);
+        else { console.error(err); flashOsd(uiText('offlineFailed'), 1600); }
+      } finally {
+        if (activeAbort === ctl) resetBtn();
+      }
+    }
+
+    btn.onclick = e => {
+      e.stopPropagation();
+      if (activeAbort) { activeAbort.abort(); return; }
+      startOfflineDownload();
+    };
+    bar.insertBefore(btn, fullButton);
   }
 
   function buildControlsBar(cfg, uiCfg) {
@@ -6265,6 +6365,7 @@
   function buildPptUI(cfg, uiCfg) {
     const bar = document.getElementById('controls');
     addPptxDownload(bar, cfg, uiCfg);
+    addOfflinePackDownload(bar, uiCfg);
     ui.webfull = bar.querySelector('[data-act=webfull]');
     ui.full = bar.querySelector('[data-act=full]');
     pptRt.init(bar, uiCfg);
@@ -6327,6 +6428,7 @@
       setOpenMenu(bar, bar.dataset.menu === 'sound' ? '' : 'sound');
     };
     if (ui.toPpt) ui.toPpt.onclick = e => { e.stopPropagation(); pause(); navigateModeSwitch(true, Math.max(0, V.scenes.indexOf(current))); };
+    addOfflinePackDownload(bar, uiCfg);
     if (ui.webfull) ui.webfull.onclick = () => setWebFull(!webFull);
     ui.full.onclick = toggleOsFull;
     if (sandboxState.backEl) {

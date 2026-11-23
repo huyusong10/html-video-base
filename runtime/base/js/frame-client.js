@@ -10,11 +10,25 @@
     return location.origin;
   }
 
+  function isLocalFileOrigin(origin) {
+    return origin === 'null' || origin === 'file://';
+  }
+
+  function resolveClientMessaging(options) {
+    if (!options.origin && typeof location !== 'undefined' && location.protocol === 'file:') {
+      return { isLocalFile: true, origin: 'null', replyOrigin: '*' };
+    }
+    const origin = parentOrigin(options);
+    if (!origin || origin === '*' || origin === 'null') {
+      throw new TypeError('Frame client requires an exact parent origin');
+    }
+    return { isLocalFile: false, origin, replyOrigin: origin };
+  }
+
   root.VFrameClient = {
     connect(options) {
       if (typeof options?.prepare !== 'function') throw new TypeError('Frame client requires prepare(state,frame,context)');
-      const origin = parentOrigin(options);
-      if (!origin || origin === '*' || origin === 'null') throw new TypeError('Frame client requires an exact parent origin');
+      const messaging = resolveClientMessaging(options);
       let connection = null, initialization = null, lifetime = null, current = null;
       let ready = false, frameId = null, disposed = false;
       let cleanup = Promise.resolve();
@@ -48,7 +62,12 @@
           const previousCleanup = release();
           lifetime = new AbortController();
           ready = false;
-          connection = { sourceId: data.sourceId, session: data.session, window: event.source, origin: event.origin };
+          connection = {
+            sourceId: data.sourceId,
+            session: data.session,
+            window: event.source,
+            origin: messaging.isLocalFile ? '*' : event.origin,
+          };
           const initLifetime = lifetime;
           initialization = previousCleanup.then(() => {
             if (initLifetime.signal.aborted) throw aborted();
@@ -87,7 +106,8 @@
 
       function receive(event) {
         const data = event.data;
-        if (disposed || event.source !== root.parent || event.origin !== origin) return;
+        const originOk = messaging.isLocalFile ? isLocalFileOrigin(event.origin) : event.origin === messaging.origin;
+        if (disposed || event.source !== root.parent || !originOk) return;
         if (data?.protocol !== PROTOCOL || typeof data.session !== 'string' || !data.sourceId) return;
         if (data.type === 'hello') { initialize(data, event); return; }
         if (!sameConnection(data)) return;

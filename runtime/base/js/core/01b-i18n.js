@@ -68,6 +68,11 @@
     downloadPptx: '下载 PPTX',
     downloadPptxImage: '图片版',
     downloadPptxEditable: '可编辑版（混合）',
+    downloadOfflinePack: '下载离线包',
+    offlinePacking: '正在打包离线包 {pct}%',
+    offlineDone: '离线包已开始下载',
+    offlineCancelled: '已取消离线打包',
+    offlineFailed: '离线打包失败',
     switchToVideo: '切换为视频播放',
   };
 
@@ -138,6 +143,11 @@
     downloadPptx: '下載 PPTX',
     downloadPptxImage: '圖片版',
     downloadPptxEditable: '可編輯版（混合）',
+    downloadOfflinePack: '下載離線包',
+    offlinePacking: '正在打包離線包 {pct}%',
+    offlineDone: '離線包已開始下載',
+    offlineCancelled: '已取消離線打包',
+    offlineFailed: '離線打包失敗',
     switchToVideo: '切換為影片播放',
   };
 
@@ -209,6 +219,11 @@
     downloadPptx: 'Download PPTX',
     downloadPptxImage: 'Image slides',
     downloadPptxEditable: 'Editable slides (hybrid)',
+    downloadOfflinePack: 'Download offline pack',
+    offlinePacking: 'Packing offline bundle {pct}%',
+    offlineDone: 'Offline bundle download started',
+    offlineCancelled: 'Offline download cancelled',
+    offlineFailed: 'Offline download failed',
     switchToVideo: 'Switch to Video Mode',
   };
 

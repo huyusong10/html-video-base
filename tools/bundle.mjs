@@ -5,25 +5,44 @@ import path from 'node:path';
 import { readPageWithPptxDownload } from './lib/pptx-assets.mjs';
 import { readVersionedAssets, versionBundleAssets, writeVersionedCacheHeaders } from './lib/versioned-assets.mjs';
 import {
+  OFFLINE_MANIFEST_FILE,
+  OFFLINE_MANIFEST_MIME,
+  collectOfflineEntries,
+  writeOfflineManifest,
+  injectOfflineManifestLink,
+  injectOfflineUnzipGuard,
+} from './lib/offline-manifest.mjs';
+import {
   ROOT, PKG_ROOT, VIDEOS_DIR, RUNTIME_BASE_DIR, TEMPLATES_DIR,
   listVideoIds, normalizeCliArgs, isMainModule,
 } from './lib/paths.mjs';
+
+export {
+  OFFLINE_MANIFEST_FILE,
+  OFFLINE_MANIFEST_MIME,
+  collectOfflineEntries,
+  writeOfflineManifest,
+  injectOfflineManifestLink,
+  injectOfflineUnzipGuard,
+};
 
 function parseBundleArgs(rawArgv) {
   const argv = normalizeCliArgs(rawArgv);
   let outDir = '';
   let single = false;
+  let offlinePack = false;
   const ids = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--out' && i + 1 < argv.length) { outDir = path.resolve(argv[++i]); continue; }
     if (a === '--single') { single = true; continue; }
+    if (a === '--offline-pack') { offlinePack = true; continue; }
     if (a === '--all' || a.startsWith('--')) continue;
     ids.push(a);
   }
   const targets = ids.length ? ids : listVideoIds();
   const resolvedOut = outDir || (single && targets[0] ? path.join(ROOT, 'dist', targets[0]) : path.join(ROOT, 'dist'));
-  return { targets, outDir: resolvedOut, single };
+  return { targets, outDir: resolvedOut, single, offlinePack };
 }
 
 function copyIfExists(src, dst) {
@@ -224,7 +243,7 @@ export function withBundleOutput(outDir, build, projectRoot = ROOT) {
   }
 }
 
-export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
+export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT, options = {}) {
   const videosDir = path.join(projectRoot, 'videos');
   const srcVideo = resolveVideoSource(videoId, videosDir);
   const targetOut = outDir || path.join(projectRoot, 'dist', videoId);
@@ -241,6 +260,15 @@ export function bundleSingleVideo(videoId, outDir, projectRoot = ROOT) {
     rewriteBundledRefs(srcVideo, staging, collisions, versioned);
     addPptxDownloadMetadata(staging);
     writeVersionedCacheHeaders(staging, versionBundleAssets(staging, versioned));
+    if (options.offlinePack) {
+      injectOfflineManifestLink(path.join(staging, 'index.html'), './offline-manifest.json');
+      injectOfflineUnzipGuard(path.join(staging, 'index.html'), { checkGlobal: 'V' });
+      writeOfflineManifest(staging, {
+        rootName: options.rootName || `${videoId}-offline`,
+        filename: options.filename || `${videoId}-offline.zip`,
+        label: options.label || '',
+      });
+    }
   }, projectRoot);
   console.log(`✅ Bundled single video '${videoId}' -> ${targetOut}`);
   return targetOut;
@@ -266,22 +294,33 @@ function buildStaticSite(outDir, targets, sources, versioned) {
   writeVersionedCacheHeaders(outDir, versionedPaths);
 }
 
-export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist')) {
+export function bundleStaticSite(videoIds, outDir = path.join(ROOT, 'dist'), options = {}) {
   const targets = videoIds && videoIds.length ? videoIds : listVideoIds();
   if (!targets.length) throw new Error('No videos found under videos/ to bundle.');
   const sources = targets.map(id => resolveVideoSource(id, VIDEOS_DIR));
   const versioned = sources.map(readVersionedAssets);
-  withBundleOutput(outDir, staging => buildStaticSite(staging, targets, sources, versioned));
+  withBundleOutput(outDir, staging => {
+    buildStaticSite(staging, targets, sources, versioned);
+    if (options.offlinePack) {
+      injectOfflineManifestLink(path.join(staging, 'index.html'), './offline-manifest.json');
+      injectOfflineUnzipGuard(path.join(staging, 'index.html'), { checkGlobal: 'VIDEO_MANIFEST' });
+      writeOfflineManifest(staging, {
+        rootName: options.rootName || 'video-site-offline',
+        filename: options.filename || 'video-site-offline.zip',
+        label: options.label || '',
+      });
+    }
+  });
   console.log(`✅ Bundled ${targets.length} video(s) + standalone runtime -> ${outDir}`);
   return outDir;
 }
 
 if (isMainModule(import.meta.url)) {
-  const { targets, outDir, single } = parseBundleArgs(process.argv.slice(2));
+  const { targets, outDir, single, offlinePack } = parseBundleArgs(process.argv.slice(2));
   if (single) {
     if (targets.length !== 1) throw new Error(`"--single" requires a single video id, got: ${targets.join(', ') || '(none)'}`);
-    bundleSingleVideo(targets[0], outDir, ROOT);
+    bundleSingleVideo(targets[0], outDir, ROOT, { offlinePack });
   } else {
-    bundleStaticSite(targets, outDir);
+    bundleStaticSite(targets, outDir, { offlinePack });
   }
 }

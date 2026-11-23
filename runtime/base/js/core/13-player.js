@@ -124,6 +124,75 @@
     bar.insertBefore(h('div', { class: 'pptx-wrap' }, trigger, h('div', { class: 'pptx-menu' }, links)), fullButton);
   }
 
+  function resolveBaseAssetUrl(rel) {
+    const tag = document.querySelector('script[src*="base/js/engine.js"]');
+    if (tag && tag.src) return new URL(rel, tag.src).toString();
+    return `./base/js/${rel}`;
+  }
+
+  async function ensureOfflinePackLib() {
+    if (globalThis.HtmlVideoOfflinePack) return globalThis.HtmlVideoOfflinePack;
+    await loadOptionalScript(resolveBaseAssetUrl('offline-pack.js'));
+    if (!globalThis.HtmlVideoOfflinePack) throw new Error('Failed loading offline-pack runtime');
+    return globalThis.HtmlVideoOfflinePack;
+  }
+
+  function addOfflinePackDownload(bar, uiCfg) {
+    if (RECORD || location.protocol === 'file:') return;
+    const link = document.querySelector('link[rel="alternate"][data-offline-pack][href]');
+    if (!link) return;
+    const fullButton = bar.querySelector('[data-act="full"]');
+    const idleLabel = uiText('downloadOfflinePack');
+    const btn = h('button', {
+      type: 'button',
+      class: 'ctrl-rbtn ctrl-icon-btn ctrl-offline-download',
+      'data-act': 'offline-pack',
+      title: idleLabel,
+      'aria-label': idleLabel,
+    }, makeCtrlIcon(uiCfg.icons.download));
+    let activeAbort = null;
+
+    function resetBtn() {
+      activeAbort = null;
+      btn.removeAttribute('aria-busy');
+      btn.style.opacity = '';
+      btn.title = idleLabel;
+      btn.setAttribute('aria-label', idleLabel);
+    }
+
+    async function startOfflineDownload() {
+      const ctl = new AbortController();
+      activeAbort = ctl;
+      btn.setAttribute('aria-busy', 'true');
+      btn.style.opacity = '0.65';
+      try {
+        const lib = await ensureOfflinePackLib();
+        await lib.downloadOfflinePack(link.href, {
+          signal: ctl.signal,
+          onProgress(p) {
+            if (activeAbort !== ctl) return;
+            const msg = uiText('offlinePacking', { pct: p.percent });
+            btn.title = msg;
+            btn.setAttribute('aria-label', msg);
+          },
+        });
+        flashOsd(uiText('offlineDone'), 1400);
+      } catch (err) {
+        if (err && err.name === 'AbortError') flashOsd(uiText('offlineCancelled'), 1200);
+        else { console.error(err); flashOsd(uiText('offlineFailed'), 1600); }
+      } finally {
+        if (activeAbort === ctl) resetBtn();
+      }
+    }
+
+    btn.onclick = e => {
+      e.stopPropagation();
+      if (activeAbort) { activeAbort.abort(); return; }
+      startOfflineDownload();
+    };
+    bar.insertBefore(btn, fullButton);
+  }
+
   function buildControlsBar(cfg, uiCfg) {
     const homeTitle = cfg.homeLabel || uiText('home');
     const homeLink = !cfg.homeUrl
@@ -1403,6 +1472,7 @@
   function buildPptUI(cfg, uiCfg) {
     const bar = document.getElementById('controls');
     addPptxDownload(bar, cfg, uiCfg);
+    addOfflinePackDownload(bar, uiCfg);
     ui.webfull = bar.querySelector('[data-act=webfull]');
     ui.full = bar.querySelector('[data-act=full]');
     pptRt.init(bar, uiCfg);
@@ -1465,6 +1535,7 @@
       setOpenMenu(bar, bar.dataset.menu === 'sound' ? '' : 'sound');
     };
     if (ui.toPpt) ui.toPpt.onclick = e => { e.stopPropagation(); pause(); navigateModeSwitch(true, Math.max(0, V.scenes.indexOf(current))); };
+    addOfflinePackDownload(bar, uiCfg);
     if (ui.webfull) ui.webfull.onclick = () => setWebFull(!webFull);
     ui.full.onclick = toggleOsFull;
     if (sandboxState.backEl) {
