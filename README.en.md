@@ -219,7 +219,7 @@ Place `<script src="../base/js/loading.js"></script>` at the start of the course
 | `html-video audit [id ...] [--strict] [--screenshots <dir>]` | Headless Chromium check for layout, images, and `f(t)` idempotency |
 | `html-video storyboard [id] [out.html] [--per-cue] [--pdf]` | Export single-file visual storyboard review sheet |
 | `html-video pptx <id> [out.pptx \| --publish] [--mode image\|editable] [--pages 1,3-5] [--lang en]` | Export image slides or hybrid editable slides with speaker notes |
-| `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--no-bgm] [--no-cache]` | Render 1080p MP4 with incremental scene caching |
+| `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--fps N] [--res 4k\|WxH] [--scale N] [--encoder auto\|libx264\|h264_nvenc\|h264_qsv] [--quality N] [--preset P] [--no-bgm] [--no-cache]` | Render MP4 with incremental scene caching, HiDPI 4K scaling, custom FPS, and GPU hardware encoding |
 | `html-video bundle [id ... \| --single \| --all] [--out dist]` | Bundle standalone static site without `node_modules` |
 
 Enable `ppt: true` to export a course as PPTX. The default exports every page as a full-slide image. Use `--mode editable` for a hybrid export that converts explicitly marked elements to native text, shapes, or line charts and captures the rest as an image. `--pages` accepts the page numbers shown in the browser's PPT mode.

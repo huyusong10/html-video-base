@@ -225,7 +225,7 @@ V.scenes.push({
 | `html-video audit [id ...] [--strict] [--screenshots <dir>]` | 无头浏览器版面、图片与幂等性巡检 |
 | `html-video storyboard [id] [out.html] [--per-cue] [--pdf]` | 导出图文分镜审阅单 |
 | `html-video pptx <id> [out.pptx \| --publish] [--mode image\|editable] [--pages 1,3-5] [--lang en]` | 按 PPT 页序导出图片版或混合可编辑版，并写入演讲者备注 |
-| `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--no-bgm] [--no-cache]` | 按幕缓存增量导出高清 MP4 |
+| `html-video render [id] [out.mp4] [--workers N] [--scene K] [--range a:b] [--fps N] [--res 4k\|WxH] [--scale N] [--encoder auto\|libx264\|h264_nvenc\|h264_qsv] [--quality N] [--preset P] [--no-bgm] [--no-cache]` | 按幕缓存增量导出 MP4（支持 4K 等比 HiDPI、自定义帧率与显卡硬编） |
 | `html-video bundle [id ... \| --single \| --all] [--out dist]` | 打包免 `node_modules` 的纯静态站点 |
 
 课程启用 `ppt: true` 后可导出 PPTX。默认导出全部 PPT 页的图片版，`--pages` 按网页 PPT 模式的页码选页，`--mode editable` 导出混合可编辑版。两版使用相同的页序和演讲者备注。

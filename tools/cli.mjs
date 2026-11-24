@@ -309,7 +309,7 @@ function printHelp() {
     '  html-video audit [video-id ...] [--strict] [--screenshots <dir>] [--lang en]',
     '  html-video storyboard [video-id] [out.html] [--per-cue] [--pdf] [--lang en]',
     '  html-video pptx <video-id> [out.pptx | --publish] [--mode image|editable] [--pages 1,3-5] [--lang en]',
-    '  html-video render [video-id] [output.mp4] [--workers N] [--scene K] [--range t0:t1] [--fps N] [--lang en] [--no-bgm] [--no-cache] [--no-frame-reuse]',
+    '  html-video render [video-id] [output.mp4] [--workers N] [--scene K] [--range t0:t1] [--fps N] [--res 4k|1080p|WxH] [--scale N] [--encoder auto|libx264|h264_nvenc|h264_qsv|...] [--quality N] [--preset P] [--lang en] [--no-bgm] [--no-cache] [--no-frame-reuse]',
     '  html-video bundle [video-id ... | --single | --all] [--offline-pack] [--out dist]',
     '',
     `Docs: npx html-video docs | ${path.join(PKG_ROOT, 'README.md')}`,

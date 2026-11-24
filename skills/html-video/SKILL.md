@@ -36,7 +36,7 @@ project-root/
 | `npx html-video mix <id> [--bitrate 128k]` | 台词未改时免联网快速重混：直接复用缓存干声或从现有 `soundtrack.m4a` 切片，秒级重混 `bgm`/`sfx`/停顿间隔 |
 | `npx html-video verify [id] [--stamp-baked]` | 校验语义词锚、字幕分段与物理双音轨时长零漂移 |
 | `npx html-video audit [id] [--screenshots .runtime/audit]` | 无头浏览器巡检破损图、越界、字幕遮挡、兄弟卡片压盖、小字号与 `f(t)` 幂等性 |
-| `npx html-video render <id> [out.mp4] [--scene K] [--no-bgm]` | 按幕增量缓存 + 静止帧复用导出 1080p MP4（`--no-bgm` 可导出纯解说无配乐版） |
+| `npx html-video render <id> [out.mp4] [--scene K] [--fps N] [--res 4k] [--scale N] [--encoder auto\|libx264\|h264_nvenc\|h264_qsv] [--no-bgm]` | 按幕增量缓存 + 静止帧复用导出 MP4（支持 4K 等比缩放、自定义帧率与硬编，`--no-bgm` 导出纯解说版） |
 | `npx html-video pptx <id> [out.pptx \| --publish] [--mode image\|editable] [--pages 1,3-5]` | 默认导出图片版。混合可编辑版将课程标记的对象写入 PPTX。加 `--publish` 后可从 PPT 工具栏下载。 |
 | `npx html-video bundle <id> --single --out dist` | 打包免依赖静态目录（`--all` 打包全部视频及项目自有文件） |
 

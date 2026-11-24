@@ -2700,11 +2700,16 @@ function assertCliFails(args, msg) {
 
 function verifyInvalidRenderCliArgs() {
   const out = path.join(TEST_ROOT, 'invalid-render.mp4');
+  const errors = {
+    '--fps': /Invalid FPS|Render frame count/i, '--range': /--range/i, '--scene': /--scene/i,
+    '--scale': /Invalid render scale/i, '--res': /Invalid --res/i, '--encoder': /Unsupported video encoder/i,
+    '--quality': /Invalid render quality/i,
+  };
   const cases = [
     ['--fps', '0'], ['--fps', 'bad'], ['--fps', '1e308'], ['--range', '100:101'],
     ['--range', '0:1:2'], ['--scene', '1.5'], ['--scene', 'bad'],
+    ['--scale', '0'], ['--res', 'badres'], ['--encoder', 'no_such_encoder'], ['--quality', '99'],
   ];
-  const errors = { '--fps': /Invalid FPS|Render frame count/i, '--range': /--range/i, '--scene': /--scene/i };
   for (const args of cases) {
     const fpsArgs = args[0] === '--fps' ? [] : ['--fps', '4'];
     const r = assertCliFails(['render', 'demo', out, ...fpsArgs, ...args]);
@@ -3256,6 +3261,8 @@ async function runQuickChecks() {
   assert.equal(speechCheck.status, 0, speechCheck.stdout + speechCheck.stderr);
   verifyTimingOutputRegressions();
   verifyRenderCacheIdentityRegressions();
+  const profileCheck = spawnSync(process.execPath, [path.join(PKG_ROOT, 'tools/test-render-profile.mjs')], { encoding: 'utf8', timeout: 30000 });
+  assert.equal(profileCheck.status, 0, profileCheck.stdout + profileCheck.stderr);
   verifyRenderParallelRegressions();
   verifyLargeAssetCacheInvalidation();
   verifyNestedStylesheetCacheInvalidation();
@@ -3330,6 +3337,15 @@ async function main() {
     const outNoBgm = path.join(TEST_ROOT, 'demo-nobgm.mp4');
     const out3 = runCliCmd(['render', 'demo', outNoBgm, '--fps', '10', '--no-bgm']);
     assert.ok(fs.existsSync(outNoBgm) && out3.includes('+ audio ->'), `--no-bgm render must mux voice-only stem, got:\n${out3}`);
+    const outScaled = path.join(TEST_ROOT, 'demo-2x.mp4');
+    const out4 = runCliCmd(['render', 'demo', outScaled, '--fps', '4', '--scale', '2', '--scene', '0']);
+    assert.ok(fs.existsSync(outScaled) && out4.includes('1280x720 (640x360@2x)'), `Scaled render must report 1280x720, got:\n${out4}`);
+    const scaledProbe = spawnSync(resolveFfmpeg(PKG_ROOT), ['-v', 'error', '-i', outScaled, '-vframes', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 8 * 1024 * 1024 });
+    assert.equal(scaledProbe.status, 0);
+    assert.equal(scaledProbe.stdout.length, 1280 * 720 * 3, 'Scaled render MP4 must output 1280x720 pixels');
+    const outAutoEnc = path.join(TEST_ROOT, 'demo-auto-enc.mp4');
+    const out5 = runCliCmd(['render', 'demo', outAutoEnc, '--fps', '4', '--encoder', 'auto', '--scene', '0']);
+    assert.ok(fs.existsSync(outAutoEnc) && /\[(h264_nvenc|h264_qsv|h264_amf|libx264)\]/.test(out5), `Auto encoder render must succeed, got:\n${out5}`);
 
     console.log('[Full 5/5] Bundled project assets and special-character export paths...');
     const distDir = path.join(TEST_ROOT, 'dist');

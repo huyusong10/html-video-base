@@ -1,5 +1,5 @@
 // 无头视频导出引擎：多进程分片并行渲染 + 按幕 SHA-256 内容哈希增量缓存 + 受控 <video>/静态图解码等待
-// 用法：html-video render [video-id] [output.mp4] [--workers 4] [--scene 0] [--range 5:15] [--fps 30] [--lang en] [--no-cache]
+// 用法：html-video render [video-id] [output.mp4] [--workers 4] [--scene 0] [--range 5:15] [--fps 30] [--res 4k] [--scale 2] [--encoder auto|libx264|h264_nvenc|h264_qsv] [--quality 18] [--preset medium] [--lang en] [--no-cache]
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +12,7 @@ import {
   isBgmDisabledCfg, extractRawBgmSrc, localizeMediaRel, normalizeCliArgs, getSceneCacheSnapshot, isMainModule,
 } from './lib/paths.mjs';
 import { startEphemeralVideoServer } from './lib/http-static.mjs';
+import { resolveEncoderProfile, resolveRenderScale } from './lib/render-profile.mjs';
 
 const OPT_HANDLERS = {
   '--workers': (o, v) => { o.workers = Math.max(1, parseInt(v, 10) || 1); },
@@ -19,6 +20,13 @@ const OPT_HANDLERS = {
   '--range': (o, v) => { o.range = v; },
   '--fps': (o, v) => { o.fps = Number(v); },
   '--lang': (o, v) => { o.lang = v; },
+  '--scale': (o, v) => { o.scale = v; },
+  '--res': (o, v) => { o.res = v; },
+  '--encoder': (o, v) => { o.encoder = v; },
+  '--codec': (o, v) => { o.encoder = v; },
+  '--quality': (o, v) => { o.quality = v; },
+  '--crf': (o, v) => { o.quality = v; },
+  '--preset': (o, v) => { o.preset = v; },
 };
 
 const BOOLEAN_FLAGS = {
@@ -29,7 +37,11 @@ const BOOLEAN_FLAGS = {
 
 function parseRenderArgs(rawArgv) {
   const argv = normalizeCliArgs(rawArgv);
-  const opts = { workers: null, scene: null, range: null, fps: null, lang: '', noCache: false, noFrameReuse: false, noBgm: false };
+  const opts = {
+    workers: null, scene: null, range: null, fps: null, lang: '',
+    scale: null, res: null, encoder: null, quality: null, preset: null,
+    noCache: false, noFrameReuse: false, noBgm: false,
+  };
   const pos = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -335,10 +347,11 @@ function hashEntryStyles(h, videoDir) {
   }
 }
 
-function computeSharedVideoDigest(videoDir, W, H, fps, lang, sourceInfo, outputPath) {
+function computeSharedVideoDigest(videoDir, W, H, fps, lang, sourceInfo, outputPath, renderSpec = {}) {
   const h = crypto.createHash('sha256');
   // 渲染规则改变后，旧缓存片段也需要重新生成。
-  h.update(JSON.stringify({ v: '4.1', W, H, fps, lang }));
+  const { scale = 1, outW = W, outH = H, encoder = 'libx264', quality = 18, preset = 'medium' } = renderSpec;
+  h.update(JSON.stringify({ v: '4.2', W, H, outW, outH, scale, fps, lang, encoder, quality, preset }));
   for (const rel of ['css/base.css', 'js/engine.js', 'js/gl.js', 'js/frame-client.js']) {
     const fp = resolveBaseFile(rel, VIDEOS_DIR);
     if (fs.existsSync(fp)) hashFileEntry(h, 'base/' + rel, fp);
@@ -447,10 +460,10 @@ function computeHudSignature(V, cfg, scenes) {
   return `${Math.round(durNorm * 1000)}:${scenes.slice(1).map(s => Math.round((s.start / durNorm) * 10000)).join(',')}`;
 }
 
-export function buildCachedSceneSegments(V, cfg, videoId, videoDir, totalFrames, W, H, fps, lang, outputPath = '') {
+export function buildCachedSceneSegments(V, cfg, videoId, videoDir, totalFrames, W, H, fps, lang, outputPath = '', renderSpec = {}) {
   const scenes = V.scenes || [];
   const sourceInfo = loadSceneCacheSources(videoDir, scenes);
-  const sharedHash = computeSharedVideoDigest(videoDir, W, H, fps, lang, sourceInfo, outputPath);
+  const sharedHash = computeSharedVideoDigest(videoDir, W, H, fps, lang, sourceInfo, outputPath, renderSpec);
   const hudSig = computeHudSignature(V, cfg, scenes);
   const cpParts = scenes.map(s => [s.start, serializeSubSpec(s.checkpoints)]);
   const cacheDir = path.join(ROOT, '.runtime/render-cache', videoId);
@@ -664,8 +677,8 @@ export function installFrameReuseProbe() {
   };
 }
 
-async function openRenderPage(browser, port, videoId, W, H, lang) {
-  const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
+async function openRenderPage(browser, port, videoId, W, H, lang, scale = 1) {
+  const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: scale });
   await page.addInitScript(installFrameReuseProbe);
   const q = lang ? `?record=1&lang=${encodeURIComponent(lang)}` : '?record=1';
   await page.goto(`http://127.0.0.1:${port}/${encodeURIComponent(videoId)}/${q}`, { waitUntil: 'networkidle' });
@@ -716,12 +729,15 @@ async function writeSegmentFrames(page, input, fps, startSec, seg, reuseFrames, 
   }
 }
 
-async function renderSegmentToMp4(page, ffmpegBin, fps, encoderThreads, startSec, seg, reuseFrames, onFrame) {
+async function renderSegmentToMp4(page, ffmpegBin, fps, encoderThreads, startSec, seg, reuseFrames, onFrame, encodeSpec) {
   const tmpOut = `${seg.partPath}.${process.pid}.tmp.mp4`;
+  const videoArgs = encodeSpec
+    ? encodeSpec.buildArgs(encoderThreads)
+    : ['-c:v', 'libx264', '-threads', String(encoderThreads), '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p'];
   const ffArgs = [
     '-y', '-loglevel', 'error',
     '-threads', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-framerate', String(fps), '-i', '-',
-    '-c:v', 'libx264', '-threads', String(encoderThreads), '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
+    ...videoArgs,
     tmpOut,
   ];
   let ff;
@@ -743,7 +759,7 @@ async function renderSegmentToMp4(page, ffmpegBin, fps, encoderThreads, startSec
   }
 }
 
-async function renderMissingSegments({ misses, workerCount, cpuBudget, tmpDir, videoId, W, H, fps, lang, startSec, ffmpegBin, tStartWall, reuseFrames }) {
+async function renderMissingSegments({ misses, workerCount, cpuBudget, tmpDir, videoId, W, H, scale = 1, fps, lang, startSec, ffmpegBin, tStartWall, reuseFrames, encodeSpec }) {
   if (!misses.length) return;
   const totalMissFrames = misses.reduce((a, s) => a + (s.f1 - s.f0), 0);
   const { groups, jobs } = buildRenderTasks(misses, workerCount, fps, tmpDir);
@@ -780,10 +796,10 @@ async function renderMissingSegments({ misses, workerCount, cpuBudget, tmpDir, v
     await Promise.all(Array.from({ length: poolSize }, async () => {
       let page;
       try {
-        page = await openRenderPage(browser, port, videoId, W, H, lang);
+        page = await openRenderPage(browser, port, videoId, W, H, lang, scale);
         while (queue.length > 0 && !firstError) {
           const seg = queue.shift();
-          if (seg) await renderSegmentToMp4(page, ffmpegBin, fps, encoderThreads, startSec, seg, reuseFrames, onFrame);
+          if (seg) await renderSegmentToMp4(page, ffmpegBin, fps, encoderThreads, startSec, seg, reuseFrames, onFrame, encodeSpec);
         }
       } catch (error) {
         if (!firstError) {
@@ -882,7 +898,8 @@ export function resolveRenderConcurrency(totalFrames, opts, cpuCount = os.availa
   const cpuBudget = Math.max(1, cpuCount - 1);
   const maxWorkers = Math.max(1, Math.floor(cpuBudget / 3));
   const frameBudget = Math.max(1, Math.ceil(totalFrames / ((opts.fps || 30) * 10)));
-  const autoCap = opts.maxAutoWorkers == null ? 8 : Math.max(1, Math.floor(positiveRenderNumber(opts.maxAutoWorkers, 'render.maxAutoWorkers')));
+  const rawCap = opts.maxAutoWorkers == null ? 8 : Math.max(1, Math.floor(positiveRenderNumber(opts.maxAutoWorkers, 'render.maxAutoWorkers')));
+  const autoCap = opts.hw ? Math.min(rawCap, 4) : rawCap;
   const autoWorkers = Math.min(8, maxWorkers, frameBudget, autoCap);
   const envWorkers = process.env.WORKERS ? Math.max(1, parseInt(process.env.WORKERS, 10) || 1) : null;
   return { workerCount: Math.min(totalFrames, maxWorkers, opts.workers || envWorkers || autoWorkers), cpuBudget };
@@ -909,10 +926,16 @@ function renderDimension(value, label) {
   return number;
 }
 
-export function resolveStageSpec(V, cfg, opts) {
+export function resolveStageSpec(V, cfg, opts = {}) {
+  const W = renderDimension(cfg.width ?? 1920, 'Stage width');
+  const H = renderDimension(cfg.height ?? 1080, 'Stage height');
+  const { scale, outW, outH } = resolveRenderScale(opts, cfg, W, H);
   return {
-    W: renderDimension(cfg.width ?? 1920, 'Stage width'),
-    H: renderDimension(cfg.height ?? 1080, 'Stage height'),
+    W,
+    H,
+    outW,
+    outH,
+    scale,
     FPS: positiveRenderNumber(opts.fps ?? (process.env.FPS || (cfg.fps ?? 30)), 'FPS'),
     scenes: V.scenes || [],
     fullDur: positiveRenderNumber(V.totalDuration ?? V.duration ?? 1, 'Video duration'),
@@ -920,40 +943,46 @@ export function resolveStageSpec(V, cfg, opts) {
   };
 }
 
+function formatRenderSize(W, H, outW, outH, scale) {
+  return scale === 1 ? `${W}x${H}` : `${outW}x${outH} (${W}x${H}@${scale}x)`;
+}
+
 async function runRenderCli() {
   const { opts, pos } = parseRenderArgs(process.argv.slice(2));
   const VIDEO_ID = resolveTargetVideoId(pos);
   const { sandbox, videoDir, audioRel, bgmRel } = loadVideoSandbox(ROOT, VIDEO_ID, { ignoreBaked: false, requireTimings: false, lang: opts.lang });
   const cfg = getSandboxCfg(sandbox.V);
-  const { W, H, FPS, scenes, fullDur, audioBitrate } = resolveStageSpec(sandbox.V, cfg, opts);
+  const { W, H, outW, outH, scale, FPS, scenes, fullDur, audioBitrate } = resolveStageSpec(sandbox.V, cfg, opts);
 
   const media = resolveOutAndAudio(VIDEO_ID, videoDir, sandbox, cfg, opts, pos, audioRel, bgmRel);
   const { startSec, endSec, isSlice } = resolveTimeWindow(scenes, fullDur, media.hasAudio || media.hasBgm, opts);
   const renderDur = Math.max(1 / FPS, endSec - startSec);
   const totalFrames = Math.max(1, Math.ceil(renderDur * FPS));
   if (!Number.isSafeInteger(totalFrames)) throw new Error('Render frame count exceeds the supported integer range. Reduce the FPS or selected duration.');
-  const { workerCount, cpuBudget } = resolveRenderConcurrency(totalFrames, { ...opts, fps: FPS, maxAutoWorkers: cfg.render?.maxAutoWorkers });
 
   const tmpDir = path.join(ROOT, '.runtime', `render-${VIDEO_ID}-${process.pid}`);
   const ffmpegBin = resolveFfmpeg(ROOT);
+  const encodeSpec = resolveEncoderProfile(opts, cfg, ffmpegBin);
+  const { workerCount, cpuBudget } = resolveRenderConcurrency(totalFrames, { ...opts, fps: FPS, hw: encodeSpec.hw, maxAutoWorkers: cfg.render?.maxAutoWorkers });
+  const renderSpec = { scale, outW, outH, encoder: encodeSpec.encoder, quality: encodeSpec.quality, preset: encodeSpec.preset };
   const tStartWall = Date.now();
 
   try {
     const useSceneCache = !isSlice && !opts.noCache && scenes.length > 0;
     const segments = useSceneCache
-      ? buildCachedSceneSegments(sandbox.V, cfg, VIDEO_ID, videoDir, totalFrames, W, H, FPS, opts.lang, media.outPath)
+      ? buildCachedSceneSegments(sandbox.V, cfg, VIDEO_ID, videoDir, totalFrames, W, H, FPS, opts.lang, media.outPath, renderSpec)
       : buildUncachedChunks(totalFrames, workerCount, tmpDir);
     const misses = segments.filter(s => !s.cached);
     const cacheInfo = useSceneCache ? ` [cache ${segments.length - misses.length}/${segments.length} scenes hit]` : '';
 
     console.log(
-      `Rendering [${VIDEO_ID}] ${W}x${H} @ ${FPS}fps · ${totalFrames} frames ` +
+      `Rendering [${VIDEO_ID}] ${formatRenderSize(W, H, outW, outH, scale)} @ ${FPS}fps [${encodeSpec.encoder}] · ${totalFrames} frames ` +
       `(${startSec.toFixed(2)}s..${endSec.toFixed(2)}s)${cacheInfo}${describeRenderAudio(media.hasAudio, media.hasBgm)} -> ${media.outPath}`
     );
 
     await renderMissingSegments({
-      misses, workerCount, cpuBudget, tmpDir, videoId: VIDEO_ID, W, H, fps: FPS, lang: opts.lang,
-      startSec, ffmpegBin, tStartWall, reuseFrames: !opts.noFrameReuse,
+      misses, workerCount, cpuBudget, tmpDir, videoId: VIDEO_ID, W, H, scale, fps: FPS, lang: opts.lang,
+      startSec, ffmpegBin, tStartWall, reuseFrames: !opts.noFrameReuse, encodeSpec,
     });
 
     await stitchSegmentsAndAudio({

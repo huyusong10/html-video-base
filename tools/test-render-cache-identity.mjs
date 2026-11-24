@@ -248,6 +248,18 @@ function verifyImportedStyles() {
   assert.equal(key(), missing, 'Removing a transitive CSS import must be reflected in the cache key');
 }
 
+function verifyRenderProfileInvalidation() {
+  const { dir } = createFixture('profile-identity', 'V.scene({duration:1,lines:[],build(root){root.style.background="red";},update(){}});');
+  const keyWith = renderSpec => {
+    const { sandbox } = loadVideoSandbox(root, 'profile-identity');
+    return buildCachedSceneSegments(sandbox.V, sandbox.V.config, 'profile-identity', dir, 4, 320, 180, 4, '', '', renderSpec)[0].partPath;
+  };
+  const base = keyWith({ scale: 1, outW: 320, outH: 180, encoder: 'libx264', quality: 18, preset: 'medium' });
+  assert.notEqual(keyWith({ scale: 2, outW: 640, outH: 360, encoder: 'libx264', quality: 18, preset: 'medium' }), base, 'Changing scale/output dimensions must invalidate scene cache');
+  assert.notEqual(keyWith({ scale: 1, outW: 320, outH: 180, encoder: 'h264_nvenc', quality: 19, preset: 'p5' }), base, 'Changing video encoder must invalidate scene cache');
+  assert.notEqual(keyWith({ scale: 1, outW: 320, outH: 180, encoder: 'libx264', quality: 23, preset: 'medium' }), base, 'Changing video quality must invalidate scene cache');
+}
+
 verifyEntryStyleDependency();
 verifyImportedStyles();
 verifySceneFieldBoundaries();
@@ -270,4 +282,5 @@ verifyPreviousSceneEnvelope(1);
 verifyPreviousLayerDefinition(false, 0.5);
 verifyPreviousLayerDefinition(true, 0.5);
 verifyPreviousLayerDefinition(false, 0);
+verifyRenderProfileInvalidation();
 console.log('Scene/source identity, voice words/energy, dynamic registrations, granularity and file identity regressions PASSED.');
